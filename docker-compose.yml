@@ -1,0 +1,19 @@
+services:
+  postgresql:
+    image: pgvector/pgvector:pg17
+    restart: always
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=trust
+      - POSTGRES_DB=remem
+    ports:
+      - "5435:5432"
+
+  text-embeddings:
+    build:
+      context: .
+      dockerfile: tei.Dockerfile
+    # Revision pinned before upstream commit e9b6763 ("v5 Transformers"),
+    # whose config.json duplicates max_position_embeddings and breaks TEI.
+    command: --model-id nomic-ai/nomic-embed-text-v1.5 --revision e5cf08aadaa33385f5990def41f7a23405aec398 --auto-truncate --max-batch-tokens 2048 --port 80
+    ports:
+      - "8081:80"

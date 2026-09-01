@@ -1,0 +1,188 @@
+alias Postgres.Connection
+alias Postgres.QueryResult
+alias Postgres.Value
+
+@doc """
+A typed, directed edge between two entities, addressed by entity
+name. `kind` serializes as `type` in the API, since `type` is a Koja
+keyword.
+"""
+struct Relation: JSON.Encoding
+  created_at: String
+  from: String
+  kind: String
+  to: String
+  updated_at: String
+
+  fn to_json(self) -> JSON.Value
+    [
+      "from": self.from.to_json(), "to": self.to.to_json(),
+      "type": self.kind.to_json(), "created_at": self.created_at.to_json(),
+      "updated_at": self.updated_at.to_json()
+    ]
+  end
+end
+
+@doc """
+Data-access layer over the `relations` table. Rows resolve entity
+ids to names on the way out, and names to ids on the way in, so the
+API deals only in names.
+"""
+struct RelationStore
+  @doc """
+  Creates a relation between two entities by name. Fails with
+  `NotFound` when either entity is missing and `Duplicate` when the
+  relation already exists.
+  """
+  fn create(conn: Connection, from: String, to: String, kind: String)
+    -> (Connection, Result<Relation, Error>)
+
+    (conn, outcome) = conn.execute("""
+      INSERT INTO relations (from_entity_id, to_entity_id, type)
+      SELECT f.id, t.id, $3
+      FROM entities f, entities t
+      WHERE f.name = $1 AND t.name = $2
+      ON CONFLICT (from_entity_id, to_entity_id, type) DO NOTHING
+      RETURNING created_at::text, updated_at::text
+      """, [Value.string(from), Value.string(to), Value.string(kind)])
+
+    match outcome
+      Result.Err(e) ->
+        (conn, Result.Err(Error.Database(e.message())))
+
+      Result.Ok(qr) ->
+        match qr.rows.get(0)
+          Option.Some(row) ->
+            relation = Relation{
+              created_at: row.get(0).map(v -> v.string_or("")).or(""),
+              from: from,
+              kind: kind,
+              to: to,
+              updated_at: row.get(1).map(v -> v.string_or("")).or(""),
+            }
+            (conn, Result.Ok(relation))
+
+          Option.None ->
+            # No row: either an entity is missing (nothing selected)
+            # or the relation already exists (conflict skipped).
+            explain_conflict(conn, from, to, kind)
+        end
+    end
+  end
+
+  @doc """
+  Deletes a relation, returning `true` when a row was removed.
+  """
+  fn remove(conn: Connection, from: String, to: String, kind: String)
+    -> (Connection, Result<Bool, Error>)
+
+    (conn, outcome) = conn.execute("""
+      DELETE FROM relations r
+      USING entities f, entities t
+      WHERE r.from_entity_id = f.id AND r.to_entity_id = t.id
+        AND f.name = $1 AND t.name = $2 AND r.type = $3
+      """, [Value.string(from), Value.string(to), Value.string(kind)])
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) -> (conn, Result.Ok(qr.tag != "DELETE 0"))
+    end
+  end
+
+  @doc """
+  Returns every relation, oldest first, for `GET /graph`.
+  """
+  fn all(conn: Connection) -> (Connection, Result<List<Relation>, Error>)
+    (conn, outcome) = conn.query(select_sql() <> " ORDER BY r.id")
+    collect(conn, outcome)
+  end
+
+  @doc """
+  Returns every relation touching the named entity, oldest first.
+  """
+  fn for_entity(conn: Connection, name: String)
+    -> (Connection, Result<List<Relation>, Error>)
+
+    (conn, outcome) = conn.execute(
+      select_sql() <> " WHERE f.name = $1 OR t.name = $1 ORDER BY r.id",
+      [Value.string(name)],
+    )
+
+    collect(conn, outcome)
+  end
+
+  # Distinguishes the two silent outcomes of `create`: a missing
+  # entity (404) versus an existing relation (409).
+  priv fn explain_conflict(
+    conn: Connection,
+    from: String,
+    to: String,
+    kind: String,
+  ) -> (Connection, Result<Relation, Error>)
+
+    (conn, outcome) = conn.execute(
+      "SELECT count(*)::int8 FROM entities WHERE name = $1 OR name = $2",
+      [Value.string(from), Value.string(to)],
+    )
+
+    match outcome
+      Result.Err(e) ->
+        (conn, Result.Err(Error.Database(e.message())))
+
+      Result.Ok(qr) ->
+        found = qr.rows.get(0)
+          .map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
+          .or(0)
+
+        # Same-name self relations select one entity row, not two.
+        expected = from == to ? 1 : 2
+
+        if found < expected
+          (
+            conn,
+            Result.Err(Error.NotFound("both entities must exist: #{from}, #{to}"))
+          )
+        else
+          (
+            conn,
+            Result.Err(Error.Duplicate("relation #{from} -[#{kind}]-> #{to} already exists"))
+          )
+        end
+    end
+  end
+
+  priv fn collect(
+    conn: Connection,
+    outcome: Result<QueryResult, Postgres.Error>,
+  ) -> (Connection, Result<List<Relation>, Error>)
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) ->
+        (conn, Result.Ok(qr.rows.map(row -> row_to_relation(row))))
+    end
+  end
+
+  priv fn row_to_relation(row: List<Value>) -> Relation
+    Relation{
+      created_at: text_at(row, 3),
+      from: text_at(row, 0),
+      kind: text_at(row, 2),
+      to: text_at(row, 1),
+      updated_at: text_at(row, 4),
+    }
+  end
+
+  priv fn text_at(row: List<Value>, index: Int) -> String
+    row.get(index).map(v -> v.string_or("")).or("")
+  end
+
+  priv fn select_sql -> String
+    """
+    SELECT f.name, t.name, r.type, r.created_at::text, r.updated_at::text
+    FROM relations r
+    JOIN entities f ON f.id = r.from_entity_id
+    JOIN entities t ON t.id = r.to_entity_id
+    """
+  end
+end

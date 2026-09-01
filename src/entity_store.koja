@@ -1,0 +1,493 @@
+alias Postgres.Connection
+alias Postgres.QueryResult
+alias Postgres.Value
+
+@doc """
+One timestamped fact about an entity.
+"""
+struct Observation: JSON.Encoding
+  content: String
+  created_at: String
+  updated_at: String
+
+  fn to_json(self) -> JSON.Value
+    [
+      "content": self.content.to_json(),
+      "created_at": self.created_at.to_json(),
+      "updated_at": self.updated_at.to_json()
+    ]
+  end
+end
+
+@doc """
+An entity in the memory graph: a named concept with timestamped
+observation rows. `kind` serializes as `type` in the API, since
+`type` is a Koja keyword.
+"""
+struct Entity: JSON.Encoding
+  created_at: String
+  id: Int
+  kind: String
+  name: String
+  observations: List<Observation>
+  updated_at: String
+
+  @doc """
+  Returns just the observation sentences, for embedding text.
+  """
+  fn observation_contents(self) -> List<String>
+    self.observations.map(o -> o.content)
+  end
+
+  fn to_json(self) -> JSON.Value
+    [
+      "name": self.name.to_json(), "type": self.kind.to_json(),
+      "observations": JSON.Value.Array(self.observations.map(o -> o.to_json())),
+      "created_at": self.created_at.to_json(),
+      "updated_at": self.updated_at.to_json()
+    ]
+  end
+end
+
+@doc """
+One hybrid search hit: the entity plus its Reciprocal Rank Fusion
+score (larger is more relevant).
+"""
+struct SearchResult: JSON.Encoding
+  entity: Entity
+  score: Float
+
+  fn to_json(self) -> JSON.Value
+    ["entity": self.entity.to_json(), "score": self.score.to_json()]
+  end
+end
+
+# RRF constant and per-strategy candidate depth for hybrid search.
+const RRF_K: Int = 60
+const CANDIDATES: Int = 20
+
+@doc """
+Data-access layer over the `entities` and `observations` tables.
+Every operation threads the Postgres `Connection` through and returns
+it alongside the outcome, so callers rebind. Driver errors wrap into
+the package `Error` at this boundary.
+
+Reads aggregate an entity's observation rows into one JSON column
+(`json_agg`), and observation writes bind as `$n::jsonb` parameters,
+so nothing parses Postgres array literals. Embeddings bind as
+pgvector text literals through `$n::vector`. Observation mutations
+also touch the entity's `updated_at`.
+"""
+struct EntityStore
+  @doc """
+  Inserts a new entity with its observations. The embedding is set
+  separately once the embedder answers (see `set_embedding`).
+  """
+  fn create(
+    conn: Connection,
+    name: String,
+    kind: String,
+    observations: List<String>,
+  ) -> (Connection, Result<Entity, Error>)
+
+    (conn, outcome) = conn.execute(
+      "INSERT INTO entities (name, type) VALUES ($1, $2) RETURNING id",
+      [Value.string(name), Value.string(kind)],
+    )
+
+    entity_id =
+      match outcome
+        Result.Err(e) ->
+          return (
+            conn,
+            Result.Err(Error.from_postgres(e, "entity #{name} already exists"))
+          )
+
+        Result.Ok(qr) ->
+          match qr.rows.get(0)
+            Option.Some(row) -> row.get(0).map(v -> v.int_or(0)).or(0)
+            Option.None ->
+              return (
+                conn, Result.Err(Error.Database("insert returned no row"))
+              )
+          end
+      end
+
+    # An empty observations list inserts zero rows, so no branch.
+    (conn, inserted) = insert_observations(conn, entity_id, observations)
+
+    match inserted
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    require_entity(conn, name)
+  end
+
+  @doc """
+  Looks up a single entity by name.
+  """
+  fn find(conn: Connection, name: String)
+    -> (Connection, Result<Option<Entity>, Error>)
+
+    query_one(
+      conn,
+      "#{select_sql()} WHERE e.name = $1 GROUP BY e.id",
+      [Value.string(name)],
+    )
+  end
+
+  @doc """
+  Returns one page of entities, oldest first. `limit` and `offset`
+  are validated by the router, so they interpolate as plain integers.
+  """
+  fn page(conn: Connection, limit: Int, offset: Int)
+    -> (Connection, Result<List<Entity>, Error>)
+
+    (conn, outcome) = conn.query(
+      "#{select_sql()} GROUP BY e.id ORDER BY e.id LIMIT #{limit} OFFSET #{offset}",
+    )
+
+    collect(conn, outcome)
+  end
+
+  @doc """
+  Returns every entity, oldest first, for `GET /graph`.
+  """
+  fn all(conn: Connection) -> (Connection, Result<List<Entity>, Error>)
+    (conn, outcome) = conn.query("#{select_sql()} GROUP BY e.id ORDER BY e.id")
+    collect(conn, outcome)
+  end
+
+  @doc """
+  Deletes an entity by name, returning `true` when a row was removed.
+  Observations and relations cascade in the database.
+  """
+  fn remove(conn: Connection, name: String) -> (Connection, Result<Bool, Error>)
+    (conn, outcome) = conn.execute(
+      "DELETE FROM entities WHERE name = $1",
+      [Value.string(name)],
+    )
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) -> (conn, Result.Ok(qr.tag != "DELETE 0"))
+    end
+  end
+
+  @doc """
+  Appends observations an entity does not already hold (the unique
+  `(entity_id, content)` constraint deduplicates) and touches the
+  entity's `updated_at`. Returns the updated entity, or `None` for an
+  unknown name.
+  """
+  fn add_observations(
+    conn: Connection,
+    name: String,
+    observations: List<String>,
+  ) -> (Connection, Result<Option<Entity>, Error>)
+
+    (conn, touched) = touch(conn, name)
+
+    maybe_id =
+      match touched
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(m) -> m
+      end
+
+    entity_id =
+      match maybe_id
+        Option.Some(id) ->
+          id
+
+        Option.None ->
+          missing: Option<Entity> = Option.None
+          return (conn, Result.Ok(missing))
+      end
+
+    (conn, inserted) = insert_observations(conn, entity_id, observations)
+
+    match inserted
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    find(conn, name)
+  end
+
+  @doc """
+  Removes every observation matching one of the given strings and
+  touches the entity's `updated_at`. Returns the updated entity, or
+  `None` for an unknown name.
+  """
+  fn remove_observations(
+    conn: Connection,
+    name: String,
+    observations: List<String>,
+  ) -> (Connection, Result<Option<Entity>, Error>)
+
+    (conn, touched) = touch(conn, name)
+
+    maybe_id =
+      match touched
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(m) -> m
+      end
+
+    entity_id =
+      match maybe_id
+        Option.Some(id) ->
+          id
+
+        Option.None ->
+          missing: Option<Entity> = Option.None
+          return (conn, Result.Ok(missing))
+      end
+
+    (conn, outcome) = conn.execute("""
+      DELETE FROM observations
+      WHERE entity_id = $1
+        AND content IN (SELECT jsonb_array_elements_text($2::jsonb))
+      """, [
+        Value.int(entity_id),
+        Value.string(JsonUtil.encode_string_list(observations))
+      ])
+
+    match outcome
+      Result.Err(e) -> return (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(_) -> ()
+    end
+
+    find(conn, name)
+  end
+
+  @doc """
+  Stores a freshly computed embedding for an entity. A no-op for an
+  unknown name (the entity may have been deleted mid-flight).
+  """
+  fn set_embedding(conn: Connection, name: String, vector: String)
+    -> (Connection, Result<(), Error>)
+
+    (conn, outcome) = conn.execute(
+      "UPDATE entities SET embedding = $2::vector WHERE name = $1",
+      [Value.string(name), Value.string(vector)],
+    )
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(_) -> (conn, Result.Ok(()))
+    end
+  end
+
+  @doc """
+  Hybrid search. With a query embedding, semantic ranking (cosine
+  distance) and trigram name ranking merge by Reciprocal Rank Fusion.
+  Without one (embedder down), trigram ranking runs alone.
+  """
+  fn search(
+    conn: Connection,
+    query: String,
+    embedding: Option<String>,
+    limit: Int,
+  ) -> (Connection, Result<List<SearchResult>, Error>)
+
+    (conn, outcome) =
+      match embedding
+        Option.Some(vector) ->
+          conn.execute(
+            hybrid_sql(),
+            [Value.string(vector), Value.string(query), Value.int(limit)],
+          )
+
+        Option.None ->
+          conn.execute(fuzzy_sql(), [Value.string(query), Value.int(limit)])
+      end
+
+    match outcome
+      Result.Err(e) ->
+        (conn, Result.Err(Error.Database(e.message())))
+
+      Result.Ok(qr) ->
+        results = qr.rows.map(row -> SearchResult{
+          entity: row_to_entity(row),
+          score: row.get(6).map(v -> v.float_or(0.0)).or(0.0),
+        })
+        (conn, Result.Ok(results))
+    end
+  end
+
+  priv fn hybrid_sql -> String
+    """
+    WITH semantic AS (
+      SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
+      FROM entities
+      WHERE embedding IS NOT NULL
+      ORDER BY embedding <=> $1::vector
+      LIMIT #{CANDIDATES}
+    ), fuzzy AS (
+      SELECT id, ROW_NUMBER() OVER (ORDER BY similarity(name, $2) DESC) AS rank
+      FROM entities
+      WHERE name % $2
+      ORDER BY similarity(name, $2) DESC
+      LIMIT #{CANDIDATES}
+    ), ranked AS (
+      SELECT id,
+        (COALESCE(1.0 / (#{RRF_K} + s.rank), 0) +
+         COALESCE(1.0 / (#{RRF_K} + f.rank), 0))::float8 AS score
+      FROM semantic s
+      FULL OUTER JOIN fuzzy f USING (id)
+    )
+    SELECT sub.*, r.score
+    FROM (
+      #{select_sql()}
+      GROUP BY e.id
+    ) sub
+    JOIN ranked r ON r.id = sub.id
+    ORDER BY r.score DESC, sub.id
+    LIMIT $3
+    """
+  end
+
+  priv fn fuzzy_sql -> String
+    """
+    WITH ranked AS (
+      SELECT id, similarity(name, $1)::float8 AS score
+      FROM entities
+      WHERE name % $1
+    )
+    SELECT sub.*, r.score
+    FROM (
+      #{select_sql()}
+      GROUP BY e.id
+    ) sub
+    JOIN ranked r ON r.id = sub.id
+    ORDER BY r.score DESC, sub.id
+    LIMIT $2
+    """
+  end
+
+  # Inserts observation rows, skipping ones the entity already holds.
+  priv fn insert_observations(
+    conn: Connection,
+    entity_id: Int,
+    observations: List<String>,
+  ) -> (Connection, Result<(), Error>)
+
+    (conn, outcome) = conn.execute("""
+      INSERT INTO observations (entity_id, content)
+      SELECT $1, t.x FROM jsonb_array_elements_text($2::jsonb) AS t(x)
+      ON CONFLICT (entity_id, content) DO NOTHING
+      """, [
+        Value.int(entity_id),
+        Value.string(JsonUtil.encode_string_list(observations))
+      ])
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(_) -> (conn, Result.Ok(()))
+    end
+  end
+
+  # Bumps an entity's `updated_at`, returning its id or `None` for an
+  # unknown name. Doubles as the existence check for mutations.
+  priv fn touch(conn: Connection, name: String)
+    -> (Connection, Result<Option<Int>, Error>)
+
+    (conn, outcome) = conn.execute(
+      "UPDATE entities SET updated_at = now() WHERE name = $1 RETURNING id",
+      [Value.string(name)],
+    )
+
+    match outcome
+      Result.Err(e) ->
+        (conn, Result.Err(Error.Database(e.message())))
+
+      Result.Ok(qr) ->
+        id = qr.rows.get(0).map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
+        (conn, Result.Ok(id))
+    end
+  end
+
+  # Re-reads an entity that is known to exist, converting the
+  # impossible miss into a database error.
+  priv fn require_entity(conn: Connection, name: String)
+    -> (Connection, Result<Entity, Error>)
+
+    (conn, found) = find(conn, name)
+
+    maybe =
+      match found
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(m) -> m
+      end
+
+    match maybe
+      Option.Some(entity) -> (conn, Result.Ok(entity))
+      Option.None ->
+        (conn, Result.Err(Error.Database("entity #{name} vanished mid-write")))
+    end
+  end
+
+  priv fn query_one(conn: Connection, sql: String, params: List<Value>)
+    -> (Connection, Result<Option<Entity>, Error>)
+
+    (conn, outcome) = conn.execute(sql, params)
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) -> (conn, Result.Ok(first_entity(qr)))
+    end
+  end
+
+  priv fn collect(
+    conn: Connection,
+    outcome: Result<QueryResult, Postgres.Error>,
+  ) -> (Connection, Result<List<Entity>, Error>)
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) -> (conn, Result.Ok(qr.rows.map(row -> row_to_entity(row))))
+    end
+  end
+
+  priv fn first_entity(qr: QueryResult) -> Option<Entity>
+    qr.rows.get(0).map(row -> row_to_entity(row))
+  end
+
+  priv fn row_to_entity(row: List<Value>) -> Entity
+    Entity{
+      created_at: text_at(row, 4),
+      id: row.get(0).map(v -> v.int_or(0)).or(0),
+      kind: text_at(row, 2),
+      name: text_at(row, 1),
+      observations: JsonUtil.decode_observations(text_at(row, 3)),
+      updated_at: text_at(row, 5),
+    }
+  end
+
+  priv fn text_at(row: List<Value>, index: Int) -> String
+    row.get(index).map(v -> v.string_or("")).or("")
+  end
+
+  # Column order every entity read shares:
+  # id, name, type, observations JSON, created_at, updated_at.
+  # Callers append WHERE/JOIN clauses and must GROUP BY e.id.
+  priv fn select_sql -> String
+    """
+    SELECT e.id, e.name, e.type,
+      COALESCE(
+        json_agg(
+          json_build_object(
+            'content', o.content,
+            'created_at', o.created_at::text,
+            'updated_at', o.updated_at::text
+          ) ORDER BY o.id
+        ) FILTER (WHERE o.id IS NOT NULL),
+        '[]'
+      )::text,
+      e.created_at::text, e.updated_at::text
+    FROM entities e
+    LEFT JOIN observations o ON o.entity_id = e.id
+    """
+  end
+end

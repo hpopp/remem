@@ -1,0 +1,585 @@
+alias HTTP.Headers
+alias HTTP.Response
+alias HTTP.Status
+alias JSON.Value as Json
+alias Postgres.Connection
+
+const MCP_PROTOCOL_VERSION: String = "2025-06-18"
+const MCP_DEFAULT_SEARCH_LIMIT: Int = 10
+const MCP_MAX_SEARCH_LIMIT: Int = 100
+
+@doc """
+MCP server endpoint (streamable HTTP transport) at `POST /mcp`. The
+server is stateless and never streams, so each JSON-RPC message gets
+one JSON response and `GET /mcp` is a 405.
+
+Tools mirror the REST API, with one deliberate omission: there is no
+read-the-whole-graph tool. Search is the only way in, so agent
+clients retrieve by relevance instead of loading everything. Tool
+descriptions steer agents to search before writing and to keep the
+graph curated.
+"""
+struct Mcp
+  @doc """
+  Handles one JSON-RPC message. Notifications get 202 with no body.
+  """
+  fn handle(body: String, conn: Connection, embedder: Embedder)
+    -> (Response, Connection)
+
+    root =
+      match JSON.decode(body)
+        Result.Ok(value) -> value
+        Result.Err(_) ->
+          return (
+            rpc_error(Json.Null, -32700, "malformed JSON-RPC message"), conn
+          )
+      end
+
+    method = JsonUtil.get_string(root, "method").or("")
+
+    id =
+      match JsonUtil.get(root, "id")
+        Option.Some(value) -> value
+        Option.None -> return (accepted(), conn)
+      end
+
+    match method
+      "initialize" -> (rpc_result(id, initialize_result()), conn)
+      "ping" -> (rpc_result(id, empty_object()), conn)
+      "tools/list" -> (rpc_result(id, tools_result()), conn)
+      "tools/call" -> call_tool(root, id, conn, embedder)
+      _ -> (rpc_error(id, -32601, "no such method #{method}"), conn)
+    end
+  end
+
+  @doc """
+  The tool catalog, exposed for `tools/list` and tests.
+  """
+  fn tools -> Json
+    search_description = "Search the memory graph with a natural " <>
+      "language query. Ranking is hybrid: semantic similarity over " <>
+      "entity content plus fuzzy name matching. This is the way to " <>
+      "recall stored knowledge. Always search before writing, to " <>
+      "build on what is already known."
+
+    create_description = "Create a new entity. The memory graph is " <>
+      "curated: only save durable facts worth recalling in future " <>
+      "conversations, not session details. Search first and prefer " <>
+      "add_observations on an existing entity over creating a " <>
+      "near-duplicate."
+
+    delete_description = "Delete an entity by name. Its observations " <>
+      "and relations go with it."
+
+    add_description = "Add facts to an existing entity. Duplicates " <>
+      "are ignored. Keep observations short, factual, and durable."
+
+    relation_description = "Create a directed, typed relation between " <>
+      "two entities. Use an active verb phrase for the type, like " <>
+      "wrote or depends_on."
+
+    Json.Array([
+      tool(
+        "search_memory",
+        search_description,
+        object_schema(
+          [
+            ("query", string_prop("Natural language search query")),
+            ("limit", int_prop("Max results, 1-100, default 10"))
+          ],
+          ["query"],
+        ),
+      ),
+      tool(
+        "get_entity",
+        "Fetch one entity and its relations by exact name.",
+        object_schema([("name", string_prop("Entity name"))], ["name"]),
+      ),
+      tool(
+        "create_entity",
+        create_description,
+        object_schema(
+          [
+            ("name", string_prop("Unique entity name")),
+            ("type", string_prop("Entity type, like person or project")),
+            (
+              "observations",
+              string_array_prop("Initial facts about the entity")
+            )
+          ],
+          ["name", "type"],
+        ),
+      ),
+      tool(
+        "delete_entity",
+        delete_description,
+        object_schema([("name", string_prop("Entity name"))], ["name"]),
+      ),
+      tool(
+        "add_observations",
+        add_description,
+        object_schema(
+          [
+            ("name", string_prop("Entity name")),
+            ("observations", string_array_prop("Facts to add"))
+          ],
+          ["name", "observations"],
+        ),
+      ),
+      tool(
+        "remove_observations",
+        "Remove exact-match facts from an entity.",
+        object_schema(
+          [
+            ("name", string_prop("Entity name")),
+            ("observations", string_array_prop("Facts to remove"))
+          ],
+          ["name", "observations"],
+        ),
+      ),
+      tool(
+        "create_relation",
+        relation_description,
+        object_schema(
+          [
+            ("from", string_prop("Source entity name")),
+            ("to", string_prop("Target entity name")),
+            ("type", string_prop("Relation type, an active verb phrase"))
+          ],
+          ["from", "to", "type"],
+        ),
+      ),
+      tool(
+        "delete_relation",
+        "Delete a relation by its exact from, to, and type.",
+        object_schema(
+          [
+            ("from", string_prop("Source entity name")),
+            ("to", string_prop("Target entity name")),
+            ("type", string_prop("Relation type"))
+          ],
+          ["from", "to", "type"],
+        ),
+      )
+    ])
+  end
+
+  # ---------------------------------------------------------------
+  # Tool dispatch
+  # ---------------------------------------------------------------
+
+  priv fn call_tool(root: Json, id: Json, conn: Connection, embedder: Embedder)
+    -> (Response, Connection)
+
+    params = JsonUtil.get(root, "params").or(Json.Null)
+    name = JsonUtil.get_string(params, "name").or("")
+    arguments = JsonUtil.get(params, "arguments").or(Json.Null)
+
+    # The access log only shows POST /mcp, so name the tool here.
+    Log.info("mcp tools/call #{name}")
+
+    match name
+      "search_memory" ->
+        tool_search(arguments, id, conn, embedder)
+
+      "get_entity" ->
+        tool_get_entity(arguments, id, conn)
+
+      "create_entity" ->
+        tool_create_entity(arguments, id, conn, embedder)
+
+      "delete_entity" ->
+        tool_delete_entity(arguments, id, conn)
+
+      "add_observations" ->
+        tool_mutate_observations(arguments, id, conn, embedder, true)
+
+      "remove_observations" ->
+        tool_mutate_observations(arguments, id, conn, embedder, false)
+
+      "create_relation" ->
+        tool_create_relation(arguments, id, conn)
+
+      "delete_relation" ->
+        tool_delete_relation(arguments, id, conn)
+
+      _ ->
+        (rpc_error(id, -32602, "no such tool #{name}"), conn)
+    end
+  end
+
+  priv fn tool_search(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+  ) -> (Response, Connection)
+
+    query =
+      match JsonUtil.get_string(arguments, "query")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "query is required"), conn)
+      end
+
+    limit = JsonUtil.get_int(arguments, "limit").or(MCP_DEFAULT_SEARCH_LIMIT)
+
+    unless limit >= 1 and limit <= MCP_MAX_SEARCH_LIMIT
+      return (
+        tool_err(id, "limit must be between 1 and #{MCP_MAX_SEARCH_LIMIT}"),
+        conn
+      )
+    end
+
+    # The log is bookkeeping: a failed insert never fails the search.
+    (conn, logged) = SearchLog.record(conn, query)
+
+    match logged
+      Result.Err(e) -> Log.warn("search log: " <> e.message())
+      Result.Ok(_) -> ()
+    end
+
+    # Embedder down means fuzzy-only ranking, not a failed search.
+    embedding: Option<String> =
+      match embedder.embed(query)
+        Result.Ok(vector) ->
+          Option.Some(vector)
+
+        Result.Err(e) ->
+          Log.warn("search: " <> e.message() <> "; using fuzzy ranking only")
+          Option.None
+      end
+
+    (conn, found) = EntityStore.search(conn, query, embedding, limit)
+
+    match found
+      Result.Err(e) ->
+        (tool_err(id, e.message()), conn)
+
+      Result.Ok(results) ->
+        payload: Json = [
+          "query": query.to_json(),
+          "results": Json.Array(results.map(r -> r.to_json()))
+        ]
+        (tool_ok(id, payload), conn)
+    end
+  end
+
+  priv fn tool_get_entity(arguments: Json, id: Json, conn: Connection)
+    -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "name is required"), conn)
+      end
+
+    (conn, found) = EntityStore.find(conn, name)
+
+    maybe =
+      match found
+        Result.Err(e) -> return (tool_err(id, e.message()), conn)
+        Result.Ok(m) -> m
+      end
+
+    entity =
+      match maybe
+        Option.None -> return (tool_err(id, "no entity named #{name}"), conn)
+        Option.Some(present) -> present
+      end
+
+    (conn, relations) = RelationStore.for_entity(conn, name)
+
+    match relations
+      Result.Err(e) ->
+        (tool_err(id, e.message()), conn)
+
+      Result.Ok(relation_list) ->
+        payload: Json = [
+          "entity": entity.to_json(),
+          "relations": Json.Array(relation_list.map(r -> r.to_json()))
+        ]
+        (tool_ok(id, payload), conn)
+    end
+  end
+
+  priv fn tool_create_entity(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+  ) -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "name is required"), conn)
+      end
+
+    kind =
+      match JsonUtil.get_string(arguments, "type")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "type is required"), conn)
+      end
+
+    observations = JsonUtil.distinct(
+      JsonUtil.get_string_list(arguments, "observations").or(List.new()),
+    )
+
+    (conn, created) = EntityStore.create(conn, name, kind, observations)
+
+    match created
+      Result.Err(e) ->
+        (tool_err(id, e.message()), conn)
+
+      Result.Ok(entity) ->
+        conn = Router.refresh_embedding(conn, embedder, entity)
+        (tool_ok(id, entity.to_json()), conn)
+    end
+  end
+
+  priv fn tool_delete_entity(arguments: Json, id: Json, conn: Connection)
+    -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "name is required"), conn)
+      end
+
+    (conn, removed) = EntityStore.remove(conn, name)
+
+    match removed
+      Result.Err(e) -> (tool_err(id, e.message()), conn)
+      Result.Ok(deleted) ->
+        deleted
+          ? (tool_text(id, "deleted #{name}"), conn)
+          : (tool_err(id, "no entity named #{name}"), conn)
+    end
+  end
+
+  priv fn tool_mutate_observations(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+    add: Bool,
+  ) -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "name is required"), conn)
+      end
+
+    observations =
+      match JsonUtil.get_string_list(arguments, "observations")
+        Option.Some(list) when not list.empty?() -> JsonUtil.distinct(list)
+        _ ->
+          return (
+            tool_err(id, "observations must be a non-empty string array"), conn
+          )
+      end
+
+    (conn, updated) = add
+      ? EntityStore.add_observations(conn, name, observations)
+      : EntityStore.remove_observations(conn, name, observations)
+
+    maybe =
+      match updated
+        Result.Err(e) -> return (tool_err(id, e.message()), conn)
+        Result.Ok(m) -> m
+      end
+
+    match maybe
+      Option.None ->
+        (tool_err(id, "no entity named #{name}"), conn)
+
+      Option.Some(entity) ->
+        conn = Router.refresh_embedding(conn, embedder, entity)
+        (tool_ok(id, entity.to_json()), conn)
+    end
+  end
+
+  priv fn tool_create_relation(arguments: Json, id: Json, conn: Connection)
+    -> (Response, Connection)
+
+    (from, to, kind) =
+      match relation_args(arguments)
+        Result.Ok(parsed) -> parsed
+        Result.Err(message) -> return (tool_err(id, message), conn)
+      end
+
+    (conn, created) = RelationStore.create(conn, from, to, kind)
+
+    match created
+      Result.Err(e) -> (tool_err(id, e.message()), conn)
+      Result.Ok(relation) -> (tool_ok(id, relation.to_json()), conn)
+    end
+  end
+
+  priv fn tool_delete_relation(arguments: Json, id: Json, conn: Connection)
+    -> (Response, Connection)
+
+    (from, to, kind) =
+      match relation_args(arguments)
+        Result.Ok(parsed) -> parsed
+        Result.Err(message) -> return (tool_err(id, message), conn)
+      end
+
+    (conn, removed) = RelationStore.remove(conn, from, to, kind)
+
+    match removed
+      Result.Err(e) -> (tool_err(id, e.message()), conn)
+      Result.Ok(deleted) ->
+        deleted
+          ? (tool_text(id, "deleted #{from} -[#{kind}]-> #{to}"), conn)
+          : (tool_err(id, "no relation #{from} -[#{kind}]-> #{to}"), conn)
+    end
+  end
+
+  priv fn relation_args(arguments: Json)
+    -> Result<(String, String, String), String>
+
+    from =
+      match JsonUtil.get_string(arguments, "from")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return Result.Err("from is required")
+      end
+
+    to =
+      match JsonUtil.get_string(arguments, "to")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return Result.Err("to is required")
+      end
+
+    kind =
+      match JsonUtil.get_string(arguments, "type")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return Result.Err("type is required")
+      end
+
+    Result.Ok((from, to, kind))
+  end
+
+  # ---------------------------------------------------------------
+  # Protocol plumbing
+  # ---------------------------------------------------------------
+
+  priv fn initialize_result -> Json
+    result: Json = [
+      "protocolVersion": MCP_PROTOCOL_VERSION.to_json(),
+      "capabilities": ["tools": empty_object()],
+      "serverInfo": ["name": "remem".to_json(), "version": "0.1.0".to_json()]
+    ]
+    result
+  end
+
+  priv fn tools_result -> Json
+    result: Json = ["tools": tools()]
+    result
+  end
+
+  # A successful tool call: the payload rides as JSON text content.
+  priv fn tool_ok(id: Json, payload: Json) -> Response
+    rpc_result(id, tool_result(JSON.encode(payload), false))
+  end
+
+  priv fn tool_text(id: Json, text: String) -> Response
+    rpc_result(id, tool_result(text, false))
+  end
+
+  priv fn tool_err(id: Json, message: String) -> Response
+    Log.warn("mcp tool error: " <> message)
+    rpc_result(id, tool_result(message, true))
+  end
+
+  priv fn tool_result(text: String, is_error: Bool) -> Json
+    item: Json = ["type": "text".to_json(), "text": text.to_json()]
+    result: Json = [
+      "content": Json.Array([item]), "isError": is_error.to_json()
+    ]
+    result
+  end
+
+  priv fn tool(name: String, description: String, schema: Json) -> Json
+    entry: Json = [
+      "name": name.to_json(), "description": description.to_json(),
+      "inputSchema": schema
+    ]
+    entry
+  end
+
+  priv fn object_schema(
+    properties: List<(String, Json)>,
+    required: List<String>,
+  ) -> Json
+
+    schema: Json = [
+      "type": "object".to_json(), "properties": Json.Object(properties),
+      "required": Json.Array(required.map(r -> r.to_json()))
+    ]
+    schema
+  end
+
+  priv fn string_prop(description: String) -> Json
+    prop: Json = [
+      "type": "string".to_json(), "description": description.to_json()
+    ]
+    prop
+  end
+
+  priv fn int_prop(description: String) -> Json
+    prop: Json = [
+      "type": "integer".to_json(), "description": description.to_json()
+    ]
+    prop
+  end
+
+  priv fn string_array_prop(description: String) -> Json
+    items: Json = ["type": "string".to_json()]
+    prop: Json = [
+      "type": "array".to_json(), "items": items,
+      "description": description.to_json()
+    ]
+    prop
+  end
+
+  priv fn rpc_result(id: Json, result: Json) -> Response
+    body: Json = ["jsonrpc": "2.0".to_json(), "id": id, "result": result]
+    http_json(body)
+  end
+
+  priv fn rpc_error(id: Json, code: Int, message: String) -> Response
+    detail: Json = ["code": code.to_json(), "message": message.to_json()]
+    body: Json = ["jsonrpc": "2.0".to_json(), "id": id, "error": detail]
+    http_json(body)
+  end
+
+  priv fn empty_object -> Json
+    entries: List<(String, Json)> = List.new()
+    Json.Object(entries)
+  end
+
+  priv fn http_json(body: Json) -> Response
+    text = JSON.encode(body)
+    headers = Headers.new()
+      .set("Content-Type", "application/json")
+      .set("Content-Length", "#{text.byte_length()}")
+    Response{
+      body: text,
+      headers: headers,
+      status: Status.ok(),
+      version: "HTTP/1.1",
+    }
+  end
+
+  priv fn accepted -> Response
+    headers = Headers.new().set("Content-Length", "0")
+    Response{
+      body: "",
+      headers: headers,
+      status: Status.new(202, "Accepted"),
+      version: "HTTP/1.1",
+    }
+  end
+end

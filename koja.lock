@@ -1,0 +1,7 @@
+version = 1
+
+[[package]]
+name = "postgres"
+requirement = "tag = v0.3.0"
+rev = "e04e89a605f85618f07247a380702e8ad3192c0c"
+source = "git+https://github.com/hpopp/postgres-koja"

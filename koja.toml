@@ -1,0 +1,9 @@
+[project]
+entry = "App"
+koja = "0.18"
+name = "remem"
+version = "0.1.0"
+
+[dependencies]
+pooler = { path = "lib/pooler" }
+postgres = { github = "hpopp/postgres-koja", tag = "v0.3.0" }

@@ -1,0 +1,77 @@
+alias HTTP.Headers
+alias JSON.Value as Json
+
+@doc """
+Client for a TEI-protocol embedding server (nomic-embed-text,
+768 dimensions). `embed` returns the vector as a pgvector text
+literal (`[0.1,0.2,...]`), ready to bind as a `$n::vector` parameter.
+"""
+struct Embedder
+  url: String
+
+  @doc """
+  Requests an embedding for `text`. Fails with `Error.Embedding` when
+  the server is unreachable, answers non-200, or returns a shape
+  other than one array of numbers.
+  """
+  fn embed(self, text: String) -> String ! Error
+    payload: Json = ["inputs": text.to_json()]
+    headers = Headers.new().set("Content-Type", "application/json")
+
+    response = HTTP.post(self.url <> "/embed", JSON.encode(payload), headers)
+      rescue e -> fail Error.Embedding(e.message())
+
+    unless response.status.code == 200
+      fail Error.Embedding("embedding server returned #{response.status.code}: " <>
+        response.body)
+    end
+
+    decoded = JSON.decode(response.body)
+      rescue e -> fail Error.Embedding("malformed response: " <> e)
+
+    try vector_literal(decoded)
+  end
+
+  # TEI answers `[[f1, f2, ...]]`: one inner array per input.
+  priv fn vector_literal(decoded: Json) -> String ! Error
+    inner =
+      match decoded
+        Json.Array(outer) ->
+          match outer.first()
+            Option.Some(Json.Array(numbers)) -> numbers
+            _ -> fail Error.Embedding("expected a nested array of floats")
+          end
+
+        _ ->
+          fail Error.Embedding("expected a JSON array response")
+      end
+
+    parts: List<String> = List.new()
+
+    for number in inner
+      part =
+        match number
+          Json.Float(f) -> "#{f}"
+          Json.Int(i) -> "#{i}"
+          _ -> fail Error.Embedding("expected numeric vector components")
+        end
+
+      parts = parts.append(part)
+    end
+
+    "[" <> String.join(parts, ",") <> "]"
+  end
+end
+
+@doc """
+Composes the text an entity embeds under: `name (type)` followed by
+the observations joined as sentences. Recomputed on entity create and
+every observation change.
+"""
+fn embedding_text(name: String, kind: String, observations: List<String>)
+  -> String
+
+  base = "#{name} (#{kind})"
+
+  observations.empty?() ? base : base <> ": " <> String.join(observations, ". ")
+end

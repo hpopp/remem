@@ -1,0 +1,27 @@
+alias Postgres.Connection
+alias Postgres.Value
+
+@doc """
+Append-only log of search queries, one row per `GET /search`. The
+log captures what callers wanted from the graph, which later feeds
+relevance work (recency and frequency of topics) and upkeep (queries
+that match nothing reveal gaps, entities no query ever surfaces are
+prune candidates). Rows are never updated, so there is no
+`updated_at`.
+"""
+struct SearchLog
+  @doc """
+  Records one search query.
+  """
+  fn record(conn: Connection, query: String) -> (Connection, Result<(), Error>)
+    (conn, outcome) = conn.execute(
+      "INSERT INTO search_log (query) VALUES ($1)",
+      [Value.string(query)],
+    )
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(_) -> (conn, Result.Ok(()))
+    end
+  end
+end

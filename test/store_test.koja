@@ -1,0 +1,294 @@
+alias Postgres.Config as DbConfig
+alias Postgres.Connection
+
+@doc """
+Integration tests against the compose Postgres (port 5435). Start it
+with `docker compose up -d` before `koja test`. Test entities use the
+`itest-` prefix and are removed at both ends of the run.
+"""
+struct StoreTest
+  @test "entity and relation lifecycle against compose Postgres"
+  fn test_lifecycle -> Bool ! String
+    conn = try connect()
+    conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
+    conn = try cleanup(conn)
+
+    # Create two entities.
+    (conn, created) = EntityStore.create(
+      conn,
+      "itest-koja",
+      "language",
+      ["compiled to native binaries"],
+    )
+    koja = created rescue e -> fail "create koja: " <> e.message()
+
+    unless koja.name == "itest-koja" and koja.kind == "language"
+      fail "created entity has wrong fields"
+    end
+
+    (conn, created) = EntityStore.create(
+      conn,
+      "itest-postgres",
+      "database",
+      List.new(),
+    )
+    postgres_entity = created
+      rescue e -> fail "create postgres: " <> e.message()
+
+    unless postgres_entity.kind == "database"
+      fail "created postgres entity has wrong type"
+    end
+
+    # Duplicate names are conflicts.
+    (conn, duplicate) = EntityStore.create(
+      conn,
+      "itest-koja",
+      "language",
+      List.new(),
+    )
+
+    match duplicate
+      Result.Err(Error.Duplicate(_)) -> ()
+      Result.Err(e) -> fail "wrong duplicate error: " <> e.message()
+      Result.Ok(_) -> fail "duplicate create should fail"
+    end
+
+    # Observations append (deduplicated) and remove.
+    (conn, updated) = EntityStore.add_observations(
+      conn,
+      "itest-koja",
+      ["compiled to native binaries", "value semantics"],
+    )
+
+    maybe = updated rescue e -> fail "add observations: " <> e.message()
+
+    entity =
+      match maybe
+        Option.None -> fail "entity vanished"
+        Option.Some(present) -> present
+      end
+
+    unless entity.observations.length() == 2
+      fail "expected 2 observations, got #{entity.observations.length()}"
+    end
+
+    (conn, updated) = EntityStore.remove_observations(
+      conn,
+      "itest-koja",
+      ["compiled to native binaries"],
+    )
+
+    maybe = updated rescue e -> fail "remove observations: " <> e.message()
+
+    entity =
+      match maybe
+        Option.None -> fail "entity vanished"
+        Option.Some(present) -> present
+      end
+
+    unless entity.observations.length() == 1
+      fail "expected 1 observation, got #{entity.observations.length()}"
+    end
+
+    # Relations: create, duplicate conflict, unknown entity.
+    (conn, related) = RelationStore.create(
+      conn,
+      "itest-koja",
+      "itest-postgres",
+      "talks_to",
+    )
+    relation = related rescue e -> fail "create relation: " <> e.message()
+
+    unless relation.from == "itest-koja" and relation.kind == "talks_to"
+      fail "created relation has wrong fields"
+    end
+
+    (conn, again) = RelationStore.create(
+      conn,
+      "itest-koja",
+      "itest-postgres",
+      "talks_to",
+    )
+
+    match again
+      Result.Err(Error.Duplicate(_)) -> ()
+      Result.Err(e) -> fail "wrong relation duplicate error: " <> e.message()
+      Result.Ok(_) -> fail "duplicate relation should fail"
+    end
+
+    (conn, missing) = RelationStore.create(
+      conn,
+      "itest-koja",
+      "itest-ghost",
+      "haunts",
+    )
+
+    match missing
+      Result.Err(Error.NotFound(_)) -> ()
+      Result.Err(e) -> fail "wrong missing-entity error: " <> e.message()
+      Result.Ok(_) -> fail "relation to unknown entity should fail"
+    end
+
+    (conn, touching) = RelationStore.for_entity(conn, "itest-koja")
+    relations = touching rescue e -> fail "for_entity: " <> e.message()
+
+    unless relations.length() == 1
+      fail "expected 1 relation, got #{relations.length()}"
+    end
+
+    # Fuzzy search finds a typo'd name without any embeddings.
+    (conn, found) = EntityStore.search(conn, "itest-kojaa", Option.None, 10)
+    results = found rescue e -> fail "fuzzy search: " <> e.message()
+
+    unless results.any?(r -> r.entity.name == "itest-koja")
+      fail "fuzzy search missed itest-koja"
+    end
+
+    # Hybrid search ranks the semantically closest entity first.
+    (conn, stored) = EntityStore.set_embedding(
+      conn,
+      "itest-koja",
+      axis_vector(0),
+    )
+
+    match stored
+      Result.Err(e) -> fail "set_embedding koja: " <> e.message()
+      Result.Ok(_) -> ()
+    end
+
+    (conn, stored) = EntityStore.set_embedding(
+      conn,
+      "itest-postgres",
+      axis_vector(1),
+    )
+
+    match stored
+      Result.Err(e) -> fail "set_embedding postgres: " <> e.message()
+      Result.Ok(_) -> ()
+    end
+
+    (conn, found) = EntityStore.search(
+      conn,
+      "no-name-overlap",
+      Option.Some(axis_vector(1)),
+      10,
+    )
+    results = found rescue e -> fail "hybrid search: " <> e.message()
+
+    top =
+      match results.first()
+        Option.None -> fail "hybrid search returned nothing"
+        Option.Some(hit) -> hit
+      end
+
+    unless top.entity.name == "itest-postgres"
+      fail "expected itest-postgres first, got " <> top.entity.name
+    end
+
+    # Deleting an entity cascades its relations.
+    (conn, removed) = EntityStore.remove(conn, "itest-postgres")
+    deleted = removed rescue e -> fail "remove: " <> e.message()
+
+    unless deleted
+      fail "expected a deleted row"
+    end
+
+    (conn, touching) = RelationStore.for_entity(conn, "itest-koja")
+    relations = touching rescue e -> fail "for_entity after: " <> e.message()
+
+    unless relations.empty?()
+      fail "relations should cascade on entity delete"
+    end
+
+    conn = try cleanup(conn)
+
+    match conn.close()
+      _ -> ()
+    end
+
+    true
+  end
+
+  @test "search log records queries with timestamps"
+  fn test_search_log -> Bool ! String
+    conn = try connect()
+    conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
+
+    (conn, logged) = SearchLog.record(conn, "itest-query")
+
+    match logged
+      Result.Err(e) -> fail "record: " <> e.message()
+      Result.Ok(_) -> ()
+    end
+
+    (conn, outcome) = conn.query("""
+    SELECT count(*)::int, max(created_at::text)
+    FROM search_log
+    WHERE query = 'itest-query'
+    """)
+
+    qr =
+      match outcome
+        Result.Err(e) -> fail "select: " <> e.message()
+        Result.Ok(result) -> result
+      end
+
+    row =
+      match qr.rows.first()
+        Option.None -> fail "count query returned nothing"
+        Option.Some(present) -> present
+      end
+
+    unless row.get(0).map(v -> v.int_or(0)).or(0) >= 1
+      fail "expected a logged query row"
+    end
+
+    unless not row.get(1).map(v -> v.string_or("")).or("").empty?()
+      fail "logged query has no created_at"
+    end
+
+    (conn, outcome) = conn.query(
+      "DELETE FROM search_log WHERE query = 'itest-query'",
+    )
+
+    match outcome
+      Result.Err(e) -> fail "log cleanup: " <> e.message()
+      Result.Ok(_) -> ()
+    end
+
+    match conn.close()
+      _ -> ()
+    end
+
+    true
+  end
+
+  # A 768-dim unit vector along the given axis, as a pgvector literal.
+  priv fn axis_vector(axis: Int) -> String
+    parts: List<String> = List.new()
+
+    for i in Range{start: 0, stop: 767}
+      parts = parts.append(i == axis ? "1" : "0")
+    end
+
+    "[" <> String.join(parts, ",") <> "]"
+  end
+
+  priv fn connect -> Connection ! String
+    config = DbConfig.new("127.0.0.1", 5435, "postgres", "remem")
+
+    Connection.connect(config)
+      rescue e -> fail "connect (is docker compose up?): " <> e.message()
+  end
+
+  priv fn cleanup(conn: Connection) -> Connection ! String
+    (conn, outcome) = conn.query(
+      "DELETE FROM entities WHERE name LIKE 'itest-%'",
+    )
+
+    match outcome
+      Result.Err(e) -> fail "cleanup: " <> e.message()
+      Result.Ok(_) -> conn
+    end
+  end
+end

@@ -1,0 +1,24 @@
+struct McpTest
+  @test "tool catalog lists every tool with a schema"
+  fn test_tool_catalog -> Bool ! String
+    encoded = JSON.encode(Mcp.tools())
+
+    names = [
+      "search_memory", "get_entity", "create_entity", "delete_entity",
+      "add_observations", "remove_observations", "create_relation",
+      "delete_relation"
+    ]
+
+    for name in names
+      unless encoded.contains?("\"#{name}\"")
+        fail "catalog is missing #{name}"
+      end
+    end
+
+    unless encoded.contains?("\"inputSchema\"")
+      fail "catalog has no input schemas"
+    end
+
+    true
+  end
+end

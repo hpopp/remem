@@ -1,0 +1,61 @@
+@doc """
+Runtime configuration, resolved from the environment with defaults
+that match `docker-compose.yml`.
+
+The entry process receives a zero-initialized config from the runtime
+(non-argv `Process` configs are not populated), so `load` reads the
+environment directly rather than trusting the passed-in value.
+"""
+struct Config
+  api_key: Option<String>
+  db_host: String
+  db_name: String
+  db_password: String
+  db_port: Int
+  db_statement_cache: Int
+  db_user: String
+  embedding_url: String
+  port: Int
+
+  @doc """
+  Builds a `Config` from the environment, falling back to defaults
+  suitable for local development against the bundled compose stack.
+  Set `API_KEY` to require bearer auth on every route except
+  `GET /health`. Set `DB_STATEMENT_CACHE=0` to turn the driver
+  statement cache off.
+  """
+  fn load -> Config
+    Config{
+      api_key: env_opt("API_KEY"),
+      db_host: env_or("DB_HOST", "127.0.0.1"),
+      db_name: env_or("DB_NAME", "remem"),
+      db_password: env_or("DB_PASSWORD", ""),
+      db_port: env_int("DB_PORT", 5435),
+      db_statement_cache: env_int("DB_STATEMENT_CACHE", 256),
+      db_user: env_or("DB_USER", "postgres"),
+      embedding_url: env_or("EMBEDDING_URL", "http://127.0.0.1:8081"),
+      port: env_int("PORT", 8080),
+    }
+  end
+
+  priv fn env_opt(key: String) -> Option<String>
+    match System.get_env(key)
+      Option.Some(value) -> value.empty?() ? Option.None : Option.Some(value)
+      Option.None -> Option.None
+    end
+  end
+
+  priv fn env_or(key: String, fallback: String) -> String
+    match System.get_env(key)
+      Option.Some(value) -> value.empty?() ? fallback : value
+      Option.None -> fallback
+    end
+  end
+
+  priv fn env_int(key: String, fallback: Int) -> Int
+    match System.get_env(key)
+      Option.None -> fallback
+      Option.Some(value) -> value.to_int() rescue _ -> fallback
+    end
+  end
+end

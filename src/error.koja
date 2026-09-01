@@ -1,0 +1,41 @@
+@doc """
+Every error the remem package can produce. Store and embedding
+failures wrap into these variants at the package boundary, and the
+router maps each variant to an HTTP status.
+"""
+enum Error
+  Database(String)
+  Duplicate(String)
+  Embedding(String)
+  NotFound(String)
+  Validation(String)
+
+  @doc """
+  Returns a human-readable description of the error.
+  """
+  fn message(self) -> String
+    match self
+      Error.Database(detail) -> "database error: " <> detail
+      Error.Duplicate(detail) -> detail
+      Error.Embedding(detail) -> "embedding error: " <> detail
+      Error.NotFound(detail) -> detail
+      Error.Validation(detail) -> detail
+    end
+  end
+
+  @doc """
+  Wraps a driver error. A unique violation (SQLSTATE 23505) becomes
+  `Duplicate` with the given description, everything else `Database`.
+  """
+  fn from_postgres(e: Postgres.Error, duplicate: String) -> Error
+    match e
+      Postgres.Error.Server(server_error) ->
+        server_error.code == "23505"
+          ? Error.Duplicate(duplicate)
+          : Error.Database(e.message())
+
+      _ ->
+        Error.Database(e.message())
+    end
+  end
+end

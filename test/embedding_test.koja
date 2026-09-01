@@ -1,0 +1,28 @@
+struct EmbeddingTest
+  @test "embedding_text without observations is name and type"
+  fn test_bare -> Bool ! String
+    actual = embedding_text("Koja", "language", List.new())
+
+    unless actual == "Koja (language)"
+      fail "got: " <> actual
+    end
+
+    true
+  end
+
+  @test "embedding_text joins observations as sentences"
+  fn test_with_observations -> Bool ! String
+    actual = embedding_text(
+      "Koja",
+      "language",
+      ["compiled to native", "value semantics"],
+    )
+    expected = "Koja (language): compiled to native. value semantics"
+
+    unless actual == expected
+      fail "got: " <> actual
+    end
+
+    true
+  end
+end

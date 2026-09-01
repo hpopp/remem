@@ -1,0 +1,125 @@
+alias Postgres.Connection
+
+@doc """
+One schema migration: a single SQL statement keyed by version.
+"""
+struct Migration
+  version: Int
+  sql: String
+end
+
+@doc """
+Startup schema migrations. Applied versions are recorded in
+`schema_migrations`, so reruns are no-ops.
+"""
+struct Migrator
+  @doc """
+  Applies every pending migration in version order. Returns the
+  updated connection, or the first failure as `Error.Database`.
+  """
+  fn run(conn: Connection) -> Connection ! Error
+    conn = try exec(conn, """
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version bigint PRIMARY KEY,
+        applied_at timestamptz NOT NULL DEFAULT now()
+      )
+      """)
+
+    (conn, applied) = try applied_versions(conn)
+
+    for migration in migrations()
+      unless applied.any?(v -> v == migration.version)
+        conn = try exec(conn, migration.sql)
+        conn = try record(conn, migration.version)
+      end
+    end
+
+    conn
+  end
+
+  priv fn migrations -> List<Migration>
+    [
+      Migration{version: 1, sql: "CREATE EXTENSION IF NOT EXISTS vector"},
+      Migration{version: 2, sql: "CREATE EXTENSION IF NOT EXISTS pg_trgm"},
+      Migration{version: 3, sql: """
+        CREATE TABLE entities (
+          id bigserial PRIMARY KEY,
+          name text NOT NULL UNIQUE,
+          type text NOT NULL,
+          embedding vector(768),
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """}, Migration{version: 4, sql: """
+        CREATE TABLE observations (
+          id bigserial PRIMARY KEY,
+          entity_id bigint NOT NULL
+            REFERENCES entities(id) ON DELETE CASCADE,
+          content text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (entity_id, content)
+        )
+        """}, Migration{version: 5, sql: """
+        CREATE TABLE relations (
+          id bigserial PRIMARY KEY,
+          from_entity_id bigint NOT NULL
+            REFERENCES entities(id) ON DELETE CASCADE,
+          to_entity_id bigint NOT NULL
+            REFERENCES entities(id) ON DELETE CASCADE,
+          type text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (from_entity_id, to_entity_id, type)
+        )
+        """}, Migration{version: 6, sql: """
+        CREATE INDEX entities_embedding_idx ON entities
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64)
+        """}, Migration{version: 7, sql: """
+        CREATE INDEX entities_name_trgm_idx ON entities
+        USING gin (name gin_trgm_ops)
+        """}, Migration{version: 8, sql: """
+        CREATE TABLE search_log (
+          id bigserial PRIMARY KEY,
+          query text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now()
+        )
+        """}
+    ]
+  end
+
+  priv fn applied_versions(conn: Connection) -> (Connection, List<Int>) ! Error
+    (conn, outcome) = conn.query("SELECT version FROM schema_migrations")
+
+    match outcome
+      Result.Err(e) ->
+        fail Error.Database(e.message())
+
+      Result.Ok(qr) ->
+        versions = qr.rows.map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
+        (conn, versions)
+    end
+  end
+
+  priv fn exec(conn: Connection, sql: String) -> Connection ! Error
+    (conn, outcome) = conn.query(sql)
+
+    match outcome
+      Result.Err(e) -> fail Error.Database(e.message())
+      Result.Ok(_) -> conn
+    end
+  end
+
+  priv fn record(conn: Connection, version: Int) -> Connection ! Error
+    (conn, outcome) = conn.execute(
+      "INSERT INTO schema_migrations (version) VALUES ($1)",
+      [Postgres.Value.int(version)],
+    )
+
+    match outcome
+      Result.Err(e) -> fail Error.Database(e.message())
+      Result.Ok(_) -> conn
+    end
+  end
+end

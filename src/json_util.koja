@@ -1,0 +1,218 @@
+alias JSON.Value as Json
+
+@doc """
+Helpers for reading `JSON.Value` trees: request-body parsing for the
+router and decoding of JSON-shaped columns from the stores.
+"""
+struct JsonUtil
+  @doc """
+  Parses a `POST /entities` body: `name` and `type` are required
+  non-empty strings, `observations` an optional array of strings.
+  """
+  fn parse_entity(body: String) -> (String, String, List<String>) ! Error
+    root = try decode(body)
+    name = try required_string(root, "name")
+    kind = try required_string(root, "type")
+
+    observations: List<String> =
+      match field(root, "observations")
+        Option.None -> List.new()
+        Option.Some(value) ->
+          try string_list(value).or_err(
+            Error.Validation("observations must be an array of strings"),
+          )
+      end
+
+    (name, kind, observations)
+  end
+
+  @doc """
+  Parses an observations body: `observations` is a required,
+  non-empty array of strings.
+  """
+  fn parse_observations(body: String) -> List<String> ! Error
+    root = try decode(body)
+
+    observations =
+      match field(root, "observations")
+        Option.None -> fail Error.Validation("observations is required")
+        Option.Some(value) ->
+          try string_list(value).or_err(
+            Error.Validation("observations must be an array of strings"),
+          )
+      end
+
+    if observations.empty?()
+      fail Error.Validation("observations must not be empty")
+    end
+
+    observations
+  end
+
+  @doc """
+  Parses a relation body: `from`, `to`, and `type` are required
+  non-empty strings.
+  """
+  fn parse_relation(body: String) -> (String, String, String) ! Error
+    root = try decode(body)
+    from = try required_string(root, "from")
+    to = try required_string(root, "to")
+    kind = try required_string(root, "type")
+    (from, to, kind)
+  end
+
+  @doc """
+  Encodes a list of strings as JSON array text, for binding as a
+  `$n::jsonb` parameter.
+  """
+  fn encode_string_list(items: List<String>) -> String
+    JSON.encode(Json.Array(items.map(item -> item.to_json())))
+  end
+
+  @doc """
+  Decodes the `json_agg` observation column from a store query into
+  observation values. Members missing a field decode with that field
+  empty, and malformed text gives an empty list.
+  """
+  fn decode_observations(text: String) -> List<Observation>
+    observations: List<Observation> = List.new()
+
+    decoded =
+      match JSON.decode(text)
+        Result.Err(_) -> return observations
+        Result.Ok(value) -> value
+      end
+
+    match decoded
+      Json.Array(items) ->
+        for item in items
+          observations = observations.append(
+            Observation{
+              content: field_string(item, "content"),
+              created_at: field_string(item, "created_at"),
+              updated_at: field_string(item, "updated_at"),
+            },
+          )
+        end
+
+        observations
+
+      _ ->
+        observations
+    end
+  end
+
+  @doc """
+  Removes duplicate strings, keeping first occurrences in order.
+  """
+  fn distinct(items: List<String>) -> List<String>
+    seen: List<String> = List.new()
+
+    for item in items
+      unless seen.any?(s -> s == item)
+        seen = seen.append(item)
+      end
+    end
+
+    seen
+  end
+
+  @doc """
+  Returns an object field's value, or `None` for a missing key or a
+  non-object root.
+  """
+  fn get(root: Json, key: String) -> Option<Json>
+    field(root, key)
+  end
+
+  @doc """
+  Returns an object field's string value, or `None` when the field is
+  missing or not a string.
+  """
+  fn get_string(root: Json, key: String) -> Option<String>
+    match field(root, key)
+      Option.Some(Json.String(text)) -> Option.Some(text)
+      _ -> Option.None
+    end
+  end
+
+  @doc """
+  Returns an object field's integer value, or `None` when the field
+  is missing or not an integer.
+  """
+  fn get_int(root: Json, key: String) -> Option<Int>
+    match field(root, key)
+      Option.Some(Json.Int(number)) -> Option.Some(number)
+      _ -> Option.None
+    end
+  end
+
+  @doc """
+  Returns an object field's value as a list of strings, or `None`
+  when the field is missing or not an all-string array.
+  """
+  fn get_string_list(root: Json, key: String) -> Option<List<String>>
+    match field(root, key)
+      Option.Some(value) -> string_list(value)
+      Option.None -> Option.None
+    end
+  end
+
+  priv fn decode(body: String) -> Json ! Error
+    JSON.decode(body)
+      rescue e -> fail Error.Validation("malformed JSON body: " <> e)
+  end
+
+  priv fn field(root: Json, key: String) -> Option<Json>
+    match root
+      Json.Object(entries) ->
+        for entry in entries
+          (entry_key, entry_value) = entry
+
+          if entry_key == key
+            return Option.Some(entry_value)
+          end
+        end
+
+        Option.None
+
+      _ ->
+        Option.None
+    end
+  end
+
+  priv fn field_string(root: Json, key: String) -> String
+    match field(root, key)
+      Option.Some(Json.String(text)) -> text
+      _ -> ""
+    end
+  end
+
+  priv fn required_string(root: Json, key: String) -> String ! Error
+    match field(root, key)
+      Option.Some(Json.String(text)) when not text.empty?() -> text
+      Option.Some(_) ->
+        fail Error.Validation("#{key} must be a non-empty string")
+      Option.None -> fail Error.Validation("#{key} is required")
+    end
+  end
+
+  priv fn string_list(value: Json) -> Option<List<String>>
+    match value
+      Json.Array(items) ->
+        strings: List<String> = List.new()
+
+        for item in items
+          match item
+            Json.String(text) -> strings = strings.append(text)
+            _ -> return Option.None
+          end
+        end
+
+        Option.Some(strings)
+
+      _ ->
+        Option.None
+    end
+  end
+end

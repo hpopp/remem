@@ -1,0 +1,56 @@
+@doc """
+Leveled stdout logging with UTC ISO-8601 timestamps, like:
+
+    2026-09-01T23:08:12.123Z INFO POST /entities 201 12ms
+"""
+struct Log
+  fn info(message: String)
+    IO.puts("#{iso8601(DateTime.now().timestamp_millis())} INFO #{message}")
+  end
+
+  fn warn(message: String)
+    IO.puts("#{iso8601(DateTime.now().timestamp_millis())} WARN #{message}")
+  end
+
+  fn error(message: String)
+    IO.puts("#{iso8601(DateTime.now().timestamp_millis())} ERROR #{message}")
+  end
+
+  @doc """
+  Formats epoch milliseconds as UTC ISO-8601, public for tests.
+  Uses the civil-from-days calendar conversion.
+  """
+  fn iso8601(millis: Int) -> String
+    days = millis / 86400000
+    rem = millis % 86400000
+    hour = rem / 3600000
+    minute = rem % 3600000 / 60000
+    second = rem % 60000 / 1000
+    milli = rem % 1000
+
+    z = days + 719468
+    era = z / 146097
+    doe = z - era * 146097
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    mp = (5 * doy + 2) / 153
+    day = doy - (153 * mp + 2) / 5 + 1
+    month = mp < 10 ? mp + 3 : mp - 9
+    year = yoe + era * 400 + (month <= 2 ? 1 : 0)
+
+    "#{year}-#{pad2(month)}-#{pad2(day)}T#{pad2(hour)}:#{pad2(minute)}" <>
+      ":#{pad2(second)}.#{pad3(milli)}Z"
+  end
+
+  priv fn pad2(n: Int) -> String
+    n < 10 ? "0#{n}" : "#{n}"
+  end
+
+  priv fn pad3(n: Int) -> String
+    cond
+      n < 10 -> "00#{n}"
+      n < 100 -> "0#{n}"
+      else -> "#{n}"
+    end
+  end
+end

@@ -1,5 +1,8 @@
 # remem
 
+[![CI](https://github.com/hpopp/remem/actions/workflows/ci.yml/badge.svg)](https://github.com/hpopp/remem/actions/workflows/ci.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/hpopp/remem)](https://github.com/hpopp/remem/releases)
+
 A memory graph API in Koja. remem stores named entities, timestamped
 observations about them, and typed relations between them, backed by
 PostgreSQL with pgvector. Search combines semantic ranking

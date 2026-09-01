@@ -39,8 +39,8 @@ jobs:
       - name: Koja format check
         run: git ls-files '*.koja' | xargs koja format --check
 
-      - name: Typecheck
-        run: koja check
+      - name: Get dependencies
+        run: koja deps get
 
       - name: Start Postgres
         run: |

@@ -59,7 +59,7 @@ Requests carry observations as plain strings. Responses return them
 as rows with their own timestamps:
 
 ```json
-{"content": "...", "created_at": "...", "updated_at": "..."}
+{ "content": "...", "created_at": "...", "updated_at": "..." }
 ```
 
 Entities, observations, and relations all carry `created_at` and

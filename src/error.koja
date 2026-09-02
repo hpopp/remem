@@ -8,6 +8,7 @@ enum Error
   Duplicate(String)
   Embedding(String)
   NotFound(String)
+  Unavailable(String)
   Validation(String)
 
   @doc """
@@ -19,6 +20,7 @@ enum Error
       Error.Duplicate(detail) -> detail
       Error.Embedding(detail) -> "embedding error: " <> detail
       Error.NotFound(detail) -> detail
+      Error.Unavailable(detail) -> detail
       Error.Validation(detail) -> detail
     end
   end

@@ -1,11 +1,10 @@
-alias HTTP.Parser
+alias Conn.Router
 alias HTTP.Request
 alias HTTP.Response
 alias HTTP.Status
 alias Net.TCPServer
 alias Net.TCPServer.Config as TCPServerConfig
 alias Net.TCPServer.Event as TCPEvent
-alias Net.TCPSocket
 alias Pooler.Config as PoolConfig
 alias Pooler.Pool
 alias Postgres.Config as DbConfig
@@ -13,32 +12,31 @@ alias Postgres.Connection
 alias Process.Lifecycle
 alias Process.Step
 alias Process.StopReason
+alias Trail.Config as TrailConfig
+alias Trail.Worker
+
+const VERSION: String = "0.2.0"
 
 const POOL_SIZE: Int = 10
-const CHECKOUT_MS: Int = 5000
 
 # SCRAM auth costs ~1s per connect under the interpreter, and the
 # startup probe waits for the whole pool, so give it a generous budget.
 const STARTUP_PROBE_MS: Int = 30000
 
-# Keep-alive limits: bytes pulled per socket read, and requests one
-# connection may issue before the worker closes it.
-const READ_CHUNK: Int = 8192
-const MAX_REQUESTS_PER_CONNECTION: Int = 1000
+# How often the search log sweeper ticks.
+priv const SWEEP_INTERVAL_MS: Int = 3600000
 
 @doc """
 The remem entry process. `start` loads config from the environment,
 runs schema migrations on a dedicated connection, spawns a pool of
-`POOL_SIZE` Postgres connections, and spawns a `Net.TCPServer`
-acceptor that delivers connected sockets as `TCPEvent.Connected`
-messages. Each connection is handed to a one-shot `Worker` process,
-so requests are handled concurrently and the entry process never
-blocks on IO.
+`POOL_SIZE` Postgres connections, builds the route table once, and
+spawns a `Net.TCPServer` acceptor that delivers connected sockets as
+`TCPEvent.Connected` messages. Each connection is handed to a
+one-shot `Trail.Worker`, so requests are handled concurrently and
+the entry process never blocks on IO.
 """
 struct App: Process<List<String>, TCPEvent, String>
-  api_key: Option<String>
-  embedder: Embedder
-  pool: Pool<Connection>
+  server: TrailConfig
 
   fn start(config: List<String>) -> Self ! StopReason
     settings = Config.load()
@@ -69,7 +67,7 @@ struct App: Process<List<String>, TCPEvent, String>
 
       Result.Err(Pooler.Error.Timeout) ->
         Log.error(
-          "database connections are still warming up; try again shortly",
+          "database connections are still warming up, try again shortly",
         )
         fail StopReason.Shutdown
 
@@ -78,31 +76,30 @@ struct App: Process<List<String>, TCPEvent, String>
         fail StopReason.Shutdown
     end
 
+    embedder = Embedder{url: settings.embedding_url}
+    router = build_router(pool, embedder, settings.api_key)
+
+    _cleaner = spawn Cleaner.start(
+      Cleaner.Config{interval_ms: SWEEP_INTERVAL_MS, pool: pool},
+    )
+
     me: Ref<TCPEvent, String> = Ref.self_ref()
-    _ = spawn TCPServer.start(TCPServerConfig{port: settings.port, owner: me})
+    _server = spawn TCPServer.start(
+      TCPServerConfig{port: settings.port, owner: me},
+    )
 
     auth = settings.api_key.some?() ? "required" : "off"
-    Log.info("remem listening on http://127.0.0.1:#{settings.port}")
+    Log.info("remem #{VERSION} listening on http://127.0.0.1:#{settings.port}")
     Log.info("embedding server: #{settings.embedding_url}")
     Log.info("api key auth: #{auth}, #{POOL_SIZE} pooled db connections")
 
-    App{
-      api_key: settings.api_key,
-      embedder: Embedder{url: settings.embedding_url},
-      pool: pool,
-    }
+    App{server: server_config(router)}
   end
 
   fn handle(self, msg: TCPEvent, from: Option<ReplyTo<String>>) -> Step<Self>
     match msg
       TCPEvent.Connected(client) ->
-        worker = Worker{
-          api_key: self.api_key,
-          client: client,
-          embedder: self.embedder,
-          pool: self.pool,
-        }
-        _ = spawn Worker.start(worker)
+        _ = spawn Worker.start(Worker{client: client, config: self.server})
         Step.Continue(self)
 
       TCPEvent.Closed(_) ->
@@ -153,238 +150,37 @@ struct App: Process<List<String>, TCPEvent, String>
   end
 end
 
-@doc """
-A one-shot process that owns a single client connection. Its `run`
-loop reads requests off the socket (HTTP keep-alive), checks a
-database connection out of the pool for each one, routes it, and
-writes the response. The worker exits when the client closes, a read
-or write fails, the request asks for `Connection: close`, or the
-per-connection request budget is spent.
-"""
-struct Worker: Process<Worker, (), ()>
-  api_key: Option<String>
-  client: TCPSocket
-  embedder: Embedder
-  pool: Pool<Connection>
+# Wires the route table and remem's logging and error shape into a
+# trail worker config. Rejected requests render the same JSON error
+# body as routed failures, and every dispatched request logs one
+# access line.
+priv fn server_config(router: Router) -> TrailConfig
+  handler = fn (request: Request) -> Response router.dispatch(request) end
 
-  fn start(config: Worker) -> Self ! StopReason
-    config
-  end
+  error_response =
+    fn (status: Status, message: String) -> Response
+      Render.raw(status, message)
+    end
 
-  fn handle(self, msg: (), from: Option<ReplyTo<()>>) -> Step<Self>
-    Step.Continue(self)
-  end
+  on_request =
+    fn (request: Request, response: Response, elapsed: Int)
+      Log.info(
+        "#{request.method.to_string()} #{request.path} " <>
+          "#{response.status.code} #{elapsed}ms",
+      )
+    end
 
-  # Serves requests iteratively: keep-alive connections are
-  # long-lived, so this must not grow the stack per request.
-  fn run(self) -> StopReason
-    buffered = ""
-    budget = MAX_REQUESTS_PER_CONNECTION
-
-    while budget > 0
-      match read_request(self.client, buffered)
-        Option.None ->
-          self.close()
-          return StopReason.Normal
-
-        Option.Some(framed) ->
-          (request, leftover) = framed
-          (response, keep) = self.respond(request)
-          keep = keep and budget > 1
-          response = with_connection(response, keep ? "keep-alive" : "close")
-
-          match self.client.write(response.serialize())
-            Result.Ok(_) when keep ->
-              buffered = leftover
-              budget = budget - 1
-
-            _ ->
-              self.close()
-              return StopReason.Normal
-          end
+  on_reject =
+    fn (status: Status)
+      match status.code
+        400 -> Log.warn("unparseable request 400")
+        413 -> Log.warn("oversized request 413")
+        _ -> Log.warn("rejected request #{status.code}")
       end
     end
 
-    self.close()
-    StopReason.Normal
-  end
-
-  # Parses and routes one raw request, logging one access line per
-  # request. Returns the response paired with whether the client
-  # wants the connection kept open.
-  priv fn respond(self, raw: String) -> (Response, Bool)
-    started = DateTime.now().timestamp_millis()
-
-    match Parser.parse_request(raw)
-      Result.Err(_) ->
-        Log.warn("unparseable request 400")
-        (Router.error(Status.bad_request(), "malformed request"), false)
-
-      Result.Ok(req) ->
-        keep = wants_keep_alive?(req)
-
-        (response, keep) =
-          match self.pool.checkout(CHECKOUT_MS)
-            Result.Err(_) ->
-              error = Router.error(
-                Status.new(503, "Service Unavailable"),
-                "no database connection available",
-              )
-              (error, keep)
-
-            Result.Ok(conn) ->
-              (routed, conn) = Router.route(
-                req,
-                conn,
-                self.embedder,
-                self.api_key,
-              )
-              self.pool.checkin(conn)
-              (routed, keep)
-          end
-
-        elapsed = DateTime.now().timestamp_millis() - started
-        Log.info(
-          "#{req.method.to_string()} #{req.path} " <>
-            "#{response.status.code} #{elapsed}ms",
-        )
-        (response, keep)
-    end
-  end
-
-  priv fn close(self)
-    match self.client.close()
-      _ -> ()
-    end
-  end
-end
-
-# Reads from `client` until `buffered` holds one complete HTTP request
-# (headers plus `Content-Length` bytes of body). Returns the framed
-# request paired with any bytes that arrived after it (pipelining), or
-# `Option.None` when the client closes or the read fails. Iterative:
-# large bodies span many reads and must not grow the stack.
-priv fn read_request(client: TCPSocket, buffered: String)
-  -> Option<(String, String)>
-
-  buffer = buffered
-
-  loop
-    match split_request(buffer)
-      Option.Some(framed) ->
-        return Option.Some(framed)
-
-      Option.None ->
-        match client.read(READ_CHUNK)
-          Result.Ok(chunk) when not chunk.empty?() -> buffer = buffer <> chunk
-          _ -> return Option.None
-        end
-    end
-  end
-end
-
-# Splits `buffer` into one complete request and the leftover bytes, or
-# returns None when the request is still incomplete. Framing counts
-# bytes, not characters: Content-Length is a byte count, and string
-# `length()` counts codepoints, which drift apart on any non-ASCII
-# body byte.
-priv fn split_request(buffer: String) -> Option<(String, String)>
-  parts = buffer.split("\r\n\r\n")
-
-  if parts.length() < 2
-    return Option.None
-  end
-
-  header_text =
-    match parts.get(0)
-      Option.Some(text) -> text
-      Option.None -> ""
-    end
-
-  total = header_text.byte_length() + 4 + content_length(header_text)
-
-  if buffer.byte_length() < total
-    return Option.None
-  end
-
-  if buffer.byte_length() == total
-    return Option.Some((buffer, ""))
-  end
-
-  # Pipelined bytes follow this request. Split at the character
-  # whose prefix reaches `total` bytes (always a char boundary,
-  # since the body is complete UTF-8).
-  split_at = byte_boundary(buffer, total)
-  request = buffer.slice(Range{start: 0, stop: split_at - 1})
-  leftover = buffer.slice(Range{start: split_at, stop: buffer.length() - 1})
-  Option.Some((request, leftover))
-end
-
-# Binary search for the smallest character count whose prefix holds
-# `target` bytes. 32 iterations cover any request we would buffer.
-priv fn byte_boundary(buffer: String, target: Int) -> Int
-  low = 1
-  high = buffer.length()
-
-  for step in Range{start: 0, stop: 31}
-    if low < high
-      mid = (low + high) / 2
-      prefix = buffer.slice(Range{start: 0, stop: mid - 1})
-
-      if prefix.byte_length() < target
-        low = mid + 1
-      else
-        high = mid
-      end
-    end
-  end
-
-  low
-end
-
-priv fn content_length(header_text: String) -> Int
-  lines = header_text.split("\r\n")
-  found = lines.filter(line -> line.downcase().starts_with?("content-length:"))
-
-  match found.get(0)
-    Option.None ->
-      0
-
-    Option.Some(line) ->
-      match line.split(":").get(1)
-        Option.None ->
-          0
-
-        Option.Some(value) ->
-          match value.trim().to_int()
-            Result.Ok(n) -> n
-            Result.Err(_) -> 0
-          end
-      end
-  end
-end
-
-# HTTP/1.1 defaults to keep-alive and HTTP/1.0 to close, but an
-# explicit Connection header overrides either.
-priv fn wants_keep_alive?(req: Request) -> Bool
-  fallback = req.version == "HTTP/1.1"
-
-  match req.headers.get("Connection")
-    Option.None ->
-      fallback
-
-    Option.Some(value) ->
-      lowered = value.downcase()
-
-      cond
-        lowered.contains?("close") -> false
-        lowered.contains?("keep-alive") -> true
-        else -> fallback
-      end
-  end
-end
-
-priv fn with_connection(response: Response, value: String) -> Response
-  response.headers = response.headers.set("Connection", value)
-  response
+  TrailConfig.new(handler)
+    .with_error_response(error_response)
+    .with_on_request(on_request)
+    .with_on_reject(on_reject)
 end

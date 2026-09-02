@@ -1,0 +1,303 @@
+alias HTTP.Parser
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+alias Net.TCPSocket
+alias Process.Step
+alias Process.StopReason
+
+# Bytes pulled per socket read.
+priv const READ_CHUNK: Int = 8192
+
+@doc """
+A one-shot process that owns a single client connection. Spawn one
+per accepted socket:
+
+```
+TCPEvent.Connected(client) ->
+  _ = spawn Worker.start(Worker{client: client, config: self.config})
+```
+
+Its `run` loop reads requests off the socket (HTTP keep-alive),
+dispatches each one through the configured handler, and writes the
+response, looping on partial writes until every byte is out. The
+worker exits when the client closes, a read or write fails, a
+request overruns a size cap, the request asks for
+`Connection: close`, or the per-connection request budget is spent.
+"""
+struct Worker: Process<Worker, (), ()>
+  client: TCPSocket
+  config: Config
+
+  fn start(config: Worker) -> Self ! StopReason
+    config
+  end
+
+  fn handle(self, msg: (), from: Option<ReplyTo<()>>) -> Step<Self>
+    Step.Continue(self)
+  end
+
+  # Serves requests iteratively. Keep-alive connections are
+  # long-lived, so this must not grow the stack per request.
+  fn run(self) -> StopReason
+    buffered = ""
+    budget = self.config.max_requests_per_connection
+
+    while budget > 0
+      match self.read_request(buffered)
+        Frame.Incomplete ->
+          self.close()
+          return StopReason.Normal
+
+        Frame.TooLarge ->
+          reject = self.config.on_reject
+          reject(Status.new(413, "Payload Too Large"))
+
+          build = self.config.error_response
+          response = with_connection(
+            build(
+              Status.new(413, "Payload Too Large"),
+              "request exceeds the #{self.config.max_body_bytes} byte limit",
+            ),
+            "close",
+          )
+          _ = write_all(self.client, response.serialize())
+          self.close()
+          return StopReason.Normal
+
+        Frame.Complete(framed) ->
+          (request, leftover) = framed
+          (response, keep) = self.respond(request)
+          keep = keep and budget > 1
+          response = with_connection(response, keep ? "keep-alive" : "close")
+
+          if write_all(self.client, response.serialize()) and keep
+            buffered = leftover
+            budget = budget - 1
+          else
+            self.close()
+            return StopReason.Normal
+          end
+      end
+    end
+
+    self.close()
+    StopReason.Normal
+  end
+
+  # Parses and dispatches one raw request. Returns the response
+  # paired with whether the client wants the connection kept open.
+  priv fn respond(self, raw: String) -> (Response, Bool)
+    started = DateTime.now().timestamp_millis()
+
+    match Parser.parse_request(raw)
+      Result.Err(_) ->
+        reject = self.config.on_reject
+        reject(Status.bad_request())
+
+        build = self.config.error_response
+        (build(Status.bad_request(), "malformed request"), false)
+
+      Result.Ok(req) ->
+        keep = wants_keep_alive?(req)
+        handler = self.config.handler
+        response = handler(req)
+
+        elapsed = DateTime.now().timestamp_millis() - started
+        observe = self.config.on_request
+        observe(req, response, elapsed)
+        (response, keep)
+    end
+  end
+
+  # Reads from the client until `buffered` holds one complete HTTP
+  # request (headers plus `Content-Length` bytes of body). Returns
+  # the framed request paired with any bytes that arrived after it
+  # (pipelining). `Incomplete` here means the client closed or the
+  # read failed. Iterative because large bodies span many reads and
+  # must not grow the stack.
+  priv fn read_request(self, buffered: String) -> Frame
+    buffer = buffered
+
+    loop
+      match frame_request(
+        buffer,
+        self.config.max_header_bytes,
+        self.config.max_body_bytes,
+      )
+        Frame.Complete(framed) ->
+          return Frame.Complete(framed)
+
+        Frame.TooLarge ->
+          return Frame.TooLarge
+
+        Frame.Incomplete ->
+          match self.client.read(READ_CHUNK)
+            Result.Ok(chunk) when not chunk.empty?() -> buffer = buffer <> chunk
+            _ -> return Frame.Incomplete
+          end
+      end
+    end
+  end
+
+  priv fn close(self)
+    match self.client.close()
+      _ -> ()
+    end
+  end
+end
+
+@doc """
+The outcome of framing bytes into one HTTP request. Either a
+complete request paired with any pipelined leftover, not enough
+bytes yet, or a request over the size caps.
+"""
+enum Frame
+  Complete((String, String))
+  Incomplete
+  TooLarge
+end
+
+@doc """
+Splits `buffer` into one complete request and the leftover bytes.
+`Incomplete` asks the caller to read more, `TooLarge` means the
+headers overran `max_header_bytes` or the declared body overran
+`max_body_bytes`. Framing counts bytes, not characters, because
+Content-Length is a byte count while string `length()` counts
+codepoints, and the two drift apart on any non-ASCII body byte.
+"""
+fn frame_request(buffer: String, max_header_bytes: Int, max_body_bytes: Int)
+  -> Frame
+
+  parts = buffer.split("\r\n\r\n")
+
+  if parts.length() < 2
+    # Headers still incomplete. A buffer already past the header cap
+    # can never complete them.
+    return buffer.byte_length() > max_header_bytes
+      ? Frame.TooLarge
+      : Frame.Incomplete
+  end
+
+  header_text =
+    match parts.get(0)
+      Option.Some(text) -> text
+      Option.None -> ""
+    end
+
+  length = content_length(header_text)
+
+  if header_text.byte_length() > max_header_bytes or length > max_body_bytes
+    return Frame.TooLarge
+  end
+
+  total = header_text.byte_length() + 4 + length
+
+  if buffer.byte_length() < total
+    return Frame.Incomplete
+  end
+
+  if buffer.byte_length() == total
+    return Frame.Complete((buffer, ""))
+  end
+
+  # Pipelined bytes follow this request. Split at the character
+  # whose prefix reaches `total` bytes (always a char boundary,
+  # since the body is complete UTF-8).
+  split_at = byte_boundary(buffer, total)
+  request = buffer.slice(Range{start: 0, stop: split_at - 1})
+  leftover = buffer.slice(Range{start: split_at, stop: buffer.length() - 1})
+  Frame.Complete((request, leftover))
+end
+
+# Binary search for the smallest character count whose prefix holds
+# `target` bytes. 32 iterations cover any request we would buffer.
+priv fn byte_boundary(buffer: String, target: Int) -> Int
+  low = 1
+  high = buffer.length()
+
+  for step in Range{start: 0, stop: 31}
+    if low < high
+      mid = (low + high) / 2
+      prefix = buffer.slice(Range{start: 0, stop: mid - 1})
+
+      if prefix.byte_length() < target
+        low = mid + 1
+      else
+        high = mid
+      end
+    end
+  end
+
+  low
+end
+
+priv fn content_length(header_text: String) -> Int
+  lines = header_text.split("\r\n")
+  found = lines.filter(line -> line.downcase().starts_with?("content-length:"))
+
+  match found.get(0)
+    Option.None ->
+      0
+
+    Option.Some(line) ->
+      match line.split(":").get(1)
+        Option.None ->
+          0
+
+        Option.Some(value) ->
+          match value.trim().to_int()
+            Result.Ok(n) -> n
+            Result.Err(_) -> 0
+          end
+      end
+  end
+end
+
+# HTTP/1.1 defaults to keep-alive and HTTP/1.0 to close, but an
+# explicit Connection header overrides either.
+priv fn wants_keep_alive?(req: Request) -> Bool
+  fallback = req.version == "HTTP/1.1"
+
+  match req.headers.get("Connection")
+    Option.None ->
+      fallback
+
+    Option.Some(value) ->
+      lowered = value.downcase()
+
+      cond
+        lowered.contains?("close") -> false
+        lowered.contains?("keep-alive") -> true
+        else -> fallback
+      end
+  end
+end
+
+priv fn with_connection(response: Response, value: String) -> Response
+  response.headers = response.headers.set("Connection", value)
+  response
+end
+
+# Writes the whole response, looping on partial writes. One
+# `TCPSocket.write` call is a single write(2), which sends only part
+# of a large response once the socket buffer fills. Returns false
+# when the client is gone.
+priv fn write_all(client: TCPSocket, data: String) -> Bool
+  bytes = data.to_binary()
+  total = bytes.byte_size()
+  sent = 0
+
+  while sent < total
+    chunk = bytes.slice(Range{start: sent, stop: total - 1})
+    written = client.write(chunk) rescue _ -> -1
+
+    if written <= 0
+      return false
+    end
+
+    sent = sent + written
+  end
+
+  true
+end

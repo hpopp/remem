@@ -1,0 +1,11 @@
+[project]
+koja = "0.18"
+name = "conn"
+namespace = "Conn"
+version = "0.1.0"
+
+[index]
+categories = ["web"]
+description = "Composable HTTP routing: an immutable Conn value, handlers and middleware as plain functions"
+keywords = ["http", "middleware", "plug", "router", "web"]
+kind = "library"

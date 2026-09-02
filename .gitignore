@@ -1,2 +1,8 @@
-/build
-/deps
+# Koja build output, dependencies, and generated docs,
+# both at the root and inside vendored libraries.
+build/
+deps/
+doc/
+
+# macOS
+.DS_Store

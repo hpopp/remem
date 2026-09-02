@@ -1,0 +1,72 @@
+alias Conn.Conn
+alias HTTP.Status
+alias JSON.Value as Json
+alias Pooler.Pool
+alias Postgres.Connection
+
+const DEFAULT_SEARCH_LIMIT: Int = 10
+const MAX_SEARCH_LIMIT: Int = 100
+
+@doc """
+The hybrid search endpoint. Semantic ranking over entity content
+merges with fuzzy name matching. An unreachable embedder degrades to
+fuzzy-only ranking instead of failing the search.
+"""
+struct SearchController
+  embedder: Embedder
+  pool: Pool<Connection>
+
+  fn search(self, c: Conn) -> Conn
+    self.do_search(c) rescue e -> Render.from_error(c, e)
+  end
+
+  priv fn do_search(self, c: Conn) -> Conn ! Error
+    q =
+      match c.query_param("q")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> fail Error.Validation("q is required")
+      end
+
+    q = URI.decode(q) rescue _ -> fail Error.Validation("q is not valid")
+
+    limit = try Params.int(c, "limit", DEFAULT_SEARCH_LIMIT)
+
+    unless limit >= 1 and limit <= MAX_SEARCH_LIMIT
+      fail Error.Validation("limit must be between 1 and #{MAX_SEARCH_LIMIT}")
+    end
+
+    embedder = self.embedder
+    results = try with_db(self.pool, db -> search_db(db, embedder, q, limit))
+
+    body: Json = [
+      "query": q.to_json(), "results": Json.Array(results.map(r -> r.to_json()))
+    ]
+    Render.json(c, Status.ok(), body)
+  end
+end
+
+# Logs the query, embeds it, and runs the hybrid search. The log is
+# bookkeeping and the embedder is best-effort, so neither failure
+# fails the search.
+priv fn search_db(db: Connection, embedder: Embedder, q: String, limit: Int)
+  -> (Connection, Result<List<SearchResult>, Error>)
+
+  (db, logged) = SearchLog.record(db, q)
+
+  match logged
+    Result.Err(e) -> Log.warn("search log: " <> e.message())
+    Result.Ok(_) -> ()
+  end
+
+  embedding: Option<String> =
+    match embedder.embed(q)
+      Result.Ok(vector) ->
+        Option.Some(vector)
+
+      Result.Err(e) ->
+        Log.warn("search falls back to fuzzy ranking only: " <> e.message())
+        Option.None
+    end
+
+  EntityStore.search(db, q, embedding, limit)
+end

@@ -55,6 +55,13 @@ jobs:
       - name: Run tests
         run: koja test
 
+      - name: Run vendored library tests
+        run: |
+          for lib in lib/*/; do
+            echo "== $lib"
+            (cd "$lib" && koja test)
+          done
+
   docker:
     name: Docker build
     runs-on: ubuntu-24.04

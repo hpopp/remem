@@ -1,0 +1,213 @@
+alias HTTP.Headers
+alias HTTP.Method
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+alias JSON.Value
+
+priv fn request(method: Method, target: String) -> Request
+  Request{
+    body: "",
+    headers: Headers.new(),
+    method: method,
+    path: target,
+    version: "HTTP/1.1",
+  }
+end
+
+priv fn expect(condition: Bool, message: String) -> Bool ! String
+  unless condition
+    fail message
+  end
+
+  true
+end
+
+priv fn expect_int(actual: Int, expected: Int, label: String) -> Bool ! String
+  try expect(
+    actual == expected,
+    "#{label}: expected #{expected}, got #{actual}",
+  )
+end
+
+struct RouterTest
+  priv fn echo_param(name: String) -> fn (Conn) -> Conn
+    handler =
+      fn (conn: Conn) -> Conn
+        conn.text(Status.ok(), conn.param(name).or("missing"))
+      end
+
+    handler
+  end
+
+  @test "routes by method and static path"
+  fn test_static_routes -> Bool ! String
+    router = Router.new()
+      .get(
+        "/health",
+        fn (conn: Conn) -> Conn conn.text(Status.ok(), "healthy") end,
+      )
+      .post(
+        "/health",
+        fn (conn: Conn) -> Conn conn.text(Status.created(), "made health") end,
+      )
+
+    response = router.dispatch(request(Method.Get, "/health"))
+    try expect_int(response.status.code, 200, "GET matches")
+    try expect(response.body == "healthy", "GET body")
+
+    response = router.dispatch(request(Method.Post, "/health"))
+    try expect_int(response.status.code, 201, "POST matches its own route")
+
+    response = router.dispatch(request(Method.Delete, "/health"))
+    try expect_int(response.status.code, 404, "unregistered method falls back")
+
+    response = router.dispatch(request(Method.Get, "/absent"))
+    try expect_int(response.status.code, 404, "unknown path falls back")
+    true
+  end
+
+  @test "binds path parameters"
+  fn test_path_params -> Bool ! String
+    router =
+      Router.new()
+        .get("/sessions/:id", RouterTest.echo_param("id"))
+        .get("/a/:x/b/:y", fn (conn: Conn) -> Conn
+            text = "#{conn.param("x").or("?")}-#{conn.param("y").or("?")}"
+            conn.text(Status.ok(), text)
+          end)
+
+    response = router.dispatch(request(Method.Get, "/sessions/abc-123"))
+    try expect(response.body == "abc-123", "single param binds")
+
+    response = router.dispatch(request(Method.Get, "/a/1/b/2"))
+    try expect(response.body == "1-2", "multiple params bind")
+
+    response = router.dispatch(request(Method.Get, "/sessions/abc/extra"))
+    try expect_int(response.status.code, 404, "extra segment falls back")
+
+    response = router.dispatch(request(Method.Get, "/sessions"))
+    try expect_int(response.status.code, 404, "missing segment falls back")
+
+    response = router.dispatch(request(Method.Get, "/sessions/abc-123/"))
+    try expect(response.body == "abc-123", "trailing slash tolerated")
+    true
+  end
+
+  @test "first matching route wins"
+  fn test_route_priority -> Bool ! String
+    router = Router.new()
+      .get(
+        "/things/special",
+        fn (conn: Conn) -> Conn conn.text(Status.ok(), "special") end,
+      )
+      .get("/things/:id", RouterTest.echo_param("id"))
+
+    response = router.dispatch(request(Method.Get, "/things/special"))
+    try expect(response.body == "special", "static route registered first wins")
+
+    response = router.dispatch(request(Method.Get, "/things/42"))
+    try expect(response.body == "42", "param route still reachable")
+    true
+  end
+
+  @test "middleware runs in order and halt stops the pipeline"
+  fn test_middleware -> Bool ! String
+    router =
+      Router.new()
+        .use(fn (conn: Conn) -> Conn conn.put_resp_header("X-First", "1") end)
+        .use(fn (conn: Conn) -> Conn
+          match conn.get_header("Authorization")
+            Option.Some(_) -> conn
+            Option.None ->
+              conn.text(Status.unauthorized(), "no credentials").halt()
+          end
+        end)
+        .get(
+          "/secret",
+          fn (conn: Conn) -> Conn conn.text(Status.ok(), "the secret") end,
+        )
+
+    response = router.dispatch(request(Method.Get, "/secret"))
+    try expect_int(response.status.code, 401, "halted by middleware")
+    try expect(response.body == "no credentials", "middleware response body")
+    try expect(
+      response.headers.get("X-First").equals?(Option.Some("1")),
+      "earlier middleware still applied",
+    )
+
+    authed = request(Method.Get, "/secret")
+    authed.headers = authed.headers.set("Authorization", "Bearer x")
+    response = router.dispatch(authed)
+    try expect_int(response.status.code, 200, "passes with credentials")
+    try expect(response.body == "the secret", "handler ran")
+    true
+  end
+
+  @test "query and path split, query params read"
+  fn test_query -> Bool ! String
+    router =
+      Router.new().get("/items", fn (conn: Conn) -> Conn
+            text = "#{conn.query_param("limit").or("none")}/#{conn.query_param("q").or("none")}"
+            conn.text(Status.ok(), text)
+          end)
+
+    response = router.dispatch(request(Method.Get, "/items?limit=5&q=abc"))
+    try expect(response.body == "5/abc", "query params parse")
+
+    response = router.dispatch(request(Method.Get, "/items"))
+    try expect(response.body == "none/none", "absent query params")
+    true
+  end
+
+  @test "json helper sets body and content headers"
+  fn test_json -> Bool ! String
+    router = Router.new()
+      .get(
+        "/data",
+        fn (conn: Conn) -> Conn
+          conn.json(
+            Status.ok(),
+            Value.object([Value.entry("ok", Value.bool(true))]),
+          )
+        end,
+      )
+
+    response = router.dispatch(request(Method.Get, "/data"))
+    try expect(response.body == "{\"ok\":true}", "json body")
+    try expect(
+      response.headers.get("Content-Type")
+        .equals?(Option.Some("application/json")),
+      "content type",
+    )
+    try expect(
+      response.headers.get("Content-Length").equals?(Option.Some("11")),
+      "content length",
+    )
+    true
+  end
+
+  @test "custom fallback and unresponded conns"
+  fn test_fallback -> Bool ! String
+    router = Router.new()
+      .not_found(fn (conn: Conn) -> Conn
+        conn.json(Status.not_found(), Value.string("no route for #{conn.path}"))
+      end)
+      .get("/forgot", fn (conn: Conn) -> Conn conn end)
+
+    response = router.dispatch(request(Method.Get, "/nowhere"))
+    try expect_int(response.status.code, 404, "custom fallback status")
+    try expect(
+      response.body == "\"no route for /nowhere\"",
+      "custom fallback body",
+    )
+
+    response = router.dispatch(request(Method.Get, "/forgot"))
+    try expect_int(
+      response.status.code,
+      500,
+      "handler that never responds becomes 500",
+    )
+    true
+  end
+end

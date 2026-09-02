@@ -1,0 +1,174 @@
+alias Conn.Conn
+alias HTTP.Status
+alias JSON.Value as Json
+alias Pooler.Pool
+alias Postgres.Connection
+
+@doc """
+Entity endpoints. Holds exactly the dependencies these handlers use,
+captured when the router is built. Each handler parses and validates
+before touching the pool, runs its database phase through `with_db`
+(which always checks the connection back in), and renders one
+response at the surface.
+"""
+struct EntityController
+  embedder: Embedder
+  pool: Pool<Connection>
+
+  fn list(self, c: Conn) -> Conn
+    self.do_list(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn show(self, c: Conn) -> Conn
+    self.do_show(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn create(self, c: Conn) -> Conn
+    self.do_create(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn delete(self, c: Conn) -> Conn
+    self.do_delete(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn add_observations(self, c: Conn) -> Conn
+    self.do_mutate_observations(c, true) rescue e -> Render.from_error(c, e)
+  end
+
+  fn remove_observations(self, c: Conn) -> Conn
+    self.do_mutate_observations(c, false) rescue e -> Render.from_error(c, e)
+  end
+
+  priv fn do_list(self, c: Conn) -> Conn ! Error
+    (limit, offset) = try Params.page(c)
+    entities = try with_db(self.pool, db -> EntityStore.page(db, limit, offset))
+
+    body: Json = ["entities": Json.Array(entities.map(e -> e.to_json()))]
+    Render.json(c, Status.ok(), body)
+  end
+
+  priv fn do_show(self, c: Conn) -> Conn ! Error
+    name = try Params.name(c)
+    (entity, relations) = try with_db(self.pool, db -> show_db(db, name))
+
+    body: Json = [
+      "entity": entity.to_json(),
+      "relations": Json.Array(relations.map(r -> r.to_json()))
+    ]
+    Render.json(c, Status.ok(), body)
+  end
+
+  priv fn do_create(self, c: Conn) -> Conn ! Error
+    (name, kind, observations) = try JsonUtil.parse_entity(c.body)
+    observations = JsonUtil.distinct(observations)
+    embedder = self.embedder
+
+    entity = try with_db(
+      self.pool,
+      db -> create_db(db, embedder, name, kind, observations),
+    )
+    Render.json(c, Status.created(), entity)
+  end
+
+  priv fn do_delete(self, c: Conn) -> Conn ! Error
+    name = try Params.name(c)
+    deleted = try with_db(self.pool, db -> EntityStore.remove(db, name))
+
+    unless deleted
+      fail Error.NotFound("no entity named #{name}")
+    end
+
+    Render.no_content(c)
+  end
+
+  priv fn do_mutate_observations(self, c: Conn, add: Bool) -> Conn ! Error
+    name = try Params.name(c)
+    observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
+    embedder = self.embedder
+
+    entity = try with_db(
+      self.pool,
+      db -> mutate_db(db, embedder, name, observations, add),
+    )
+    Render.json(c, Status.ok(), entity)
+  end
+end
+
+# Reads one entity with its relations. A missing entity surfaces as
+# `NotFound` so the handler renders a 404.
+priv fn show_db(db: Connection, name: String)
+  -> (Connection, Result<(Entity, List<Relation>), Error>)
+
+  (db, found) = EntityStore.find(db, name)
+
+  entity =
+    match found
+      Result.Err(e) ->
+        return (db, Result.Err(e))
+
+      Result.Ok(maybe) ->
+        match maybe
+          Option.None ->
+            return (db, Result.Err(Error.NotFound("no entity named #{name}")))
+          Option.Some(present) -> present
+        end
+    end
+
+  (db, relations) = RelationStore.for_entity(db, name)
+
+  match relations
+    Result.Err(e) -> (db, Result.Err(e))
+    Result.Ok(list) -> (db, Result.Ok((entity, list)))
+  end
+end
+
+# Creates an entity, then refreshes its embedding best-effort.
+priv fn create_db(
+  db: Connection,
+  embedder: Embedder,
+  name: String,
+  kind: String,
+  observations: List<String>,
+) -> (Connection, Result<Entity, Error>)
+
+  (db, created) = EntityStore.create(db, name, kind, observations)
+
+  match created
+    Result.Err(e) ->
+      (db, Result.Err(e))
+
+    Result.Ok(entity) ->
+      db = refresh_embedding(db, embedder, entity)
+      (db, Result.Ok(entity))
+  end
+end
+
+# Adds or removes observations, then refreshes the embedding
+# best-effort. A missing entity surfaces as `NotFound`.
+priv fn mutate_db(
+  db: Connection,
+  embedder: Embedder,
+  name: String,
+  observations: List<String>,
+  add: Bool,
+) -> (Connection, Result<Entity, Error>)
+
+  (db, updated) = add
+    ? EntityStore.add_observations(db, name, observations)
+    : EntityStore.remove_observations(db, name, observations)
+
+  match updated
+    Result.Err(e) ->
+      (db, Result.Err(e))
+
+    Result.Ok(maybe) ->
+      match maybe
+        Option.None ->
+          (db, Result.Err(Error.NotFound("no entity named #{name}")))
+
+        Option.Some(entity) ->
+          db = refresh_embedding(db, embedder, entity)
+          (db, Result.Ok(entity))
+      end
+  end
+end

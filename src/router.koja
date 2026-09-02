@@ -1,647 +1,256 @@
+alias Conn.Conn
+alias Conn.Router
 alias HTTP.Headers
 alias HTTP.Method
-alias HTTP.Request
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
+alias Pooler.Pool
 alias Postgres.Connection
 
 const DEFAULT_PAGE_LIMIT: Int = 100
 const MAX_PAGE_LIMIT: Int = 1000
-const DEFAULT_SEARCH_LIMIT: Int = 10
-const MAX_SEARCH_LIMIT: Int = 100
+
+priv const CHECKOUT_MS: Int = 5000
 
 @doc """
-Maps an HTTP request to a response, threading the Postgres
-`Connection` through and returning it alongside the response so the
-caller can rebind.
+Builds the route table. Controllers capture their dependencies when
+the router is built, so the routes themselves are plain
+`fn (Conn) -> Conn` closures.
 
-Routes:
-- `GET    /health`                      liveness plus db probe
-- `GET    /graph`                       every entity and relation
-- `GET    /entities?limit=&offset=`     list entities
-- `POST   /entities`                    create from `{name, type, observations?}`
-- `GET    /entities/:name`              entity with its relations
-- `DELETE /entities/:name`              delete, relations cascade
-- `POST   /entities/:name/observations` append observations
-- `DELETE /entities/:name/observations` remove matching observations
-- `POST   /relations`                   create from `{from, to, type}`
-- `DELETE /relations`                   delete the same shape
-- `GET    /search?q=&limit=`            hybrid semantic + fuzzy search
-- `POST   /mcp`                         MCP JSON-RPC endpoint
-
-When `api_key` is set, every route except `GET /health` requires
-`Authorization: Bearer <key>`.
+Two middleware steps run before any route matches. The bearer-auth
+check covers every route except `GET /health` when `API_KEY` is
+set, and the method guard answers 405 for verbs no route uses. Both
+halt before any database connection leaves the pool, and so does
+the 404 fallback.
 """
-struct Router
-  fn route(
-    req: Request,
-    conn: Connection,
-    embedder: Embedder,
-    api_key: Option<String>,
-  ) -> (Response, Connection)
+fn build_router(
+  pool: Pool<Connection>,
+  embedder: Embedder,
+  api_key: Option<String>,
+) -> Router
 
-    (path, query) = split_query(req.path)
+  entities = EntityController{embedder: embedder, pool: pool}
+  relations = RelationController{pool: pool}
+  search = SearchController{embedder: embedder, pool: pool}
+  meta = MetaController{embedder: embedder, pool: pool}
 
-    segments =
-      match decode_segments(path)
-        Result.Ok(list) -> list
-        Result.Err(message) ->
-          return (error(Status.bad_request(), message), conn)
+  auth =
+    fn (c: Conn) -> Conn
+      exempt = c.method == Method.Get and c.path == "/health"
+
+      if exempt or authorized?(c, api_key)
+        c
+      else
+        Render.failure(
+          c,
+          Status.new(401, "Unauthorized"),
+          "missing or invalid API key",
+        ).halt()
       end
-
-    exempt = req.method == Method.Get and path == "/health"
-
-    unless exempt or authorized?(req, api_key)
-      return (
-        error(Status.new(401, "Unauthorized"), "missing or invalid API key"),
-        conn
-      )
     end
 
-    match req.method
-      Method.Delete -> handle_delete(req, segments, conn, embedder)
-      Method.Get -> handle_get(segments, query, conn, embedder)
-      Method.Post -> handle_post(req, segments, conn, embedder)
-      _ ->
-        (
-          error(
-            Status.method_not_allowed(),
-            "#{req.method.to_string()} is not supported",
-          ), conn
-        )
-    end
-  end
+  method_guard =
+    fn (c: Conn) -> Conn
+      allowed = c.method == Method.Get or c.method == Method.Post
+        or c.method == Method.Delete
 
-  @doc """
-  Builds a JSON error response with the given status and message.
-  """
-  fn error(status: Status, message: String) -> Response
-    body: Json = [
-      "error": status.reason.to_json(), "message": message.to_json(),
-      "status": status.code.to_json()
-    ]
-    json_response(status, body)
-  end
-
-  # ---------------------------------------------------------------
-  # Dispatch
-  # ---------------------------------------------------------------
-
-  priv fn handle_get(
-    segments: List<String>,
-    query: String,
-    conn: Connection,
-    embedder: Embedder,
-  ) -> (Response, Connection)
-
-    match segments.length()
-      1 ->
-        cond
-          head(segments) == "health" -> health(conn)
-          head(segments) == "graph" -> graph(conn)
-          head(segments) == "entities" -> list_entities(query, conn)
-          head(segments) == "search" -> search(query, conn, embedder)
-          head(segments) == "mcp" ->
-            (
-              error(
-                Status.method_not_allowed(),
-                "no SSE stream; POST JSON-RPC messages to /mcp",
-              ), conn
-            )
-          else -> route_not_found(conn)
-        end
-
-      2 ->
-        head(segments) == "entities"
-          ? show_entity(segment(segments, 1), conn)
-          : route_not_found(conn)
-
-      _ ->
-        route_not_found(conn)
-    end
-  end
-
-  priv fn handle_post(
-    req: Request,
-    segments: List<String>,
-    conn: Connection,
-    embedder: Embedder,
-  ) -> (Response, Connection)
-
-    cond
-      segments.length() == 1 and head(segments) == "entities" ->
-        create_entity(req.body, conn, embedder)
-
-      segments.length() == 1 and head(segments) == "relations" ->
-        create_relation(req.body, conn)
-
-      segments.length() == 1 and head(segments) == "mcp" ->
-        Mcp.handle(req.body, conn, embedder)
-
-      observations_path?(segments) ->
-        add_observations(segment(segments, 1), req.body, conn, embedder)
-
-      else ->
-        route_not_found(conn)
-    end
-  end
-
-  priv fn handle_delete(
-    req: Request,
-    segments: List<String>,
-    conn: Connection,
-    embedder: Embedder,
-  ) -> (Response, Connection)
-
-    cond
-      segments.length() == 1 and head(segments) == "relations" ->
-        delete_relation(req.body, conn)
-
-      segments.length() == 2 and head(segments) == "entities" ->
-        delete_entity(segment(segments, 1), conn)
-
-      observations_path?(segments) ->
-        remove_observations(segment(segments, 1), req.body, conn, embedder)
-
-      else ->
-        route_not_found(conn)
-    end
-  end
-
-  # ---------------------------------------------------------------
-  # Handlers
-  # ---------------------------------------------------------------
-
-  priv fn health(conn: Connection) -> (Response, Connection)
-    (conn, outcome) = conn.query("SELECT 1")
-
-    match outcome
-      Result.Ok(_) ->
-        body: Json = ["status": "ok".to_json()]
-        (json_response(Status.ok(), body), conn)
-
-      Result.Err(e) ->
-        (error(Status.new(503, "Service Unavailable"), e.message()), conn)
-    end
-  end
-
-  priv fn graph(conn: Connection) -> (Response, Connection)
-    (conn, entities) = EntityStore.all(conn)
-
-    match entities
-      Result.Err(e) ->
-        (error_response(e), conn)
-
-      Result.Ok(entity_list) ->
-        (conn, relations) = RelationStore.all(conn)
-
-        match relations
-          Result.Err(e) ->
-            (error_response(e), conn)
-
-          Result.Ok(relation_list) ->
-            body: Json = [
-              "entities": Json.Array(entity_list.map(e -> e.to_json())),
-              "relations": Json.Array(relation_list.map(r -> r.to_json()))
-            ]
-            (json_response(Status.ok(), body), conn)
-        end
-    end
-  end
-
-  priv fn list_entities(query: String, conn: Connection)
-    -> (Response, Connection)
-
-    (limit, offset) =
-      match page_params(query)
-        Result.Ok(params) -> params
-        Result.Err(message) ->
-          return (error(Status.bad_request(), message), conn)
+      if allowed
+        c
+      else
+        Render.failure(
+          c,
+          Status.method_not_allowed(),
+          "#{c.method.to_string()} is not supported",
+        ).halt()
       end
-
-    (conn, listed) = EntityStore.page(conn, limit, offset)
-
-    match listed
-      Result.Err(e) ->
-        (error_response(e), conn)
-
-      Result.Ok(entities) ->
-        body: Json = ["entities": Json.Array(entities.map(e -> e.to_json()))]
-        (json_response(Status.ok(), body), conn)
-    end
-  end
-
-  priv fn show_entity(name: String, conn: Connection) -> (Response, Connection)
-    (conn, found) = EntityStore.find(conn, name)
-
-    maybe =
-      match found
-        Result.Err(e) -> return (error_response(e), conn)
-        Result.Ok(m) -> m
-      end
-
-    entity =
-      match maybe
-        Option.None -> return (entity_not_found(name), conn)
-        Option.Some(found_entity) -> found_entity
-      end
-
-    (conn, relations) = RelationStore.for_entity(conn, name)
-
-    match relations
-      Result.Err(e) ->
-        (error_response(e), conn)
-
-      Result.Ok(relation_list) ->
-        body: Json = [
-          "entity": entity.to_json(),
-          "relations": Json.Array(relation_list.map(r -> r.to_json()))
-        ]
-        (json_response(Status.ok(), body), conn)
-    end
-  end
-
-  priv fn create_entity(body: String, conn: Connection, embedder: Embedder)
-    -> (Response, Connection)
-
-    (name, kind, observations) =
-      match JsonUtil.parse_entity(body)
-        Result.Ok(parsed) -> parsed
-        Result.Err(e) -> return (error_response(e), conn)
-      end
-
-    observations = JsonUtil.distinct(observations)
-    (conn, created) = EntityStore.create(conn, name, kind, observations)
-
-    match created
-      Result.Err(e) ->
-        (error_response(e), conn)
-
-      Result.Ok(entity) ->
-        conn = refresh_embedding(conn, embedder, entity)
-        (json_response(Status.created(), entity), conn)
-    end
-  end
-
-  priv fn delete_entity(name: String, conn: Connection)
-    -> (Response, Connection)
-
-    (conn, removed) = EntityStore.remove(conn, name)
-
-    match removed
-      Result.Err(e) -> (error_response(e), conn)
-      Result.Ok(deleted) ->
-        deleted ? (no_content(), conn) : (entity_not_found(name), conn)
-    end
-  end
-
-  priv fn add_observations(
-    name: String,
-    body: String,
-    conn: Connection,
-    embedder: Embedder,
-  ) -> (Response, Connection)
-
-    mutate_observations(name, body, conn, embedder, true)
-  end
-
-  priv fn remove_observations(
-    name: String,
-    body: String,
-    conn: Connection,
-    embedder: Embedder,
-  ) -> (Response, Connection)
-
-    mutate_observations(name, body, conn, embedder, false)
-  end
-
-  priv fn mutate_observations(
-    name: String,
-    body: String,
-    conn: Connection,
-    embedder: Embedder,
-    add: Bool,
-  ) -> (Response, Connection)
-
-    observations =
-      match JsonUtil.parse_observations(body)
-        Result.Ok(parsed) -> JsonUtil.distinct(parsed)
-        Result.Err(e) -> return (error_response(e), conn)
-      end
-
-    (conn, updated) = add
-      ? EntityStore.add_observations(conn, name, observations)
-      : EntityStore.remove_observations(conn, name, observations)
-
-    maybe =
-      match updated
-        Result.Err(e) -> return (error_response(e), conn)
-        Result.Ok(m) -> m
-      end
-
-    match maybe
-      Option.None ->
-        (entity_not_found(name), conn)
-
-      Option.Some(entity) ->
-        conn = refresh_embedding(conn, embedder, entity)
-        (json_response(Status.ok(), entity), conn)
-    end
-  end
-
-  priv fn create_relation(body: String, conn: Connection)
-    -> (Response, Connection)
-
-    (from, to, kind) =
-      match JsonUtil.parse_relation(body)
-        Result.Ok(parsed) -> parsed
-        Result.Err(e) -> return (error_response(e), conn)
-      end
-
-    (conn, created) = RelationStore.create(conn, from, to, kind)
-
-    match created
-      Result.Err(e) -> (error_response(e), conn)
-      Result.Ok(relation) -> (json_response(Status.created(), relation), conn)
-    end
-  end
-
-  priv fn delete_relation(body: String, conn: Connection)
-    -> (Response, Connection)
-
-    (from, to, kind) =
-      match JsonUtil.parse_relation(body)
-        Result.Ok(parsed) -> parsed
-        Result.Err(e) -> return (error_response(e), conn)
-      end
-
-    (conn, removed) = RelationStore.remove(conn, from, to, kind)
-
-    match removed
-      Result.Err(e) -> (error_response(e), conn)
-      Result.Ok(deleted) ->
-        deleted
-          ? (no_content(), conn)
-          : (
-            error(Status.not_found(), "no relation #{from} -[#{kind}]-> #{to}"),
-            conn
-          )
-    end
-  end
-
-  priv fn search(query: String, conn: Connection, embedder: Embedder)
-    -> (Response, Connection)
-
-    q =
-      match query_param(query, "q")
-        Option.Some(text) when not text.empty?() -> text
-        _ -> return (error(Status.bad_request(), "q is required"), conn)
-      end
-
-    q =
-      match URI.decode(q)
-        Result.Ok(decoded) -> decoded
-        Result.Err(_) ->
-          return (error(Status.bad_request(), "q is not valid"), conn)
-      end
-
-    limit =
-      match int_param(query, "limit", DEFAULT_SEARCH_LIMIT)
-        Result.Ok(n) when n >= 1 and n <= MAX_SEARCH_LIMIT -> n
-        Result.Ok(_) ->
-          return (
-            error(
-              Status.bad_request(),
-              "limit must be between 1 and #{MAX_SEARCH_LIMIT}",
-            ), conn
-          )
-        Result.Err(message) ->
-          return (error(Status.bad_request(), message), conn)
-      end
-
-    # The log is bookkeeping: a failed insert never fails the search.
-    (conn, logged) = SearchLog.record(conn, q)
-
-    match logged
-      Result.Err(e) -> Log.warn("search log: " <> e.message())
-      Result.Ok(_) -> ()
     end
 
-    # Embedder down means fuzzy-only ranking, not a failed search.
-    embedding: Option<String> =
-      match embedder.embed(q)
-        Result.Ok(vector) ->
-          Option.Some(vector)
-
-        Result.Err(e) ->
-          Log.warn("search: " <> e.message() <> "; using fuzzy ranking only")
-          Option.None
-      end
-
-    (conn, found) = EntityStore.search(conn, q, embedding, limit)
-
-    match found
-      Result.Err(e) ->
-        (error_response(e), conn)
-
-      Result.Ok(results) ->
-        body: Json = [
-          "query": q.to_json(),
-          "results": Json.Array(results.map(r -> r.to_json()))
-        ]
-        (json_response(Status.ok(), body), conn)
-    end
-  end
-
-  # ---------------------------------------------------------------
-  # Embedding upkeep
-  # ---------------------------------------------------------------
-
-  @doc """
-  Recomputes and stores an entity's embedding after a mutation.
-  Failure is logged, never surfaced: the entity stays searchable by
-  name, and the write already succeeded. Shared with the MCP
-  endpoint.
-  """
-  fn refresh_embedding(conn: Connection, embedder: Embedder, entity: Entity)
-    -> Connection
-
-    text = embedding_text(
-      entity.name,
-      entity.kind,
-      entity.observation_contents(),
+  Router.new()
+    .use(auth)
+    .use(method_guard)
+    .not_found(c -> Render.failure(c, Status.not_found(), "no such route"))
+    .get("/health", c -> meta.health(c))
+    .get("/graph", c -> meta.graph(c))
+    .get("/entities", c -> entities.list(c))
+    .post("/entities", c -> entities.create(c))
+    .get("/entities/:name", c -> entities.show(c))
+    .delete("/entities/:name", c -> entities.delete(c))
+    .post("/entities/:name/observations", c -> entities.add_observations(c))
+    .delete(
+      "/entities/:name/observations",
+      c -> entities.remove_observations(c),
     )
+    .post("/relations", c -> relations.create(c))
+    .delete("/relations", c -> relations.delete(c))
+    .get("/search", c -> search.search(c))
+    .get("/mcp", c -> meta.mcp_stream_rejected(c))
+    .post("/mcp", c -> meta.mcp(c))
+end
 
-    match embedder.embed(text)
-      Result.Err(e) ->
-        Log.warn("embedding #{entity.name} failed: " <> e.message())
-        conn
+@doc """
+Checks a connection out of the pool, runs `work`, and always checks
+the connection back in. Checkout failure surfaces as `Unavailable`,
+which renders 503.
+"""
+fn with_db<T>(
+  pool: Pool<Connection>,
+  work: fn (Connection) -> (Connection, Result<T, Error>),
+) -> Result<T, Error>
 
-      Result.Ok(vector) ->
-        (conn, stored) = EntityStore.set_embedding(conn, entity.name, vector)
+  match pool.checkout(CHECKOUT_MS)
+    Result.Err(_) ->
+      Result.Err(Error.Unavailable("no database connection available"))
 
-        match stored
-          Result.Err(e) ->
-            Log.warn(
-              "storing embedding for #{entity.name} failed: " <> e.message(),
-            )
-            conn
-
-          Result.Ok(_) ->
-            conn
-        end
-    end
+    Result.Ok(db) ->
+      (db, outcome) = work(db)
+      pool.checkin(db)
+      outcome
   end
+end
 
-  # ---------------------------------------------------------------
-  # Auth
-  # ---------------------------------------------------------------
-
-  priv fn authorized?(req: Request, api_key: Option<String>) -> Bool
-    match api_key
-      Option.None ->
-        true
-
-      Option.Some(key) ->
-        match req.headers.get("Authorization")
-          Option.Some(header) -> secure_equal?(header, "Bearer " <> key)
-          Option.None -> false
-        end
-    end
-  end
-
-  # Compares the full strings even after a mismatch, so timing does
-  # not reveal how much of the key matched. Length still short-circuits.
-  priv fn secure_equal?(a: String, b: String) -> Bool
-    if a.length() != b.length()
-      return false
-    end
-
-    mismatches = 0
-
-    for i in Range{start: 0, stop: a.length() - 1}
-      unless a.get(i) == b.get(i)
-        mismatches = mismatches + 1
-      end
-    end
-
-    mismatches == 0
-  end
-
-  # ---------------------------------------------------------------
-  # Request plumbing
-  # ---------------------------------------------------------------
-
-  # Splits a path into percent-decoded segments:
-  # "/entities/Foo%20Bar" gives ["entities", "Foo Bar"].
-  priv fn decode_segments(path: String) -> Result<List<String>, String>
-    segments: List<String> = List.new()
-
-    for raw in path.split("/")
-      unless raw.empty?()
-        match URI.decode(raw)
-          Result.Ok(decoded) -> segments = segments.append(decoded)
-          Result.Err(_) ->
-            return Result.Err("malformed percent-encoding in path")
-        end
-      end
-    end
-
-    Result.Ok(segments)
-  end
-
-  priv fn head(segments: List<String>) -> String
-    segments.first().or("")
-  end
-
-  priv fn segment(segments: List<String>, index: Int) -> String
-    segments.get(index).or("")
-  end
-
-  priv fn observations_path?(segments: List<String>) -> Bool
-    segments.length() == 3 and head(segments) == "entities"
-      and segment(segments, 2) == "observations"
-  end
-
-  priv fn route_not_found(conn: Connection) -> (Response, Connection)
-    (error(Status.not_found(), "no such route"), conn)
-  end
-
-  priv fn entity_not_found(name: String) -> Response
-    error(Status.not_found(), "no entity named #{name}")
-  end
-
-  priv fn error_response(e: Error) -> Response
-    match e
-      Error.Database(_) -> error(Status.internal_server_error(), e.message())
-      Error.Duplicate(_) -> error(Status.new(409, "Conflict"), e.message())
-      Error.Embedding(_) -> error(Status.new(502, "Bad Gateway"), e.message())
-      Error.NotFound(_) -> error(Status.not_found(), e.message())
-      Error.Validation(_) -> error(Status.bad_request(), e.message())
-    end
-  end
-
-  priv fn page_params(query: String) -> (Int, Int) ! String
-    limit = try int_param(query, "limit", DEFAULT_PAGE_LIMIT)
-    offset = try int_param(query, "offset", 0)
-
-    unless limit >= 1 and limit <= MAX_PAGE_LIMIT
-      fail "limit must be between 1 and #{MAX_PAGE_LIMIT}"
-    end
-
-    unless offset >= 0
-      fail "offset must not be negative"
-    end
-
-    (limit, offset)
-  end
-
-  priv fn int_param(query: String, name: String, default: Int) -> Int ! String
-    match query_param(query, name)
-      Option.None -> default
-      Option.Some(text) ->
-        text.to_int()
-          rescue _ -> fail "#{name} must be an integer, got '#{text}'"
-    end
-  end
-
-  priv fn query_param(query: String, name: String) -> Option<String>
-    prefix = name <> "="
-    found: Option<String> = Option.None
-
-    for pair in query.split("&")
-      if pair.starts_with?(prefix)
-        found = Option.Some(pair.slice(
-          Range{start: prefix.length(), stop: pair.length() - 1},
-        ))
-      end
-    end
-
-    found
-  end
-
-  # Splits a request target into path and query string.
-  priv fn split_query(target: String) -> (String, String)
-    parts = target.split("?")
-    (parts.get(0).or(target), parts.get(1).or(""))
-  end
-
-  priv fn json_response<T: JSON.Encoding>(status: Status, body: T) -> Response
-    text = JSON.encode(body, JSON.EncodeOptions{pretty?: true})
+@doc """
+Response builders shared by every controller. REST responses
+pretty-print their JSON, matching the service's original wire shape.
+"""
+struct Render
+  @doc """
+  Builds an error `HTTP.Response` directly, for failures the worker
+  hits before a `Conn` exists (unparseable or oversized requests).
+  """
+  fn raw(status: Status, message: String) -> Response
+    text = JSON.encode(error_body(status, message), pretty())
     headers = Headers.new()
       .set("Content-Type", "application/json")
       .set("Content-Length", "#{text.byte_length()}")
     Response{body: text, headers: headers, status: status, version: "HTTP/1.1"}
   end
 
-  priv fn no_content -> Response
-    headers = Headers.new().set("Content-Length", "0")
-    Response{
-      body: "",
-      headers: headers,
-      status: Status.no_content(),
-      version: "HTTP/1.1",
-    }
+  @doc """
+  Renders the service error shape: `{error, message, status}`.
+  """
+  fn failure(c: Conn, status: Status, message: String) -> Conn
+    Render.json(c, status, error_body(status, message))
   end
+
+  @doc """
+  Maps a package `Error` onto the HTTP status it renders with.
+  """
+  fn from_error(c: Conn, e: Error) -> Conn
+    status =
+      match e
+        Error.Database(_) -> Status.internal_server_error()
+        Error.Duplicate(_) -> Status.new(409, "Conflict")
+        Error.Embedding(_) -> Status.new(502, "Bad Gateway")
+        Error.NotFound(_) -> Status.not_found()
+        Error.Unavailable(_) -> Status.new(503, "Service Unavailable")
+        Error.Validation(_) -> Status.bad_request()
+      end
+
+    Render.failure(c, status, e.message())
+  end
+
+  fn json<T: JSON.Encoding>(c: Conn, status: Status, body: T) -> Conn
+    text = JSON.encode(body, pretty())
+    c.resp(status, text).put_resp_header("Content-Type", "application/json")
+  end
+
+  fn no_content(c: Conn) -> Conn
+    c.resp(Status.no_content(), "")
+  end
+
+  @doc """
+  Adopts a prebuilt `HTTP.Response` (the MCP endpoint builds its own)
+  into the conn.
+  """
+  fn http(c: Conn, response: Response) -> Conn
+    c = c.resp(response.status, response.body)
+
+    c.resp_body.empty?()
+      ? c
+      : c.put_resp_header("Content-Type", "application/json")
+  end
+end
+
+priv fn error_body(status: Status, message: String) -> Json
+  [
+    "error": status.reason.to_json(), "message": message.to_json(),
+    "status": status.code.to_json()
+  ]
+end
+
+priv fn pretty -> JSON.EncodeOptions
+  JSON.EncodeOptions{pretty?: true}
+end
+
+@doc """
+Request parameter readers, failing with `Validation` (rendered as
+400) on bad input.
+"""
+struct Params
+  @doc """
+  Reads the percent-decoded `:name` path parameter.
+  """
+  fn name(c: Conn) -> String ! Error
+    URI.decode(c.param("name").or(""))
+      rescue _ -> fail Error.Validation("malformed percent-encoding in path")
+  end
+
+  @doc """
+  Reads and bounds the `limit` and `offset` pagination parameters.
+  """
+  fn page(c: Conn) -> (Int, Int) ! Error
+    limit = try Params.int(c, "limit", DEFAULT_PAGE_LIMIT)
+    offset = try Params.int(c, "offset", 0)
+
+    unless limit >= 1 and limit <= MAX_PAGE_LIMIT
+      fail Error.Validation("limit must be between 1 and #{MAX_PAGE_LIMIT}")
+    end
+
+    unless offset >= 0
+      fail Error.Validation("offset must not be negative")
+    end
+
+    (limit, offset)
+  end
+
+  fn int(c: Conn, name: String, default: Int) -> Int ! Error
+    match c.query_param(name)
+      Option.None -> default
+      Option.Some(text) ->
+        text.to_int()
+          rescue _ -> fail Error.Validation("#{name} must be an integer, got '#{text}'")
+    end
+  end
+end
+
+priv fn authorized?(c: Conn, api_key: Option<String>) -> Bool
+  match api_key
+    Option.None ->
+      true
+
+    Option.Some(key) ->
+      match c.get_header("Authorization")
+        Option.Some(header) -> secure_equal?(header, "Bearer " <> key)
+        Option.None -> false
+      end
+  end
+end
+
+# Compares the full strings even after a mismatch, so timing does
+# not reveal how much of the key matched. Length still short-circuits.
+priv fn secure_equal?(a: String, b: String) -> Bool
+  if a.length() != b.length()
+    return false
+  end
+
+  mismatches = 0
+
+  for i in Range{start: 0, stop: a.length() - 1}
+    unless a.get(i) == b.get(i)
+      mismatches = mismatches + 1
+    end
+  end
+
+  mismatches == 0
 end

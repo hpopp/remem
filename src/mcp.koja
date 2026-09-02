@@ -13,7 +13,7 @@ MCP server endpoint (streamable HTTP transport) at `POST /mcp`. The
 server is stateless and never streams, so each JSON-RPC message gets
 one JSON response and `GET /mcp` is a 405.
 
-Tools mirror the REST API, with one deliberate omission: there is no
+Tools mirror the REST API, with one deliberate omission. There is no
 read-the-whole-graph tool. Search is the only way in, so agent
 clients retrieve by relevance instead of loading everything. Tool
 descriptions steer agents to search before writing and to keep the
@@ -230,7 +230,7 @@ struct Mcp
       )
     end
 
-    # The log is bookkeeping: a failed insert never fails the search.
+    # The log is bookkeeping, so a failed insert never fails the search.
     (conn, logged) = SearchLog.record(conn, query)
 
     match logged
@@ -245,7 +245,7 @@ struct Mcp
           Option.Some(vector)
 
         Result.Err(e) ->
-          Log.warn("search: " <> e.message() <> "; using fuzzy ranking only")
+          Log.warn("search falls back to fuzzy ranking only: " <> e.message())
           Option.None
       end
 
@@ -332,7 +332,7 @@ struct Mcp
         (tool_err(id, e.message()), conn)
 
       Result.Ok(entity) ->
-        conn = Router.refresh_embedding(conn, embedder, entity)
+        conn = refresh_embedding(conn, embedder, entity)
         (tool_ok(id, entity.to_json()), conn)
     end
   end
@@ -395,7 +395,7 @@ struct Mcp
         (tool_err(id, "no entity named #{name}"), conn)
 
       Option.Some(entity) ->
-        conn = Router.refresh_embedding(conn, embedder, entity)
+        conn = refresh_embedding(conn, embedder, entity)
         (tool_ok(id, entity.to_json()), conn)
     end
   end
@@ -469,7 +469,7 @@ struct Mcp
     result: Json = [
       "protocolVersion": MCP_PROTOCOL_VERSION.to_json(),
       "capabilities": ["tools": empty_object()],
-      "serverInfo": ["name": "remem".to_json(), "version": "0.1.0".to_json()]
+      "serverInfo": ["name": "remem".to_json(), "version": VERSION.to_json()]
     ]
     result
   end
@@ -479,7 +479,7 @@ struct Mcp
     result
   end
 
-  # A successful tool call: the payload rides as JSON text content.
+  # The payload of a successful tool call rides as JSON text content.
   priv fn tool_ok(id: Json, payload: Json) -> Response
     rpc_result(id, tool_result(JSON.encode(payload), false))
   end

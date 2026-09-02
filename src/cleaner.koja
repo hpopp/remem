@@ -1,0 +1,78 @@
+alias Pooler.Pool
+alias Postgres.Connection
+alias Process.Step
+alias Process.StopReason
+
+# Rows older than this leave the search log. The log feeds relevance
+# and upkeep work, and a quarter's history is plenty for both.
+priv const RETENTION_DAYS: Int = 90
+
+# Cap on deletions per sweep, so one sweep never holds a pooled
+# connection for long.
+priv const SWEEP_LIMIT: Int = 500
+
+# Pause between sweeps while draining a backlog. Long enough for
+# request traffic to interleave, short enough to drain quickly.
+priv const DRAIN_DELAY_MS: Int = 100
+
+# Checkout budget for a sweep. A busy pool skips the sweep instead
+# of queueing behind request traffic.
+priv const SWEEP_CHECKOUT_MS: Int = 1000
+
+struct Cleaner.Config
+  interval_ms: Int
+  pool: Pool<Connection>
+end
+
+@doc """
+The background search log sweeper. Ticks on its own timer and
+deletes `search_log` rows past retention, `SWEEP_LIMIT` rows at a
+time. Sweeps are bounded and paced so a large backlog never starves
+the request path, and the first tick is jittered so restarts never
+sweep in lockstep with the interval.
+"""
+struct Cleaner: Process<Cleaner.Config, (), ()>
+  interval_ms: Int
+  pool: Pool<Connection>
+
+  fn start(config: Cleaner.Config) -> Self ! StopReason
+    me: Ref<(), ()> = Ref.self_ref()
+    me.send_after((), Random.int(0, config.interval_ms))
+    Cleaner{interval_ms: config.interval_ms, pool: config.pool}
+  end
+
+  fn handle(self, msg: (), from: Option<ReplyTo<()>>) -> Step<Self>
+    deleted = self.sweep()
+
+    if deleted > 0
+      Log.info("swept #{deleted} search log rows past retention")
+    end
+
+    # A full batch means a backlog remains, so come back after a
+    # short pause instead of waiting out the whole interval.
+    delay = deleted >= SWEEP_LIMIT ? DRAIN_DELAY_MS : self.interval_ms
+    me: Ref<(), ()> = Ref.self_ref()
+    me.send_after((), delay)
+    Step.Continue(self)
+  end
+
+  priv fn sweep(self) -> Int
+    match self.pool.checkout(SWEEP_CHECKOUT_MS)
+      Result.Err(_) ->
+        0
+
+      Result.Ok(db) ->
+        (db, outcome) = SearchLog.prune(db, RETENTION_DAYS, SWEEP_LIMIT)
+        self.pool.checkin(db)
+
+        match outcome
+          Result.Ok(count) ->
+            count
+
+          Result.Err(e) ->
+            Log.warn("search log sweep: " <> e.message())
+            0
+        end
+    end
+  end
+end

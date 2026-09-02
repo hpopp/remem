@@ -1,0 +1,11 @@
+[project]
+koja = "0.18"
+name = "trail"
+namespace = "Trail"
+version = "0.1.0"
+
+[index]
+categories = ["web"]
+description = "An HTTP/1.1 connection worker with keep-alive serving, byte-correct framing, request size caps, and partial-write safe responses"
+keywords = ["http", "keep-alive", "server", "socket", "web"]
+kind = "library"

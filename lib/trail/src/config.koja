@@ -1,0 +1,94 @@
+alias HTTP.Headers
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+
+priv const DEFAULT_MAX_BODY_BYTES: Int = 1048576
+priv const DEFAULT_MAX_HEADER_BYTES: Int = 16384
+priv const DEFAULT_MAX_REQUESTS_PER_CONNECTION: Int = 1000
+
+@doc """
+Settings for a `Worker`. Build one with `new`, then adjust it with
+the chainable `with_` functions:
+
+```
+config = Config.new(handler)
+  .with_max_body_bytes(4 * 1024 * 1024)
+  .with_on_request((req, resp, ms) -> log_access(req, resp, ms))
+```
+
+`handler` runs once per parsed request. `error_response` builds the
+bodies for requests the worker rejects before a handler could run
+(unparseable, or over a size cap). The hooks default to no-ops.
+`on_request` fires after each dispatched request with the elapsed
+milliseconds, and `on_reject` fires when the worker rejects a
+request itself.
+"""
+struct Config
+  error_response: fn (Status, String) -> Response
+  handler: fn (Request) -> Response
+  max_body_bytes: Int
+  max_header_bytes: Int
+  max_requests_per_connection: Int
+  on_reject: fn (Status) -> ()
+  on_request: fn (Request, Response, Int) -> ()
+
+  fn new(handler: fn (Request) -> Response) -> Config
+    Config{
+      error_response: &plain_error/2,
+      handler: handler,
+      max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+      max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
+      max_requests_per_connection: DEFAULT_MAX_REQUESTS_PER_CONNECTION,
+      on_reject: &ignore_reject/1,
+      on_request: &ignore_request/3,
+    }
+  end
+
+  fn with_error_response(self, build: fn (Status, String) -> Response) -> Config
+    self.error_response = build
+    self
+  end
+
+  fn with_max_body_bytes(self, limit: Int) -> Config
+    self.max_body_bytes = limit
+    self
+  end
+
+  fn with_max_header_bytes(self, limit: Int) -> Config
+    self.max_header_bytes = limit
+    self
+  end
+
+  fn with_max_requests_per_connection(self, limit: Int) -> Config
+    self.max_requests_per_connection = limit
+    self
+  end
+
+  fn with_on_reject(self, observe: fn (Status) -> ()) -> Config
+    self.on_reject = observe
+    self
+  end
+
+  fn with_on_request(self, observe: fn (Request, Response, Int) -> ()) -> Config
+    self.on_request = observe
+    self
+  end
+end
+
+# The default error body, a plain text line.
+priv fn plain_error(status: Status, message: String) -> Response
+  headers = Headers.new()
+    .set("Content-Type", "text/plain; charset=utf-8")
+    .set("Content-Length", "#{message.byte_length()}")
+
+  Response{body: message, headers: headers, status: status, version: "HTTP/1.1"}
+end
+
+priv fn ignore_reject(status: Status)
+  ()
+end
+
+priv fn ignore_request(request: Request, response: Response, elapsed: Int)
+  ()
+end

@@ -75,3 +75,38 @@ fn embedding_text(name: String, kind: String, observations: List<String>)
 
   observations.empty?() ? base : base <> ": " <> String.join(observations, ". ")
 end
+
+@doc """
+Recomputes and stores an entity's embedding after a mutation.
+Failure is logged, never surfaced. The entity stays searchable by
+name, and the write already succeeded. Shared by the REST handlers
+and the MCP tools.
+"""
+fn refresh_embedding(
+  conn: Postgres.Connection,
+  embedder: Embedder,
+  entity: Entity,
+) -> Postgres.Connection
+
+  text = embedding_text(entity.name, entity.kind, entity.observation_contents())
+
+  match embedder.embed(text)
+    Result.Err(e) ->
+      Log.warn("embedding #{entity.name} failed: " <> e.message())
+      conn
+
+    Result.Ok(vector) ->
+      (conn, stored) = EntityStore.set_embedding(conn, entity.name, vector)
+
+      match stored
+        Result.Err(e) ->
+          Log.warn(
+            "storing embedding for #{entity.name} failed: " <> e.message(),
+          )
+          conn
+
+        Result.Ok(_) ->
+          conn
+      end
+  end
+end

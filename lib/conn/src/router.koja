@@ -1,0 +1,205 @@
+alias HTTP.Method
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+
+@doc """
+One registered route: a method, a segmented path pattern, and the
+handler to run on a match.
+"""
+struct Route
+  handler: fn (Conn) -> Conn
+  method: Method
+  segments: List<String>
+end
+
+impl Equality for Route
+  @doc """
+  Compares the method and path pattern. The handler does not take part.
+  """
+  fn equals?(self, other: Route) -> Bool
+    self.method == other.method and self.segments == other.segments
+  end
+end
+
+@doc """
+An immutable route table. Build one with the chainable verb
+functions, then serve requests with `dispatch`:
+
+```
+router = Router.new()
+  .use(&log_requests/1)
+  .get("/health", &health/1)
+  .get("/sessions/:id", c -> sessions.show(c))
+
+response = router.dispatch(request)
+```
+
+Middleware registered with `use` runs in order before the matched
+handler, and a halted conn stops the pipeline. Pattern segments
+starting with `:` bind path parameters, read with `Conn.param`.
+"""
+struct Router
+  fallback: fn (Conn) -> Conn
+  middleware: List<fn (Conn) -> Conn>
+  routes: List<Route>
+
+  @doc """
+  Creates an empty router whose fallback answers 404 in plain text.
+  Replace the fallback with `not_found`.
+  """
+  fn new -> Router
+    empty_middleware: List<fn (Conn) -> Conn> = List.new()
+    empty_routes: List<Route> = List.new()
+
+    Router{
+      fallback: &default_fallback/1,
+      middleware: empty_middleware,
+      routes: empty_routes,
+    }
+  end
+
+  @doc """
+  Appends a middleware function. Middleware runs for every request,
+  matched or not, in registration order.
+  """
+  fn use(self, middleware: fn (Conn) -> Conn) -> Router
+    self.middleware = self.middleware.append(middleware)
+    self
+  end
+
+  @doc """
+  Replaces the handler that runs when no route matches.
+  """
+  fn not_found(self, handler: fn (Conn) -> Conn) -> Router
+    self.fallback = handler
+    self
+  end
+
+  fn delete(self, pattern: String, handler: fn (Conn) -> Conn) -> Router
+    self.route(Method.Delete, pattern, handler)
+  end
+
+  fn get(self, pattern: String, handler: fn (Conn) -> Conn) -> Router
+    self.route(Method.Get, pattern, handler)
+  end
+
+  fn post(self, pattern: String, handler: fn (Conn) -> Conn) -> Router
+    self.route(Method.Post, pattern, handler)
+  end
+
+  fn put(self, pattern: String, handler: fn (Conn) -> Conn) -> Router
+    self.route(Method.Put, pattern, handler)
+  end
+
+  @doc """
+  Registers a route for an arbitrary method.
+  """
+  fn route(self, method: Method, pattern: String, handler: fn (Conn) -> Conn)
+    -> Router
+
+    route = Route{
+      handler: handler,
+      method: method,
+      segments: split_segments(pattern),
+    }
+    self.routes = self.routes.append(route)
+    self
+  end
+
+  @doc """
+  Runs a request through the middleware and the first matching
+  route, returning the response. No match runs the fallback.
+  """
+  fn dispatch(self, request: Request) -> Response
+    conn = Conn.from_request(request)
+
+    for middleware in self.middleware
+      if conn.halted
+        return conn.to_response()
+      end
+
+      conn = middleware(conn)
+    end
+
+    if conn.halted
+      return conn.to_response()
+    end
+
+    path_segments = split_segments(conn.path)
+
+    for route in self.routes
+      if route.method == conn.method
+        match bind_params(route.segments, path_segments)
+          Option.Some(params) ->
+            conn.path_params = params
+            handler = route.handler
+            return handler(conn).to_response()
+
+          Option.None ->
+            ()
+        end
+      end
+    end
+
+    fallback = self.fallback
+    fallback(conn).to_response()
+  end
+end
+
+impl Equality for Router
+  @doc """
+  Compares registered route patterns. Handlers and middleware do not
+  take part.
+  """
+  fn equals?(self, other: Router) -> Bool
+    self.routes == other.routes
+  end
+end
+
+# Splits a path into its segments: "/sessions/abc" becomes
+# ["sessions", "abc"]. Empty segments drop out, so trailing slashes
+# are tolerated.
+priv fn split_segments(path: String) -> List<String>
+  segments: List<String> = List.new()
+
+  for segment in path.split("/")
+    unless segment.empty?()
+      segments = segments.append(segment)
+    end
+  end
+
+  segments
+end
+
+# Matches path segments against pattern segments, binding `:name`
+# parameters. Returns the bindings, or None when the shapes differ.
+priv fn bind_params(pattern: List<String>, path: List<String>)
+  -> Option<List<(String, String)>>
+
+  if pattern.length() != path.length()
+    return Option.None
+  end
+
+  params: List<(String, String)> = List.new()
+
+  for index in Range{start: 0, stop: pattern.length() - 1}
+    expected = pattern.get(index).or("")
+    actual = path.get(index).or("")
+
+    if expected.starts_with?(":")
+      name = expected.slice(Range{start: 1, stop: expected.length() - 1})
+      params = params.append((name, actual))
+    else
+      unless expected == actual
+        return Option.None
+      end
+    end
+  end
+
+  Option.Some(params)
+end
+
+priv fn default_fallback(conn: Conn) -> Conn
+  conn.text(Status.not_found(), "not found")
+end

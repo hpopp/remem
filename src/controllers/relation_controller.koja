@@ -1,0 +1,45 @@
+alias Conn.Conn
+alias HTTP.Status
+alias Pooler.Pool
+alias Postgres.Connection
+
+@doc """
+Relation endpoints. Both take the same `{from, to, type}` body.
+`create` answers 201 with the relation and `delete` answers 204.
+"""
+struct RelationController
+  pool: Pool<Connection>
+
+  fn create(self, c: Conn) -> Conn
+    self.do_create(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn delete(self, c: Conn) -> Conn
+    self.do_delete(c) rescue e -> Render.from_error(c, e)
+  end
+
+  priv fn do_create(self, c: Conn) -> Conn ! Error
+    (from, to, kind) = try JsonUtil.parse_relation(c.body)
+
+    relation = try with_db(
+      self.pool,
+      db -> RelationStore.create(db, from, to, kind),
+    )
+    Render.json(c, Status.created(), relation)
+  end
+
+  priv fn do_delete(self, c: Conn) -> Conn ! Error
+    (from, to, kind) = try JsonUtil.parse_relation(c.body)
+
+    deleted = try with_db(
+      self.pool,
+      db -> RelationStore.remove(db, from, to, kind),
+    )
+
+    unless deleted
+      fail Error.NotFound("no relation #{from} -[#{kind}]-> #{to}")
+    end
+
+    Render.no_content(c)
+  end
+end

@@ -1,0 +1,71 @@
+priv const HEADER_CAP: Int = 16384
+priv const BODY_CAP: Int = 1048576
+
+@doc """
+Framing tests. The worker itself needs a live socket, so these
+exercise `frame_request` directly.
+"""
+struct WorkerTest
+  @test "framing completes, waits, and splits pipelined bytes"
+  fn test_framing -> Bool ! String
+    small = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n"
+
+    match frame_request(small, HEADER_CAP, BODY_CAP)
+      Frame.Complete(framed) ->
+        (req, leftover) = framed
+
+        unless req == small and leftover.empty?()
+          fail "small request should frame whole with no leftover"
+        end
+
+      _ ->
+        fail "small request should frame complete"
+    end
+
+    match frame_request("GET /health HTTP/1.1\r\nHost", HEADER_CAP, BODY_CAP)
+      Frame.Incomplete -> ()
+      _ -> fail "partial headers should be incomplete"
+    end
+
+    pipelined = small <> "GET /graph"
+
+    match frame_request(pipelined, HEADER_CAP, BODY_CAP)
+      Frame.Complete(framed) ->
+        (req, leftover) = framed
+
+        unless req == small and leftover == "GET /graph"
+          fail "pipelined bytes should stay in the leftover"
+        end
+
+      _ ->
+        fail "pipelined request should frame complete"
+    end
+
+    true
+  end
+
+  @test "framing enforces the header and body caps"
+  fn test_caps -> Bool ! String
+    huge_body = "POST /entities HTTP/1.1\r\n" <>
+      "Content-Length: #{BODY_CAP + 1}\r\n\r\n"
+
+    match frame_request(huge_body, HEADER_CAP, BODY_CAP)
+      Frame.TooLarge -> ()
+      _ -> fail "a body past the cap should be too large"
+    end
+
+    filler = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    headers = "GET / HTTP/1.1\r\nX-Filler: "
+
+    while headers.byte_length() <= HEADER_CAP
+      headers = headers <> filler
+    end
+
+    match frame_request(headers, HEADER_CAP, BODY_CAP)
+      Frame.TooLarge -> ()
+      _ -> fail "unterminated oversized headers should be too large"
+    end
+
+    true
+  end
+end

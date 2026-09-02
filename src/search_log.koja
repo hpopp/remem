@@ -24,4 +24,34 @@ struct SearchLog
       Result.Ok(_) -> (conn, Result.Ok(()))
     end
   end
+
+  @doc """
+  Deletes up to `limit` rows older than `days`, returning how many
+  went. The `Cleaner` calls this on its sweep timer.
+  """
+  fn prune(conn: Connection, days: Int, limit: Int)
+    -> (Connection, Result<Int, Error>)
+
+    (conn, outcome) = conn.execute("""
+      DELETE FROM search_log
+      WHERE id IN (
+        SELECT id FROM search_log
+        WHERE created_at < now() - ($1 * interval '1 day')
+        LIMIT $2
+      )
+      """, [Value.int(days), Value.int(limit)])
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) -> (conn, Result.Ok(deleted_count(qr.tag)))
+    end
+  end
+end
+
+# Reads the row count out of a `DELETE n` command tag.
+priv fn deleted_count(tag: String) -> Int
+  match tag.split(" ").get(1)
+    Option.None -> 0
+    Option.Some(text) -> text.to_int() rescue _ -> 0
+  end
 end

@@ -1,0 +1,174 @@
+alias HTTP.Headers
+alias HTTP.Method
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+
+@doc """
+One HTTP exchange as a value. A `Conn` starts as the parsed request
+and accumulates the response as handlers transform it:
+
+```
+fn show(conn: Conn) -> Conn
+  conn.json(Status.ok(), "hello")
+end
+```
+
+Handlers and middleware share one shape, `fn (Conn) -> Conn`, so a
+pipeline is just function application. `halt` marks the conn done
+and stops `Router` from running anything after the current step.
+"""
+struct Conn
+  body: String
+  halted: Bool
+  headers: Headers
+  method: Method
+  path: String
+  path_params: List<(String, String)>
+  query: String
+  resp_body: String
+  resp_headers: Headers
+  resp_status: Status
+  version: String
+
+  @doc """
+  Builds a `Conn` from a parsed request. The request target splits
+  into path and query string at the first `?`.
+  """
+  fn from_request(request: Request) -> Conn
+    parts = request.path.split("?")
+    empty_params: List<(String, String)> = List.new()
+
+    Conn{
+      body: request.body,
+      halted: false,
+      headers: request.headers,
+      method: request.method,
+      path: parts.get(0).or(request.path),
+      path_params: empty_params,
+      query: parts.get(1).or(""),
+      resp_body: "",
+      resp_headers: Headers.new(),
+      resp_status: Status.new(0, ""),
+      version: request.version,
+    }
+  end
+
+  # --- request reads ---
+  @doc """
+  Returns the path parameter bound by the matched route pattern,
+  like `id` for the pattern `/sessions/:id`.
+  """
+  fn param(self, name: String) -> Option<String>
+    for pair in self.path_params
+      (key, value) = pair
+
+      if key == name
+        return Option.Some(value)
+      end
+    end
+
+    Option.None
+  end
+
+  @doc """
+  Returns the last value of a query string parameter, like `20` for
+  `limit` in `?limit=20`.
+  """
+  fn query_param(self, name: String) -> Option<String>
+    prefix = name <> "="
+    found: Option<String> = Option.None
+
+    for pair in self.query.split("&")
+      if pair.starts_with?(prefix)
+        found = Option.Some(pair.slice(
+          Range{start: prefix.length(), stop: pair.length() - 1},
+        ))
+      end
+    end
+
+    found
+  end
+
+  @doc """
+  Returns a request header value.
+  """
+  fn get_header(self, name: String) -> Option<String>
+    self.headers.get(name)
+  end
+
+  # --- response writes ---
+  @doc """
+  Sets the response status and body without touching headers.
+  """
+  fn resp(self, status: Status, body: String) -> Conn
+    self.resp_body = body
+    self.resp_status = status
+    self
+  end
+
+  @doc """
+  Sets a response header, replacing any existing value.
+  """
+  fn put_resp_header(self, name: String, value: String) -> Conn
+    self.resp_headers = self.resp_headers.set(name, value)
+    self
+  end
+
+  @doc """
+  Responds with a JSON body and matching content headers.
+  """
+  fn json<T: JSON.Encoding>(self, status: Status, value: T) -> Conn
+    self.with_body(status, JSON.encode(value), "application/json")
+  end
+
+  @doc """
+  Responds with a plain text body and matching content headers.
+  """
+  fn text(self, status: Status, body: String) -> Conn
+    self.with_body(status, body, "text/plain; charset=utf-8")
+  end
+
+  @doc """
+  Marks the conn as done. The router runs no further middleware or
+  handler after a halted conn.
+  """
+  fn halt(self) -> Conn
+    self.halted = true
+    self
+  end
+
+  @doc """
+  Converts the accumulated response into an `HTTP.Response`. A conn
+  that never set a status becomes a 500, since a handler forgot to
+  respond.
+  """
+  fn to_response(self) -> Response
+    status = self.resp_status.code == 0
+      ? Status.internal_server_error()
+      : self.resp_status
+
+    headers = self.resp_headers
+
+    if headers.get("Content-Length").none?()
+      headers = headers.set("Content-Length", "#{self.resp_body.byte_length()}")
+    end
+
+    Response{
+      body: self.resp_body,
+      headers: headers,
+      status: status,
+      version: "HTTP/1.1",
+    }
+  end
+
+  priv fn with_body(self, status: Status, body: String, content_type: String)
+    -> Conn
+
+    self.resp_body = body
+    self.resp_status = status
+    self.resp_headers = self.resp_headers.set("Content-Type", content_type)
+      .set("Content-Length", "#{body.byte_length()}")
+    self
+  end
+end

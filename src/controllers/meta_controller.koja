@@ -1,0 +1,98 @@
+alias Conn.Conn
+alias HTTP.Response
+alias HTTP.Status
+alias JSON.Value as Json
+alias Pooler.Pool
+alias Postgres.Connection
+
+@doc """
+Service endpoints for liveness, the whole graph, and the MCP
+JSON-RPC endpoint.
+"""
+struct MetaController
+  embedder: Embedder
+  pool: Pool<Connection>
+
+  fn health(self, c: Conn) -> Conn
+    self.do_health(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn graph(self, c: Conn) -> Conn
+    self.do_graph(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn mcp(self, c: Conn) -> Conn
+    self.do_mcp(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn mcp_stream_rejected(self, c: Conn) -> Conn
+    Render.failure(
+      c,
+      Status.method_not_allowed(),
+      "no SSE stream, POST JSON-RPC messages to /mcp",
+    )
+  end
+
+  priv fn do_health(self, c: Conn) -> Conn ! Error
+    try with_db(self.pool, db -> health_db(db))
+
+    body: Json = ["status": "ok".to_json()]
+    Render.json(c, Status.ok(), body)
+  end
+
+  priv fn do_graph(self, c: Conn) -> Conn ! Error
+    (entities, relations) = try with_db(self.pool, db -> graph_db(db))
+
+    body: Json = [
+      "entities": Json.Array(entities.map(e -> e.to_json())),
+      "relations": Json.Array(relations.map(r -> r.to_json()))
+    ]
+    Render.json(c, Status.ok(), body)
+  end
+
+  priv fn do_mcp(self, c: Conn) -> Conn ! Error
+    embedder = self.embedder
+    body = c.body
+    response = try with_db(self.pool, db -> mcp_db(db, embedder, body))
+    Render.http(c, response)
+  end
+end
+
+# Probes the database for the health check. Failure maps to 503.
+priv fn health_db(db: Connection) -> (Connection, Result<(), Error>)
+  (db, outcome) = db.query("SELECT 1")
+
+  match outcome
+    Result.Ok(_) -> (db, Result.Ok(()))
+    Result.Err(e) -> (db, Result.Err(Error.Unavailable(e.message())))
+  end
+end
+
+# Reads every entity and relation for `GET /graph`.
+priv fn graph_db(db: Connection)
+  -> (Connection, Result<(List<Entity>, List<Relation>), Error>)
+
+  (db, entities) = EntityStore.all(db)
+
+  entity_list =
+    match entities
+      Result.Err(e) -> return (db, Result.Err(e))
+      Result.Ok(list) -> list
+    end
+
+  (db, relations) = RelationStore.all(db)
+
+  match relations
+    Result.Err(e) -> (db, Result.Err(e))
+    Result.Ok(list) -> (db, Result.Ok((entity_list, list)))
+  end
+end
+
+# Runs one MCP message. `Mcp.handle` renders JSON-RPC level errors
+# itself, so the outcome only fails when the pool does.
+priv fn mcp_db(db: Connection, embedder: Embedder, body: String)
+  -> (Connection, Result<Response, Error>)
+
+  (response, db) = Mcp.handle(body, db, embedder)
+  (db, Result.Ok(response))
+end

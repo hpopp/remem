@@ -1,4 +1,5 @@
 alias Conn.Router
+alias HTTP.Method
 alias HTTP.Request
 alias HTTP.Response
 alias HTTP.Status
@@ -15,7 +16,7 @@ alias Process.StopReason
 alias Trail.Config as TrailConfig
 alias Trail.Worker
 
-const VERSION: String = "0.2.0"
+const VERSION: String = "0.2.1"
 
 const POOL_SIZE: Int = 10
 
@@ -153,7 +154,8 @@ end
 # Wires the route table and remem's logging and error shape into a
 # trail worker config. Rejected requests render the same JSON error
 # body as routed failures, and every dispatched request logs one
-# access line.
+# access line. Successful health probes are the exception, since
+# they arrive every few seconds and would drown the log.
 priv fn server_config(router: Router) -> TrailConfig
   handler = fn (request: Request) -> Response router.dispatch(request) end
 
@@ -164,6 +166,10 @@ priv fn server_config(router: Router) -> TrailConfig
 
   on_request =
     fn (request: Request, response: Response, elapsed: Int)
+      if healthy_probe?(request, response)
+        return
+      end
+
       Log.info(
         "#{request.method.to_string()} #{request.path} " <>
           "#{response.status.code} #{elapsed}ms",
@@ -183,4 +189,11 @@ priv fn server_config(router: Router) -> TrailConfig
     .with_error_response(error_response)
     .with_on_request(on_request)
     .with_on_reject(on_reject)
+end
+
+# True for a `GET /health` that passed. Failed probes still log so a
+# sick database shows up.
+priv fn healthy_probe?(request: Request, response: Response) -> Bool
+  request.method == Method.Get and request.path == "/health"
+    and response.status.ok?()
 end

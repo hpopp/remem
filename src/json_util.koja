@@ -103,6 +103,56 @@ struct JsonUtil
   end
 
   @doc """
+  Decodes the matching-observations column from a search query into
+  hits. Malformed text gives an empty list.
+  """
+  fn decode_hits(text: String) -> List<ObservationHit>
+    hits: List<ObservationHit> = List.new()
+
+    decoded =
+      match JSON.decode(text)
+        Result.Err(_) -> return hits
+        Result.Ok(value) -> value
+      end
+
+    match decoded
+      Json.Array(items) ->
+        for item in items
+          hits = hits.append(
+            ObservationHit{
+              content: field_string(item, "content"),
+              score: field_float(item, "score"),
+            },
+          )
+        end
+
+        hits
+
+      _ ->
+        hits
+    end
+  end
+
+  @doc """
+  Reads a request body's optional `confirm` flag. Absent or non-bool
+  reads as `false`.
+  """
+  fn parse_confirm(body: String) -> Bool
+    match JSON.decode(body)
+      Result.Err(_) -> false
+      Result.Ok(root) -> get_bool(root, "confirm").or(false)
+    end
+  end
+
+  @doc """
+  Parses a body with one required non-empty string field.
+  """
+  fn parse_string_field(body: String, key: String) -> String ! Error
+    root = try decode(body)
+    try required_string(root, key)
+  end
+
+  @doc """
   Removes duplicate strings, keeping first occurrences in order.
   """
   fn distinct(items: List<String>) -> List<String>
@@ -148,6 +198,17 @@ struct JsonUtil
   end
 
   @doc """
+  Returns an object field's boolean value, or `None` when the field
+  is missing or not a boolean.
+  """
+  fn get_bool(root: Json, key: String) -> Option<Bool>
+    match field(root, key)
+      Option.Some(Json.Bool(flag)) -> Option.Some(flag)
+      _ -> Option.None
+    end
+  end
+
+  @doc """
   Returns an object field's value as a list of strings, or `None`
   when the field is missing or not an all-string array.
   """
@@ -185,6 +246,14 @@ struct JsonUtil
     match field(root, key)
       Option.Some(Json.String(text)) -> text
       _ -> ""
+    end
+  end
+
+  priv fn field_float(root: Json, key: String) -> Float
+    match field(root, key)
+      Option.Some(Json.Float(f)) -> f
+      Option.Some(Json.Int(i)) -> "#{i}".to_float() rescue _ -> 0.0
+      _ -> 0.0
     end
   end
 

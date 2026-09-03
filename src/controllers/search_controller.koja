@@ -8,9 +8,10 @@ const DEFAULT_SEARCH_LIMIT: Int = 10
 const MAX_SEARCH_LIMIT: Int = 100
 
 @doc """
-The hybrid search endpoint. Semantic ranking over entity content
-merges with fuzzy name matching. An unreachable embedder degrades to
-fuzzy-only ranking instead of failing the search.
+The hybrid search endpoint. Semantic ranking over observations merges
+with fuzzy entity name matching, grouped by entity. An unreachable
+embedder degrades to fuzzy-only ranking instead of failing the
+search.
 """
 struct SearchController
   embedder: Embedder

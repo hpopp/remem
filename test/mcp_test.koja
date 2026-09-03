@@ -1,12 +1,15 @@
+alias Postgres.Config as DbConfig
+alias Postgres.Connection
+
 struct McpTest
   @test "tool catalog lists every tool with a schema"
   fn test_tool_catalog -> Bool ! String
     encoded = JSON.encode(Mcp.tools())
 
     names = [
-      "search_memory", "get_entity", "create_entity", "delete_entity",
-      "add_observations", "remove_observations", "create_relation",
-      "delete_relation"
+      "search_memory", "get_entity", "create_entity", "rename_entity",
+      "merge_entities", "list_entities", "delete_entity", "add_observations",
+      "remove_observations", "create_relation", "delete_relation"
     ]
 
     for name in names
@@ -19,6 +22,116 @@ struct McpTest
       fail "catalog has no input schemas"
     end
 
+    unless encoded.contains?("\"confirm\"")
+      fail "create_entity schema is missing confirm"
+    end
+
     true
+  end
+
+  @test "search results serialize as entities with matching observations"
+  fn test_search_result_shape -> Bool ! String
+    result = SearchResult{
+      kind: "language",
+      name: "koja",
+      observations: [ObservationHit{content: "compiled", score: 0.5}],
+      score: 0.75,
+    }
+    encoded = JSON.encode(result.to_json())
+
+    for key in ["\"name\"", "\"type\"", "\"score\"", "\"observations\""]
+      unless encoded.contains?(key)
+        fail "result is missing #{key}: " <> encoded
+      end
+    end
+
+    if encoded.contains?("\"entity\"")
+      fail "result should not nest a full entity: " <> encoded
+    end
+
+    true
+  end
+
+  @test "create_entity refuses a near-duplicate unless confirmed"
+  fn test_create_guard -> Bool ! String
+    conn = try connect()
+    conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
+    conn = try cleanup(conn)
+
+    # The embedder is never reached, since no observations are sent.
+    embedder = Embedder{url: "http://127.0.0.1:1"}
+
+    (response, conn) = Mcp.handle(
+      create_call(1, "itest-mcp-guard", false),
+      conn,
+      embedder,
+    )
+
+    unless response.body.contains?("\"isError\":false")
+      fail "first create should succeed: " <> response.body
+    end
+
+    (response, conn) = Mcp.handle(
+      create_call(2, "Itest MCP Guard", false),
+      conn,
+      embedder,
+    )
+
+    unless response.body.contains?("\"isError\":true")
+      fail "near-duplicate create should be refused: " <> response.body
+    end
+
+    unless response.body.contains?("similar entities exist")
+      fail "refusal should name the similar entities: " <> response.body
+    end
+
+    (response, conn) = Mcp.handle(
+      create_call(3, "Itest MCP Guard", true),
+      conn,
+      embedder,
+    )
+
+    unless response.body.contains?("\"isError\":false")
+      fail "confirmed create should succeed: " <> response.body
+    end
+
+    (conn, outcome) = conn.query(
+      "DELETE FROM entities WHERE name ILIKE 'itest%'",
+    )
+
+    match outcome
+      Result.Err(e) -> fail "cleanup: " <> e.message()
+      Result.Ok(_) -> ()
+    end
+
+    match conn.close()
+      _ -> ()
+    end
+
+    true
+  end
+
+  priv fn create_call(id: Int, name: String, confirm: Bool) -> String
+    "{\"jsonrpc\":\"2.0\",\"id\":#{id},\"method\":\"tools/call\"," <>
+      "\"params\":{\"name\":\"create_entity\",\"arguments\":" <>
+      "{\"name\":\"#{name}\",\"type\":\"test\",\"confirm\":#{confirm}}}}"
+  end
+
+  priv fn connect -> Connection ! String
+    config = DbConfig.new("127.0.0.1", 5435, "postgres", "remem")
+
+    Connection.connect(config)
+      rescue e -> fail "connect (is docker compose up?): " <> e.message()
+  end
+
+  priv fn cleanup(conn: Connection) -> Connection ! String
+    (conn, outcome) = conn.query(
+      "DELETE FROM entities WHERE name ILIKE 'itest%'",
+    )
+
+    match outcome
+      Result.Err(e) -> fail "cleanup: " <> e.message()
+      Result.Ok(_) -> conn
+    end
   end
 end

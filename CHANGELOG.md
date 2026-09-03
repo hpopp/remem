@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-02
+
+### Added
+
+- `merge_entities` folds one entity into another, moving observations
+  and relations, via MCP and `POST /entities/:name/merge`.
+- `rename_entity` renames an entity in place, via MCP and
+  `PATCH /entities/:name`.
+- `list_entities` returns every entity with its observation count and
+  no observations, via MCP and `GET /entities`.
+- `create_entity` refuses names close to an existing entity unless
+  `confirm` is true.
+- A background backfill embeds observations that have no embedding
+  yet, at boot and once a minute after.
+
+### Changed
+
+- Search ranks individual observations instead of whole entities and
+  returns each entity with only the observations that matched.
+- `GET /entities` returns entities without their observations and
+  includes an observation count.
+- Adding observations embeds only the new rows, so large entities no
+  longer re-embed everything on every write.
+
+### Fixed
+
+- Entities with more than about 8K tokens of observations no longer
+  lose their newest facts from semantic search.
+
 ## [0.2.1] - 2026-09-02
 
 ### Changed
@@ -48,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
+[0.3.0]: https://github.com/hpopp/remem/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/hpopp/remem/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/hpopp/remem/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hpopp/remem/releases/tag/v0.1.0

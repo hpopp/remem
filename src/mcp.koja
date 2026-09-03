@@ -14,10 +14,10 @@ server is stateless and never streams, so each JSON-RPC message gets
 one JSON response and `GET /mcp` is a 405.
 
 Tools mirror the REST API, with one deliberate omission. There is no
-read-the-whole-graph tool. Search is the only way in, so agent
-clients retrieve by relevance instead of loading everything. Tool
-descriptions steer agents to search before writing and to keep the
-graph curated.
+read-the-whole-graph tool. Search is the way in, so agent clients
+retrieve by relevance instead of loading everything. `list_entities`
+returns names and counts only, for curation. Tool descriptions steer
+agents to search before writing and to keep the graph curated.
 """
 struct Mcp
   @doc """
@@ -58,15 +58,32 @@ struct Mcp
   fn tools -> Json
     search_description = "Search the memory graph with a natural " <>
       "language query. Ranking is hybrid: semantic similarity over " <>
-      "entity content plus fuzzy name matching. This is the way to " <>
-      "recall stored knowledge. Always search before writing, to " <>
-      "build on what is already known."
+      "individual observations plus fuzzy entity name matching. Each " <>
+      "result is an entity with only the observations that matched. " <>
+      "Use get_entity for the rest. This is the way to recall stored " <>
+      "knowledge. Always search before writing, to build on what is " <>
+      "already known."
 
     create_description = "Create a new entity. The memory graph is " <>
       "curated: only save durable facts worth recalling in future " <>
       "conversations, not session details. Search first and prefer " <>
       "add_observations on an existing entity over creating a " <>
-      "near-duplicate."
+      "near-duplicate. When a similar name already exists the call " <>
+      "is refused and names the matches. Pass confirm true to " <>
+      "create anyway."
+
+    merge_description = "Fold one entity into another and delete the " <>
+      "source. Observations move with their timestamps, relations " <>
+      "rewire to the target, and exact duplicates drop. Use this to " <>
+      "collapse near-duplicate entities."
+
+    rename_description = "Rename an entity. Relations follow the " <>
+      "entity. The new name must not be taken."
+
+    list_description = "List every entity with its type and " <>
+      "observation count, most observations first, without the " <>
+      "observations themselves. Use this to survey the graph and " <>
+      "spot entities that need splitting or merging."
 
     delete_description = "Delete an entity by name. Its observations " <>
       "and relations go with it."
@@ -105,9 +122,46 @@ struct Mcp
             (
               "observations",
               string_array_prop("Initial facts about the entity")
+            ),
+            (
+              "confirm",
+              bool_prop("Create even when similar entity names exist")
             )
           ],
           ["name", "type"],
+        ),
+      ),
+      tool(
+        "rename_entity",
+        rename_description,
+        object_schema(
+          [
+            ("name", string_prop("Current entity name")),
+            ("new_name", string_prop("New entity name"))
+          ],
+          ["name", "new_name"],
+        ),
+      ),
+      tool(
+        "merge_entities",
+        merge_description,
+        object_schema(
+          [
+            ("source", string_prop("Entity to fold in and delete")),
+            ("into", string_prop("Entity that receives the source"))
+          ],
+          ["source", "into"],
+        ),
+      ),
+      tool(
+        "list_entities",
+        list_description,
+        object_schema(
+          [
+            ("limit", int_prop("Max entities, 1-1000, default 100")),
+            ("offset", int_prop("Entities to skip, default 0"))
+          ],
+          List.new(),
         ),
       ),
       tool(
@@ -188,14 +242,23 @@ struct Mcp
       "create_entity" ->
         tool_create_entity(arguments, id, conn, embedder)
 
+      "rename_entity" ->
+        tool_rename_entity(arguments, id, conn)
+
+      "merge_entities" ->
+        tool_merge_entities(arguments, id, conn)
+
+      "list_entities" ->
+        tool_list_entities(arguments, id, conn)
+
       "delete_entity" ->
         tool_delete_entity(arguments, id, conn)
 
       "add_observations" ->
-        tool_mutate_observations(arguments, id, conn, embedder, true)
+        tool_add_observations(arguments, id, conn, embedder)
 
       "remove_observations" ->
-        tool_mutate_observations(arguments, id, conn, embedder, false)
+        tool_remove_observations(arguments, id, conn)
 
       "create_relation" ->
         tool_create_relation(arguments, id, conn)
@@ -325,15 +388,106 @@ struct Mcp
       JsonUtil.get_string_list(arguments, "observations").or(List.new()),
     )
 
-    (conn, created) = EntityStore.create(conn, name, kind, observations)
+    confirm = JsonUtil.get_bool(arguments, "confirm").or(false)
+
+    (conn, created) = EntityStore.create(
+      conn,
+      name,
+      kind,
+      observations,
+      confirm,
+    )
 
     match created
       Result.Err(e) ->
         (tool_err(id, e.message()), conn)
 
-      Result.Ok(entity) ->
-        conn = refresh_embedding(conn, embedder, entity)
+      Result.Ok(pair) ->
+        (entity, rows) = pair
+        conn = embed_rows(conn, embedder, entity, rows)
         (tool_ok(id, entity.to_json()), conn)
+    end
+  end
+
+  priv fn tool_rename_entity(arguments: Json, id: Json, conn: Connection)
+    -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "name is required"), conn)
+      end
+
+    new_name =
+      match JsonUtil.get_string(arguments, "new_name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "new_name is required"), conn)
+      end
+
+    (conn, renamed) = EntityStore.rename(conn, name, new_name)
+
+    match renamed
+      Result.Err(e) ->
+        (tool_err(id, e.message()), conn)
+
+      Result.Ok(maybe) ->
+        match maybe
+          Option.None -> (tool_err(id, "no entity named #{name}"), conn)
+          Option.Some(entity) -> (tool_ok(id, entity.to_json()), conn)
+        end
+    end
+  end
+
+  priv fn tool_merge_entities(arguments: Json, id: Json, conn: Connection)
+    -> (Response, Connection)
+
+    source =
+      match JsonUtil.get_string(arguments, "source")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "source is required"), conn)
+      end
+
+    into =
+      match JsonUtil.get_string(arguments, "into")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (tool_err(id, "into is required"), conn)
+      end
+
+    (conn, merged) = EntityStore.merge(conn, source, into)
+
+    match merged
+      Result.Err(e) -> (tool_err(id, e.message()), conn)
+      Result.Ok(entity) -> (tool_ok(id, entity.to_json()), conn)
+    end
+  end
+
+  priv fn tool_list_entities(arguments: Json, id: Json, conn: Connection)
+    -> (Response, Connection)
+
+    limit = JsonUtil.get_int(arguments, "limit").or(DEFAULT_PAGE_LIMIT)
+    offset = JsonUtil.get_int(arguments, "offset").or(0)
+
+    unless limit >= 1 and limit <= MAX_PAGE_LIMIT
+      return (
+        tool_err(id, "limit must be between 1 and #{MAX_PAGE_LIMIT}"), conn
+      )
+    end
+
+    unless offset >= 0
+      return (tool_err(id, "offset must not be negative"), conn)
+    end
+
+    (conn, listed) = EntityStore.summaries(conn, limit, offset)
+
+    match listed
+      Result.Err(e) ->
+        (tool_err(id, e.message()), conn)
+
+      Result.Ok(summaries) ->
+        payload: Json = [
+          "entities": Json.Array(summaries.map(s -> s.to_json()))
+        ]
+        (tool_ok(id, payload), conn)
     end
   end
 
@@ -357,32 +511,20 @@ struct Mcp
     end
   end
 
-  priv fn tool_mutate_observations(
+  priv fn tool_add_observations(
     arguments: Json,
     id: Json,
     conn: Connection,
     embedder: Embedder,
-    add: Bool,
   ) -> (Response, Connection)
 
-    name =
-      match JsonUtil.get_string(arguments, "name")
-        Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "name is required"), conn)
+    (name, observations) =
+      match observation_args(arguments)
+        Result.Ok(parsed) -> parsed
+        Result.Err(message) -> return (tool_err(id, message), conn)
       end
 
-    observations =
-      match JsonUtil.get_string_list(arguments, "observations")
-        Option.Some(list) when not list.empty?() -> JsonUtil.distinct(list)
-        _ ->
-          return (
-            tool_err(id, "observations must be a non-empty string array"), conn
-          )
-      end
-
-    (conn, updated) = add
-      ? EntityStore.add_observations(conn, name, observations)
-      : EntityStore.remove_observations(conn, name, observations)
+    (conn, updated) = EntityStore.add_observations(conn, name, observations)
 
     maybe =
       match updated
@@ -394,10 +536,52 @@ struct Mcp
       Option.None ->
         (tool_err(id, "no entity named #{name}"), conn)
 
-      Option.Some(entity) ->
-        conn = refresh_embedding(conn, embedder, entity)
+      Option.Some(pair) ->
+        (entity, rows) = pair
+        conn = embed_rows(conn, embedder, entity, rows)
         (tool_ok(id, entity.to_json()), conn)
     end
+  end
+
+  priv fn tool_remove_observations(arguments: Json, id: Json, conn: Connection)
+    -> (Response, Connection)
+
+    (name, observations) =
+      match observation_args(arguments)
+        Result.Ok(parsed) -> parsed
+        Result.Err(message) -> return (tool_err(id, message), conn)
+      end
+
+    (conn, updated) = EntityStore.remove_observations(conn, name, observations)
+
+    maybe =
+      match updated
+        Result.Err(e) -> return (tool_err(id, e.message()), conn)
+        Result.Ok(m) -> m
+      end
+
+    match maybe
+      Option.None -> (tool_err(id, "no entity named #{name}"), conn)
+      Option.Some(entity) -> (tool_ok(id, entity.to_json()), conn)
+    end
+  end
+
+  priv fn observation_args(arguments: Json)
+    -> Result<(String, List<String>), String>
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return Result.Err("name is required")
+      end
+
+    observations =
+      match JsonUtil.get_string_list(arguments, "observations")
+        Option.Some(list) when not list.empty?() -> JsonUtil.distinct(list)
+        _ -> return Result.Err("observations must be a non-empty string array")
+      end
+
+    Result.Ok((name, observations))
   end
 
   priv fn tool_create_relation(arguments: Json, id: Json, conn: Connection)
@@ -531,6 +715,13 @@ struct Mcp
   priv fn int_prop(description: String) -> Json
     prop: Json = [
       "type": "integer".to_json(), "description": description.to_json()
+    ]
+    prop
+  end
+
+  priv fn bool_prop(description: String) -> Json
+    prop: Json = [
+      "type": "boolean".to_json(), "description": description.to_json()
     ]
     prop
   end

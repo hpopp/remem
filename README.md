@@ -47,10 +47,12 @@ When `API_KEY` is set, every route except `GET /health` requires an
 | ------------------------------------- | ----------------------------------------- |
 | `GET /health`                         | Liveness plus a database probe            |
 | `GET /graph`                          | Every entity and relation                 |
-| `GET /entities?limit=&offset=`        | List entities                             |
+| `GET /entities?limit=&offset=`        | Entity summaries, most observations first |
 | `POST /entities`                      | Create from `{name, type, observations?}` |
 | `GET /entities/:name`                 | One entity with its relations             |
+| `PATCH /entities/:name`               | Rename from `{name}`                      |
 | `DELETE /entities/:name`              | Delete an entity, relations cascade       |
+| `POST /entities/:name/merge`          | Fold into another entity from `{into}`    |
 | `POST /entities/:name/observations`   | Append observations                       |
 | `DELETE /entities/:name/observations` | Remove matching observations              |
 | `POST /relations`                     | Create from `{from, to, type}`            |
@@ -69,17 +71,47 @@ Entities, observations, and relations all carry `created_at` and
 `updated_at`. An observation change also touches its entity's
 `updated_at`. Errors return `{"error", "message", "status"}`.
 
+`GET /entities` returns each entity without its observations and
+adds an `observation_count`, so the whole graph fits in one page.
+Fetch `GET /entities/:name` for the observations.
+
+### Curation
+
+`POST /entities` refuses a name that is trigram-similar to an
+existing entity, or equal ignoring case, and names the matches in
+the error. Send `"confirm": true` in the body to create it anyway.
+
+`POST /entities/:name/merge` folds the named entity into the one in
+`{"into": "..."}` and deletes it. Observations move with their
+timestamps, except ones the target already holds word for word.
+Relations rewire to the target, except ones that would become
+self-loops or duplicate an existing relation. The whole merge runs
+in one transaction.
+
+`PATCH /entities/:name` renames an entity. Relations follow, since
+they reference ids. The new name must not be taken.
+
 ### Search
 
-`GET /search` embeds the query, ranks by cosine distance against
-entity embeddings, ranks entity names by trigram similarity, and
-merges both lists with Reciprocal Rank Fusion. When the embedding
-server is down, search degrades to fuzzy name ranking alone.
+`GET /search` embeds the query, ranks observations by cosine
+distance against their embeddings, ranks entity names by trigram
+similarity, and merges both lists with Reciprocal Rank Fusion. Hits
+group by entity, where an entity's score is its best observation
+plus its name match. Each result carries the entity's name and type,
+its score, and up to five matching observations with their own
+scores. `limit` counts entities. When the embedding server is down,
+search degrades to fuzzy name ranking alone and results carry no
+observations.
 
-Entity embeddings cover the name, type, and observations. remem
-recomputes them after every create and observation change. When the
-embedding server is unreachable, the write still succeeds and the
-entity joins semantic results after its next successful update.
+Each observation embeds on its own, under the text
+`name (type): content`, so an entity with hundreds of facts ranks
+by its most relevant fact rather than by an average of all of them.
+Writes embed only the rows they insert. When the embedding server
+is unreachable, the write still succeeds and a background backfill
+embeds the rows once the server answers. The backfill also runs at
+boot, which covers the migration to per-observation embeddings, and
+after a merge or rename, which changes the entity name in the
+embedding text.
 
 Every search also appends its query to a `search_log` table. Nothing
 reads the log yet. It collects the retrieval history that later
@@ -103,14 +135,17 @@ bearer auth applies when `API_KEY` is set. Cursor configuration:
 }
 ```
 
-Tools: `search_memory`, `get_entity`, `create_entity`,
-`delete_entity`, `add_observations`, `remove_observations`,
-`create_relation`, `delete_relation`.
+Tools: `search_memory`, `get_entity`, `list_entities`,
+`create_entity`, `rename_entity`, `merge_entities`, `delete_entity`,
+`add_observations`, `remove_observations`, `create_relation`,
+`delete_relation`.
 
-There is no read-the-whole-graph tool on purpose. Search is the only
-way in, so agents retrieve memories by relevance instead of loading
-the full graph each session. Tool descriptions steer agents to
-search before writing and to keep the graph curated.
+There is no read-the-whole-graph tool on purpose. Search is the way
+in, so agents retrieve memories by relevance instead of loading the
+full graph each session. `list_entities` returns names and counts
+only, for spotting entities that need a split or a merge. Tool
+descriptions steer agents to search before writing and to keep the
+graph curated.
 
 ## Development
 
@@ -120,8 +155,8 @@ koja test     # unit tests, plus integration tests against compose
 koja format   # format in place
 ```
 
-The integration tests in `test/store_test.koja` expect the compose
-PostgreSQL on port 5435.
+The integration tests in `test/store_test.koja` and
+`test/mcp_test.koja` expect the compose PostgreSQL on port 5435.
 
 ## License
 

@@ -1,21 +1,55 @@
 alias HTTP.Headers
 alias JSON.Value as Json
 
+# TEI rejects batches above its default `max-client-batch-size`.
+priv const EMBED_BATCH: Int = 32
+
 @doc """
 Client for a TEI-protocol embedding server (nomic-embed-text,
-768 dimensions). `embed` returns the vector as a pgvector text
-literal (`[0.1,0.2,...]`), ready to bind as a `$n::vector` parameter.
+768 dimensions). Vectors come back as pgvector text literals
+(`[0.1,0.2,...]`), ready to bind as `$n::vector` parameters.
 """
 struct Embedder
   url: String
 
   @doc """
-  Requests an embedding for `text`. Fails with `Error.Embedding` when
-  the server is unreachable, answers non-200, or returns a shape
-  other than one array of numbers.
+  Requests an embedding for one text. Fails with `Error.Embedding`
+  when the server is unreachable, answers non-200, or returns a
+  shape other than one array of numbers.
   """
   fn embed(self, text: String) -> String ! Error
-    payload: Json = ["inputs": text.to_json()]
+    vectors = try self.embed_many([text])
+
+    match vectors.first()
+      Option.Some(vector) -> vector
+      Option.None -> fail Error.Embedding("server returned no vector")
+    end
+  end
+
+  @doc """
+  Requests embeddings for many texts, in the same order. Requests go
+  out in batches of `EMBED_BATCH` and the first failure aborts the
+  rest.
+  """
+  fn embed_many(self, texts: List<String>) -> List<String> ! Error
+    vectors: List<String> = List.new()
+
+    if texts.empty?()
+      return vectors
+    end
+
+    batches = (texts.length() + EMBED_BATCH - 1) / EMBED_BATCH
+
+    for batch in Range{start: 0, stop: batches - 1}
+      chunk = texts.slice(batch * EMBED_BATCH, EMBED_BATCH)
+      vectors = vectors.concat(try self.request(chunk))
+    end
+
+    vectors
+  end
+
+  priv fn request(self, texts: List<String>) -> List<String> ! Error
+    payload: Json = ["inputs": Json.Array(texts.map(t -> t.to_json()))]
     headers = Headers.new().set("Content-Type", "application/json")
 
     response = HTTP.post(self.url <> "/embed", JSON.encode(payload), headers)
@@ -29,26 +63,42 @@ struct Embedder
     decoded = JSON.decode(response.body)
       rescue e -> fail Error.Embedding("malformed response: " <> e)
 
-    try vector_literal(decoded)
+    vectors = try vector_literals(decoded)
+
+    unless vectors.length() == texts.length()
+      fail Error.Embedding("expected #{texts.length()} vectors, got #{vectors.length()}")
+    end
+
+    vectors
   end
 
-  # TEI answers `[[f1, f2, ...]]`: one inner array per input.
-  priv fn vector_literal(decoded: Json) -> String ! Error
-    inner =
+  # TEI answers `[[f1, f2, ...], ...]`: one inner array per input.
+  priv fn vector_literals(decoded: Json) -> List<String> ! Error
+    outer =
       match decoded
-        Json.Array(outer) ->
-          match outer.first()
-            Option.Some(Json.Array(numbers)) -> numbers
-            _ -> fail Error.Embedding("expected a nested array of floats")
-          end
-
-        _ ->
-          fail Error.Embedding("expected a JSON array response")
+        Json.Array(items) -> items
+        _ -> fail Error.Embedding("expected a JSON array response")
       end
 
+    literals: List<String> = List.new()
+
+    for item in outer
+      numbers =
+        match item
+          Json.Array(inner) -> inner
+          _ -> fail Error.Embedding("expected a nested array of floats")
+        end
+
+      literals = literals.append(try vector_literal(numbers))
+    end
+
+    literals
+  end
+
+  priv fn vector_literal(numbers: List<Json>) -> String ! Error
     parts: List<String> = List.new()
 
-    for number in inner
+    for number in numbers
       part =
         match number
           Json.Float(f) -> "#{f}"
@@ -64,49 +114,67 @@ struct Embedder
 end
 
 @doc """
-Composes the text an entity embeds under: `name (type)` followed by
-the observations joined as sentences. Recomputed on entity create and
-every observation change.
+Composes the text one observation embeds under. The entity name and
+type lead so the entity stays part of the cue.
 """
-fn embedding_text(name: String, kind: String, observations: List<String>)
-  -> String
-
-  base = "#{name} (#{kind})"
-
-  observations.empty?() ? base : base <> ": " <> String.join(observations, ". ")
+fn embedding_text(name: String, kind: String, content: String) -> String
+  "#{name} (#{kind}): #{content}"
 end
 
 @doc """
-Recomputes and stores an entity's embedding after a mutation.
-Failure is logged, never surfaced. The entity stays searchable by
-name, and the write already succeeded. Shared by the REST handlers
+Embeds observation rows an entity just gained and stores the vectors.
+Failure is logged, never surfaced. The write already succeeded, and
+the backfill picks the rows up later. Shared by the REST handlers
 and the MCP tools.
 """
-fn refresh_embedding(
+fn embed_rows(
   conn: Postgres.Connection,
   embedder: Embedder,
   entity: Entity,
+  rows: List<(Int, String)>,
 ) -> Postgres.Connection
 
-  text = embedding_text(entity.name, entity.kind, entity.observation_contents())
+  if rows.empty?()
+    return conn
+  end
 
-  match embedder.embed(text)
+  ids: List<Int> = List.new()
+  texts: List<String> = List.new()
+
+  for row in rows
+    (id, content) = row
+    ids = ids.append(id)
+    texts = texts.append(embedding_text(entity.name, entity.kind, content))
+  end
+
+  (conn, outcome) = embed_texts(conn, embedder, ids, texts)
+
+  match outcome
     Result.Err(e) ->
       Log.warn("embedding #{entity.name} failed: " <> e.message())
       conn
 
-    Result.Ok(vector) ->
-      (conn, stored) = EntityStore.set_embedding(conn, entity.name, vector)
-
-      match stored
-        Result.Err(e) ->
-          Log.warn(
-            "storing embedding for #{entity.name} failed: " <> e.message(),
-          )
-          conn
-
-        Result.Ok(_) ->
-          conn
-      end
+    Result.Ok(_) ->
+      conn
   end
+end
+
+@doc """
+Embeds `texts` and stores each vector on the observation with the
+matching id. Returns how many rows were updated.
+"""
+fn embed_texts(
+  conn: Postgres.Connection,
+  embedder: Embedder,
+  ids: List<Int>,
+  texts: List<String>,
+) -> (Postgres.Connection, Result<Int, Error>)
+
+  vectors =
+    match embedder.embed_many(texts)
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(list) -> list
+    end
+
+  EntityStore.set_observation_embeddings(conn, ids, vectors)
 end

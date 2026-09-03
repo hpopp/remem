@@ -84,6 +84,10 @@ struct Router
     self.route(Method.Get, pattern, handler)
   end
 
+  fn patch(self, pattern: String, handler: fn (Conn) -> Conn) -> Router
+    self.route(Method.Patch, pattern, handler)
+  end
+
   fn post(self, pattern: String, handler: fn (Conn) -> Conn) -> Router
     self.route(Method.Post, pattern, handler)
   end

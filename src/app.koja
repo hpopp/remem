@@ -16,7 +16,7 @@ alias Process.StopReason
 alias Trail.Config as TrailConfig
 alias Trail.Worker
 
-const VERSION: String = "0.2.1"
+const VERSION: String = "0.3.0"
 
 const POOL_SIZE: Int = 10
 
@@ -27,11 +27,16 @@ const STARTUP_PROBE_MS: Int = 30000
 # How often the search log sweeper ticks.
 priv const SWEEP_INTERVAL_MS: Int = 3600000
 
+# How often the embedding backfill looks for unembedded observations
+# once the backlog is drained.
+priv const BACKFILL_INTERVAL_MS: Int = 60000
+
 @doc """
 The remem entry process. `start` loads config from the environment,
 runs schema migrations on a dedicated connection, spawns a pool of
-`POOL_SIZE` Postgres connections, builds the route table once, and
-spawns a `Net.TCPServer` acceptor that delivers connected sockets as
+`POOL_SIZE` Postgres connections, builds the route table once, starts
+the search log sweeper and the embedding backfill, and spawns a
+`Net.TCPServer` acceptor that delivers connected sockets as
 `TCPEvent.Connected` messages. Each connection is handed to a
 one-shot `Trail.Worker`, so requests are handled concurrently and
 the entry process never blocks on IO.
@@ -82,6 +87,14 @@ struct App: Process<List<String>, TCPEvent, String>
 
     _cleaner = spawn Cleaner.start(
       Cleaner.Config{interval_ms: SWEEP_INTERVAL_MS, pool: pool},
+    )
+
+    _backfill = spawn Backfill.start(
+      Backfill.Config{
+        embedder: embedder,
+        interval_ms: BACKFILL_INTERVAL_MS,
+        pool: pool,
+      },
     )
 
     me: Ref<TCPEvent, String> = Ref.self_ref()

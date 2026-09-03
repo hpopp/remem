@@ -85,7 +85,16 @@ struct Migrator
           query text NOT NULL,
           created_at timestamptz NOT NULL DEFAULT now()
         )
-        """}
+        """},
+      Migration{
+        version: 9,
+        sql: "ALTER TABLE observations ADD COLUMN embedding vector(768)",
+      }, Migration{version: 10, sql: """
+        CREATE INDEX observations_embedding_idx ON observations
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64)
+        """}, Migration{version: 11, sql: "DROP INDEX entities_embedding_idx"},
+      Migration{version: 12, sql: "ALTER TABLE entities DROP COLUMN embedding"}
     ]
   end
 

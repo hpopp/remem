@@ -1,0 +1,107 @@
+alias Pooler.Pool
+alias Postgres.Connection
+alias Process.Step
+alias Process.StopReason
+
+# Observations embedded per pass. Matches the embedder's request
+# batch, so one pass is one call to the embedding server.
+priv const BACKFILL_BATCH: Int = 32
+
+# Pause between passes while draining a backlog. Long enough for
+# request traffic to interleave, short enough to drain quickly.
+priv const BACKFILL_DRAIN_MS: Int = 100
+
+# Checkout budget for a pass. A busy pool skips the pass instead of
+# queueing behind request traffic.
+priv const BACKFILL_CHECKOUT_MS: Int = 1000
+
+struct Backfill.Config
+  embedder: Embedder
+  interval_ms: Int
+  pool: Pool<Connection>
+end
+
+@doc """
+The background observation embedder. Ticks on its own timer and
+embeds observations whose `embedding` is NULL, `BACKFILL_BATCH` rows at a
+time. Rows arrive there three ways: the migration that added the
+column, a write whose embedding call failed, and a merge or rename
+that changed the entity name in the embedding text. The first tick
+is immediate so a fresh deploy catches up within a minute, and a
+full batch schedules the next pass after a short pause instead of
+the whole interval.
+"""
+struct Backfill: Process<Backfill.Config, (), ()>
+  embedder: Embedder
+  interval_ms: Int
+  pool: Pool<Connection>
+
+  fn start(config: Backfill.Config) -> Self ! StopReason
+    me: Ref<(), ()> = Ref.self_ref()
+    me.send_after((), 0)
+    Backfill{
+      embedder: config.embedder,
+      interval_ms: config.interval_ms,
+      pool: config.pool,
+    }
+  end
+
+  fn handle(self, msg: (), from: Option<ReplyTo<()>>) -> Step<Self>
+    embedded = self.pass()
+
+    if embedded > 0
+      Log.info("embedded #{embedded} observations")
+    end
+
+    delay = embedded >= BACKFILL_BATCH ? BACKFILL_DRAIN_MS : self.interval_ms
+    me: Ref<(), ()> = Ref.self_ref()
+    me.send_after((), delay)
+    Step.Continue(self)
+  end
+
+  # Embeds one batch and returns how many rows were updated. Failures
+  # log and count as zero, so the next pass waits the full interval.
+  priv fn pass(self) -> Int
+    match self.pool.checkout(BACKFILL_CHECKOUT_MS)
+      Result.Err(_) ->
+        0
+
+      Result.Ok(db) ->
+        (db, count) = embed_pending(db, self.embedder)
+        self.pool.checkin(db)
+        count
+    end
+  end
+end
+
+priv fn embed_pending(db: Connection, embedder: Embedder) -> (Connection, Int)
+  (db, pending) = EntityStore.unembedded(db, BACKFILL_BATCH)
+
+  rows =
+    match pending
+      Result.Err(e) ->
+        Log.warn("embedding backfill: " <> e.message())
+        return (db, 0)
+
+      Result.Ok(list) ->
+        list
+    end
+
+  if rows.empty?()
+    return (db, 0)
+  end
+
+  ids = rows.map(row -> row.id)
+  texts = rows.map(row -> embedding_text(row.name, row.kind, row.content))
+
+  (db, outcome) = embed_texts(db, embedder, ids, texts)
+
+  match outcome
+    Result.Err(e) ->
+      Log.warn("embedding backfill: " <> e.message())
+      (db, 0)
+
+    Result.Ok(count) ->
+      (db, count)
+  end
+end

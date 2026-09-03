@@ -1,3 +1,4 @@
+alias JSON.Value as Json
 alias Postgres.Connection
 alias Postgres.QueryResult
 alias Postgres.Value
@@ -32,13 +33,6 @@ struct Entity: JSON.Encoding
   observations: List<Observation>
   updated_at: String
 
-  @doc """
-  Returns just the observation sentences, for embedding text.
-  """
-  fn observation_contents(self) -> List<String>
-    self.observations.map(o -> o.content)
-  end
-
   fn to_json(self) -> JSON.Value
     [
       "name": self.name.to_json(), "type": self.kind.to_json(),
@@ -50,21 +44,82 @@ struct Entity: JSON.Encoding
 end
 
 @doc """
-One hybrid search hit: the entity plus its Reciprocal Rank Fusion
-score (larger is more relevant).
+An entity without its observations, plus how many it holds. The
+shape `GET /entities` and `list_entities` return.
 """
-struct SearchResult: JSON.Encoding
-  entity: Entity
+struct EntitySummary: JSON.Encoding
+  created_at: String
+  kind: String
+  name: String
+  observation_count: Int
+  updated_at: String
+
+  fn to_json(self) -> JSON.Value
+    [
+      "name": self.name.to_json(), "type": self.kind.to_json(),
+      "observation_count": self.observation_count.to_json(),
+      "created_at": self.created_at.to_json(),
+      "updated_at": self.updated_at.to_json()
+    ]
+  end
+end
+
+@doc """
+An observation still waiting for its embedding, with the entity
+fields the embedding text needs.
+"""
+struct PendingObservation
+  content: String
+  id: Int
+  kind: String
+  name: String
+end
+
+@doc """
+One observation that matched a search, with its Reciprocal Rank
+Fusion score.
+"""
+struct ObservationHit: JSON.Encoding
+  content: String
   score: Float
 
   fn to_json(self) -> JSON.Value
-    ["entity": self.entity.to_json(), "score": self.score.to_json()]
+    ["content": self.content.to_json(), "score": self.score.to_json()]
+  end
+end
+
+@doc """
+One search hit: the entity, its fused score (larger is more
+relevant), and the observations that matched. Fuzzy-only hits carry
+no observations.
+"""
+struct SearchResult: JSON.Encoding
+  kind: String
+  name: String
+  observations: List<ObservationHit>
+  score: Float
+
+  fn to_json(self) -> JSON.Value
+    [
+      "name": self.name.to_json(), "type": self.kind.to_json(),
+      "score": self.score.to_json(),
+      "observations": JSON.Value.Array(self.observations.map(o -> o.to_json()))
+    ]
   end
 end
 
 # RRF constant and per-strategy candidate depth for hybrid search.
+# Observations are finer grained than entity names, so the semantic
+# side looks deeper.
 const RRF_K: Int = 60
-const CANDIDATES: Int = 20
+const SEMANTIC_CANDIDATES: Int = 60
+const FUZZY_CANDIDATES: Int = 20
+
+# Matching observations returned per entity.
+const HITS_PER_ENTITY: Int = 5
+
+# Names the near-duplicate guard reports.
+const SIMILAR_LIMIT: Int = 5
 
 @doc """
 Data-access layer over the `entities` and `observations` tables.
@@ -74,21 +129,32 @@ the package `Error` at this boundary.
 
 Reads aggregate an entity's observation rows into one JSON column
 (`json_agg`), and observation writes bind as `$n::jsonb` parameters,
-so nothing parses Postgres array literals. Embeddings bind as
-pgvector text literals through `$n::vector`. Observation mutations
-also touch the entity's `updated_at`.
+so nothing parses Postgres array literals. Embeddings live on
+observation rows and bind as pgvector text literals through
+`$n::vector`. Observation mutations also touch the entity's
+`updated_at`.
 """
 struct EntityStore
   @doc """
-  Inserts a new entity with its observations. The embedding is set
-  separately once the embedder answers (see `set_embedding`).
+  Inserts a new entity with its observations and returns it with the
+  inserted `(id, content)` rows, which the caller embeds. Unless
+  `confirm` is set, a name close to an existing one fails with
+  `Duplicate` naming the matches.
   """
   fn create(
     conn: Connection,
     name: String,
     kind: String,
     observations: List<String>,
-  ) -> (Connection, Result<Entity, Error>)
+    confirm: Bool,
+  ) -> (Connection, Result<(Entity, List<(Int, String)>), Error>)
+
+    (conn, guarded) = guard_similar(conn, name, confirm)
+
+    match guarded
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
 
     (conn, outcome) = conn.execute(
       "INSERT INTO entities (name, type) VALUES ($1, $2) RETURNING id",
@@ -116,12 +182,18 @@ struct EntityStore
     # An empty observations list inserts zero rows, so no branch.
     (conn, inserted) = insert_observations(conn, entity_id, observations)
 
-    match inserted
-      Result.Err(e) -> return (conn, Result.Err(e))
-      Result.Ok(_) -> ()
-    end
+    rows =
+      match inserted
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(list) -> list
+      end
 
-    require_entity(conn, name)
+    (conn, found) = require_entity(conn, name)
+
+    match found
+      Result.Err(e) -> (conn, Result.Err(e))
+      Result.Ok(entity) -> (conn, Result.Ok((entity, rows)))
+    end
   end
 
   @doc """
@@ -138,17 +210,28 @@ struct EntityStore
   end
 
   @doc """
-  Returns one page of entities, oldest first. `limit` and `offset`
-  are validated by the router, so they interpolate as plain integers.
+  Returns one page of entity summaries, most observations first.
+  `limit` and `offset` are validated by the router, so they
+  interpolate as plain integers.
   """
-  fn page(conn: Connection, limit: Int, offset: Int)
-    -> (Connection, Result<List<Entity>, Error>)
+  fn summaries(conn: Connection, limit: Int, offset: Int)
+    -> (Connection, Result<List<EntitySummary>, Error>)
 
-    (conn, outcome) = conn.query(
-      "#{select_sql()} GROUP BY e.id ORDER BY e.id LIMIT #{limit} OFFSET #{offset}",
-    )
+    (conn, outcome) = conn.query("""
+    SELECT e.name, e.type, count(o.id)::int8,
+      e.created_at::text, e.updated_at::text
+    FROM entities e
+    LEFT JOIN observations o ON o.entity_id = e.id
+    GROUP BY e.id
+    ORDER BY count(o.id) DESC, e.name
+    LIMIT #{limit} OFFSET #{offset}
+    """)
 
-    collect(conn, outcome)
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) ->
+        (conn, Result.Ok(qr.rows.map(row -> row_to_summary(row))))
+    end
   end
 
   @doc """
@@ -176,16 +259,127 @@ struct EntityStore
   end
 
   @doc """
+  Renames an entity and touches its `updated_at`. Relations reference
+  ids, so they follow. Observation embeddings carry the old name in
+  their text, so they clear and the backfill recomputes them. Returns
+  the entity, or `None` for an unknown name. A taken name fails with
+  `Duplicate`.
+  """
+  fn rename(conn: Connection, name: String, new_name: String)
+    -> (Connection, Result<Option<Entity>, Error>)
+
+    (conn, outcome) = conn.execute(
+      "UPDATE entities SET name = $2, updated_at = now() WHERE name = $1 RETURNING id",
+      [Value.string(name), Value.string(new_name)],
+    )
+
+    maybe_id =
+      match outcome
+        Result.Err(e) ->
+          return (
+            conn,
+            Result.Err(Error.from_postgres(
+              e,
+              "entity #{new_name} already exists",
+            ))
+          )
+        Result.Ok(qr) ->
+          qr.rows.get(0).map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
+      end
+
+    entity_id =
+      match maybe_id
+        Option.Some(id) ->
+          id
+
+        Option.None ->
+          missing: Option<Entity> = Option.None
+          return (conn, Result.Ok(missing))
+      end
+
+    (conn, cleared) = clear_embeddings(conn, entity_id)
+
+    match cleared
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    find(conn, new_name)
+  end
+
+  @doc """
+  Folds `source` into `into` and deletes `source`, in one transaction.
+  Observations move with their timestamps, except ones `into` already
+  holds word for word. Relations rewire to `into`, except ones that
+  would become self-loops or duplicate an existing relation. Moved
+  observations clear their embeddings, since the text carries the
+  entity name. Fails with `Validation` when the names match and
+  `NotFound` when either is unknown. Returns the target entity.
+  """
+  fn merge(conn: Connection, source: String, into: String)
+    -> (Connection, Result<Entity, Error>)
+
+    if source == into
+      return (
+        conn, Result.Err(Error.Validation("cannot merge an entity into itself"))
+      )
+    end
+
+    (conn, found) = require_id(conn, source)
+
+    source_id =
+      match found
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(id) -> id
+      end
+
+    (conn, found) = require_id(conn, into)
+
+    target_id =
+      match found
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(id) -> id
+      end
+
+    (conn, began) = exec(conn, "BEGIN", List.new())
+
+    match began
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    (conn, merged) = run_merge(conn, source_id, target_id)
+
+    match merged
+      Result.Err(e) ->
+        (conn, _) = exec(conn, "ROLLBACK", List.new())
+        return (conn, Result.Err(e))
+
+      Result.Ok(_) ->
+        ()
+    end
+
+    (conn, committed) = exec(conn, "COMMIT", List.new())
+
+    match committed
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    require_entity(conn, into)
+  end
+
+  @doc """
   Appends observations an entity does not already hold (the unique
   `(entity_id, content)` constraint deduplicates) and touches the
-  entity's `updated_at`. Returns the updated entity, or `None` for an
-  unknown name.
+  entity's `updated_at`. Returns the updated entity with the inserted
+  `(id, content)` rows, or `None` for an unknown name.
   """
   fn add_observations(
     conn: Connection,
     name: String,
     observations: List<String>,
-  ) -> (Connection, Result<Option<Entity>, Error>)
+  ) -> (Connection, Result<Option<(Entity, List<(Int, String)>)>, Error>)
 
     (conn, touched) = touch(conn, name)
 
@@ -201,18 +395,24 @@ struct EntityStore
           id
 
         Option.None ->
-          missing: Option<Entity> = Option.None
+          missing: Option<(Entity, List<(Int, String)>)> = Option.None
           return (conn, Result.Ok(missing))
       end
 
     (conn, inserted) = insert_observations(conn, entity_id, observations)
 
-    match inserted
-      Result.Err(e) -> return (conn, Result.Err(e))
-      Result.Ok(_) -> ()
-    end
+    rows =
+      match inserted
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(list) -> list
+      end
 
-    find(conn, name)
+    (conn, found) = require_entity(conn, name)
+
+    match found
+      Result.Err(e) -> (conn, Result.Err(e))
+      Result.Ok(entity) -> (conn, Result.Ok(Option.Some((entity, rows))))
+    end
   end
 
   @doc """
@@ -262,27 +462,97 @@ struct EntityStore
   end
 
   @doc """
-  Stores a freshly computed embedding for an entity. A no-op for an
-  unknown name (the entity may have been deleted mid-flight).
+  Stores freshly computed embeddings on observation rows by id, in one
+  statement. `ids` and `vectors` pair up by position. Rows deleted
+  mid-flight are skipped. Returns how many rows updated.
   """
-  fn set_embedding(conn: Connection, name: String, vector: String)
-    -> (Connection, Result<(), Error>)
+  fn set_observation_embeddings(
+    conn: Connection,
+    ids: List<Int>,
+    vectors: List<String>,
+  ) -> (Connection, Result<Int, Error>)
 
-    (conn, outcome) = conn.execute(
-      "UPDATE entities SET embedding = $2::vector WHERE name = $1",
-      [Value.string(name), Value.string(vector)],
-    )
+    pairs: List<Json> = List.new()
+
+    for i in Range{start: 0, stop: ids.length() - 1}
+      id = ids.get(i).or(0)
+      vector = vectors.get(i).or("")
+      pair: Json = ["id": id.to_json(), "embedding": vector.to_json()]
+      pairs = pairs.append(pair)
+    end
+
+    (conn, outcome) = conn.execute("""
+      UPDATE observations o
+      SET embedding = v.embedding::vector
+      FROM jsonb_to_recordset($1::jsonb) AS v(id bigint, embedding text)
+      WHERE o.id = v.id
+      """, [Value.string(JSON.encode(Json.Array(pairs)))])
 
     match outcome
       Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(_) -> (conn, Result.Ok(()))
+      Result.Ok(qr) -> (conn, Result.Ok(affected(qr.tag)))
     end
   end
 
   @doc """
-  Hybrid search. With a query embedding, semantic ranking (cosine
-  distance) and trigram name ranking merge by Reciprocal Rank Fusion.
-  Without one (embedder down), trigram ranking runs alone.
+  Returns up to `limit` observations with no embedding yet, oldest
+  first, with their entity's name and type. The backfill drains this.
+  """
+  fn unembedded(conn: Connection, limit: Int)
+    -> (Connection, Result<List<PendingObservation>, Error>)
+
+    (conn, outcome) = conn.execute("""
+      SELECT o.id, e.name, e.type, o.content
+      FROM observations o
+      JOIN entities e ON e.id = o.entity_id
+      WHERE o.embedding IS NULL
+      ORDER BY o.id
+      LIMIT $1
+      """, [Value.int(limit)])
+
+    match outcome
+      Result.Err(e) ->
+        (conn, Result.Err(Error.Database(e.message())))
+
+      Result.Ok(qr) ->
+        rows = qr.rows.map(row -> PendingObservation{
+          content: text_at(row, 3),
+          id: row.get(0).map(v -> v.int_or(0)).or(0),
+          kind: text_at(row, 2),
+          name: text_at(row, 1),
+        })
+        (conn, Result.Ok(rows))
+    end
+  end
+
+  @doc """
+  Returns existing names close to `name`: trigram-similar or equal
+  ignoring case, closest first. Feeds the near-duplicate guard.
+  """
+  fn similar_names(conn: Connection, name: String)
+    -> (Connection, Result<List<String>, Error>)
+
+    (conn, outcome) = conn.execute("""
+      SELECT name FROM entities
+      WHERE name % $1 OR lower(name) = lower($1)
+      ORDER BY similarity(name, $1) DESC
+      LIMIT #{SIMILAR_LIMIT}
+      """, [Value.string(name)])
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) -> (conn, Result.Ok(qr.rows.map(row -> text_at(row, 0))))
+    end
+  end
+
+  @doc """
+  Hybrid search. With a query embedding, observations rank by cosine
+  distance and entity names by trigram similarity. Both lists fuse by
+  Reciprocal Rank Fusion and group by entity, where an entity's score
+  is its best observation plus its name match. Each hit carries up to
+  `HITS_PER_ENTITY` matching observations. Without an embedding
+  (embedder down), trigram ranking runs alone. `limit` counts
+  entities.
   """
   fn search(
     conn: Connection,
@@ -309,41 +579,60 @@ struct EntityStore
 
       Result.Ok(qr) ->
         results = qr.rows.map(row -> SearchResult{
-          entity: row_to_entity(row),
-          score: row.get(6).map(v -> v.float_or(0.0)).or(0.0),
+          kind: text_at(row, 1),
+          name: text_at(row, 0),
+          observations: JsonUtil.decode_hits(text_at(row, 2)),
+          score: row.get(3).map(v -> v.float_or(0.0)).or(0.0),
         })
         (conn, Result.Ok(results))
     end
   end
 
+  # Result columns: name, type, matching observations JSON, score.
   priv fn hybrid_sql -> String
     """
     WITH semantic AS (
-      SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS rank
-      FROM entities
-      WHERE embedding IS NOT NULL
-      ORDER BY embedding <=> $1::vector
-      LIMIT #{CANDIDATES}
+      SELECT o.entity_id, o.content,
+        ROW_NUMBER() OVER (ORDER BY o.embedding <=> $1::vector) AS rank
+      FROM observations o
+      WHERE o.embedding IS NOT NULL
+      ORDER BY o.embedding <=> $1::vector
+      LIMIT #{SEMANTIC_CANDIDATES}
+    ), hits AS (
+      SELECT entity_id, content,
+        (1.0 / (#{RRF_K} + rank))::float8 AS score,
+        ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY rank) AS entity_rank
+      FROM semantic
+    ), scored AS (
+      SELECT entity_id AS id, MAX(score) AS score
+      FROM hits
+      GROUP BY entity_id
     ), fuzzy AS (
       SELECT id, ROW_NUMBER() OVER (ORDER BY similarity(name, $2) DESC) AS rank
       FROM entities
       WHERE name % $2
       ORDER BY similarity(name, $2) DESC
-      LIMIT #{CANDIDATES}
+      LIMIT #{FUZZY_CANDIDATES}
     ), ranked AS (
       SELECT id,
-        (COALESCE(1.0 / (#{RRF_K} + s.rank), 0) +
+        (COALESCE(s.score, 0) +
          COALESCE(1.0 / (#{RRF_K} + f.rank), 0))::float8 AS score
-      FROM semantic s
+      FROM scored s
       FULL OUTER JOIN fuzzy f USING (id)
     )
-    SELECT sub.*, r.score
-    FROM (
-      #{select_sql()}
-      GROUP BY e.id
-    ) sub
-    JOIN ranked r ON r.id = sub.id
-    ORDER BY r.score DESC, sub.id
+    SELECT e.name, e.type,
+      COALESCE((
+        SELECT json_agg(
+          json_build_object('content', h.content, 'score', h.score)
+          ORDER BY h.score DESC
+        )
+        FROM hits h
+        WHERE h.entity_id = e.id AND h.entity_rank <= #{HITS_PER_ENTITY}
+      ), '[]')::text,
+      r.score
+    FROM ranked r
+    JOIN entities e ON e.id = r.id
+    ORDER BY r.score DESC, e.id
     LIMIT $3
     """
   end
@@ -355,37 +644,155 @@ struct EntityStore
       FROM entities
       WHERE name % $1
     )
-    SELECT sub.*, r.score
-    FROM (
-      #{select_sql()}
-      GROUP BY e.id
-    ) sub
-    JOIN ranked r ON r.id = sub.id
-    ORDER BY r.score DESC, sub.id
+    SELECT e.name, e.type, '[]'::text, r.score
+    FROM ranked r
+    JOIN entities e ON e.id = r.id
+    ORDER BY r.score DESC, e.id
     LIMIT $2
     """
   end
 
-  # Inserts observation rows, skipping ones the entity already holds.
+  # The statements inside a merge transaction. Any failure returns
+  # early so `merge` can roll back.
+  priv fn run_merge(conn: Connection, source_id: Int, target_id: Int)
+    -> (Connection, Result<(), Error>)
+
+    both = [Value.int(source_id), Value.int(target_id)]
+
+    # Written out step by step rather than looped: koja 0.18 does not
+    # rebind an outer variable through tuple destructuring inside a
+    # `for` body, so a loop would hand back a stale connection.
+    (conn, outcome) = exec_unit(conn, """
+      UPDATE observations
+      SET entity_id = $2, embedding = NULL
+      WHERE entity_id = $1
+        AND content NOT IN (SELECT content FROM observations WHERE entity_id = $2)
+      """, both)
+
+    match outcome
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    (conn, outcome) = exec_unit(conn, """
+      UPDATE relations r
+      SET from_entity_id = $2
+      WHERE r.from_entity_id = $1 AND r.to_entity_id <> $2
+        AND NOT EXISTS (
+          SELECT 1 FROM relations x
+          WHERE x.from_entity_id = $2 AND x.to_entity_id = r.to_entity_id
+            AND x.type = r.type
+        )
+      """, both)
+
+    match outcome
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    (conn, outcome) = exec_unit(conn, """
+      UPDATE relations r
+      SET to_entity_id = $2
+      WHERE r.to_entity_id = $1 AND r.from_entity_id <> $2
+        AND NOT EXISTS (
+          SELECT 1 FROM relations x
+          WHERE x.from_entity_id = r.from_entity_id AND x.to_entity_id = $2
+            AND x.type = r.type
+        )
+      """, both)
+
+    match outcome
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    (conn, outcome) = exec_unit(
+      conn,
+      "DELETE FROM entities WHERE id = $1",
+      [Value.int(source_id)],
+    )
+
+    match outcome
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    exec_unit(
+      conn,
+      "UPDATE entities SET updated_at = now() WHERE id = $1",
+      [Value.int(target_id)],
+    )
+  end
+
+  # Inserts observation rows, skipping ones the entity already holds,
+  # and returns the rows that landed.
   priv fn insert_observations(
     conn: Connection,
     entity_id: Int,
     observations: List<String>,
-  ) -> (Connection, Result<(), Error>)
+  ) -> (Connection, Result<List<(Int, String)>, Error>)
 
     (conn, outcome) = conn.execute("""
       INSERT INTO observations (entity_id, content)
       SELECT $1, t.x FROM jsonb_array_elements_text($2::jsonb) AS t(x)
       ON CONFLICT (entity_id, content) DO NOTHING
+      RETURNING id, content
       """, [
         Value.int(entity_id),
         Value.string(JsonUtil.encode_string_list(observations))
       ])
 
     match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(_) -> (conn, Result.Ok(()))
+      Result.Err(e) ->
+        (conn, Result.Err(Error.Database(e.message())))
+
+      Result.Ok(qr) ->
+        rows = qr.rows.map(row -> (
+          row.get(0).map(v -> v.int_or(0)).or(0), text_at(row, 1)
+        ))
+        (conn, Result.Ok(rows))
     end
+  end
+
+  # The near-duplicate guard for `create`. Passes when `confirm` is
+  # set or no existing name is close to `name`.
+  priv fn guard_similar(conn: Connection, name: String, confirm: Bool)
+    -> (Connection, Result<(), Error>)
+
+    if confirm
+      return (conn, Result.Ok(()))
+    end
+
+    (conn, similar) = similar_names(conn, name)
+
+    match similar
+      Result.Err(e) ->
+        (conn, Result.Err(e))
+
+      Result.Ok(names) ->
+        if names.empty?()
+          (conn, Result.Ok(()))
+        else
+          (
+            conn,
+            Result.Err(Error.Duplicate("similar entities exist: " <>
+              String.join(names, ", ") <>
+              ". Pass confirm true to create anyway."))
+          )
+        end
+    end
+  end
+
+  # Clears every observation embedding an entity holds, so the
+  # backfill recomputes them under a new name.
+  priv fn clear_embeddings(conn: Connection, entity_id: Int)
+    -> (Connection, Result<(), Error>)
+
+    exec_unit(
+      conn,
+      "UPDATE observations SET embedding = NULL WHERE entity_id = $1",
+      [Value.int(entity_id)],
+    )
   end
 
   # Bumps an entity's `updated_at`, returning its id or `None` for an
@@ -405,6 +812,29 @@ struct EntityStore
       Result.Ok(qr) ->
         id = qr.rows.get(0).map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
         (conn, Result.Ok(id))
+    end
+  end
+
+  # Resolves a name to its id, or `NotFound` for an unknown name.
+  priv fn require_id(conn: Connection, name: String)
+    -> (Connection, Result<Int, Error>)
+
+    (conn, outcome) = conn.execute(
+      "SELECT id FROM entities WHERE name = $1",
+      [Value.string(name)],
+    )
+
+    match outcome
+      Result.Err(e) ->
+        (conn, Result.Err(Error.Database(e.message())))
+
+      Result.Ok(qr) ->
+        match qr.rows.get(0)
+          Option.Some(row) ->
+            (conn, Result.Ok(row.get(0).map(v -> v.int_or(0)).or(0)))
+          Option.None ->
+            (conn, Result.Err(Error.NotFound("no entity named #{name}")))
+        end
     end
   end
 
@@ -439,6 +869,28 @@ struct EntityStore
     end
   end
 
+  priv fn exec(conn: Connection, sql: String, params: List<Value>)
+    -> (Connection, Result<QueryResult, Error>)
+
+    (conn, outcome) = conn.execute(sql, params)
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
+      Result.Ok(qr) -> (conn, Result.Ok(qr))
+    end
+  end
+
+  priv fn exec_unit(conn: Connection, sql: String, params: List<Value>)
+    -> (Connection, Result<(), Error>)
+
+    (conn, outcome) = exec(conn, sql, params)
+
+    match outcome
+      Result.Err(e) -> (conn, Result.Err(e))
+      Result.Ok(_) -> (conn, Result.Ok(()))
+    end
+  end
+
   priv fn collect(
     conn: Connection,
     outcome: Result<QueryResult, Postgres.Error>,
@@ -465,8 +917,26 @@ struct EntityStore
     }
   end
 
+  priv fn row_to_summary(row: List<Value>) -> EntitySummary
+    EntitySummary{
+      created_at: text_at(row, 3),
+      kind: text_at(row, 1),
+      name: text_at(row, 0),
+      observation_count: row.get(2).map(v -> v.int_or(0)).or(0),
+      updated_at: text_at(row, 4),
+    }
+  end
+
   priv fn text_at(row: List<Value>, index: Int) -> String
     row.get(index).map(v -> v.string_or("")).or("")
+  end
+
+  # Reads the row count out of an `UPDATE n` or `DELETE n` tag.
+  priv fn affected(tag: String) -> Int
+    match tag.split(" ").get(1)
+      Option.None -> 0
+      Option.Some(text) -> text.to_int() rescue _ -> 0
+    end
   end
 
   # Column order every entity read shares:

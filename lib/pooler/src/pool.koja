@@ -73,7 +73,7 @@ struct Pool<T>
       Result.Ok(Reply.Resource(resource)) -> resource
       Result.Ok(_) -> fail Error.Failed("unexpected checkout reply")
       Result.Err(CallError.Timeout) -> fail Error.Timeout
-      Result.Err(_) -> fail Error.PoolDown
+      Result.Err(CallError.ProcessDown) -> fail Error.PoolDown
     end
   end
 
@@ -97,7 +97,7 @@ struct Pool<T>
       Result.Ok(Reply.Failed(reason)) -> fail Error.Failed(reason)
       Result.Ok(_) -> fail Error.Failed("unexpected discard reply")
       Result.Err(CallError.Timeout) -> fail Error.Timeout
-      Result.Err(_) -> fail Error.PoolDown
+      Result.Err(CallError.ProcessDown) -> fail Error.PoolDown
     end
   end
 

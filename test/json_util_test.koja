@@ -1,98 +1,92 @@
 struct JsonUtilTest
   @test "parse_entity reads name, type, and observations"
-  fn test_parse_entity -> Bool ! String
+  fn test_parse_entity ! String
     body = "{\"name\": \"Koja\", \"type\": \"language\", " <>
       "\"observations\": [\"compiled\", \"friendly\"]}"
 
     (name, kind, observations) = JsonUtil.parse_entity(body)
       rescue e -> fail "expected Ok, got: " <> e.message()
 
-    unless name == "Koja" and kind == "language"
+    if not (name == "Koja" and kind == "language")
       fail "wrong name/type: #{name}/#{kind}"
     end
 
-    unless observations.length() == 2
+    if observations.length() != 2
       fail "expected 2 observations, got #{observations.length()}"
     end
-
-    true
   end
 
   @test "parse_entity defaults observations to empty"
-  fn test_parse_entity_no_observations -> Bool ! String
+  fn test_parse_entity_no_observations ! String
     (_, _, observations) = JsonUtil.parse_entity(
       "{\"name\": \"Koja\", \"type\": \"language\"}",
     )
       rescue e -> fail "expected Ok, got: " <> e.message()
 
-    unless observations.empty?()
+    if not observations.empty?()
       fail "expected no observations"
     end
-
-    true
   end
 
   @test "parse_entity rejects a missing name"
-  fn test_parse_entity_missing_name -> Bool ! String
+  fn test_parse_entity_missing_name ! String
     match JsonUtil.parse_entity("{\"type\": \"language\"}")
-      Result.Err(Error.Validation(_)) -> true
+      Result.Err(Error.Validation(_)) -> ()
       Result.Err(e) -> fail "wrong error: " <> e.message()
       Result.Ok(_) -> fail "expected an error"
     end
   end
 
   @test "parse_entity rejects non-string observations"
-  fn test_parse_entity_bad_observations -> Bool ! String
+  fn test_parse_entity_bad_observations ! String
     body = "{\"name\": \"x\", \"type\": \"y\", \"observations\": [1, 2]}"
 
     match JsonUtil.parse_entity(body)
-      Result.Err(Error.Validation(_)) -> true
+      Result.Err(Error.Validation(_)) -> ()
       Result.Err(e) -> fail "wrong error: " <> e.message()
       Result.Ok(_) -> fail "expected an error"
     end
   end
 
   @test "parse_entity rejects malformed JSON"
-  fn test_parse_entity_malformed -> Bool ! String
+  fn test_parse_entity_malformed ! String
     match JsonUtil.parse_entity("{nope")
-      Result.Err(Error.Validation(_)) -> true
+      Result.Err(Error.Validation(_)) -> ()
       Result.Err(e) -> fail "wrong error: " <> e.message()
       Result.Ok(_) -> fail "expected an error"
     end
   end
 
   @test "parse_observations requires a non-empty array"
-  fn test_parse_observations_empty -> Bool ! String
+  fn test_parse_observations_empty ! String
     match JsonUtil.parse_observations("{\"observations\": []}")
-      Result.Err(Error.Validation(_)) -> true
+      Result.Err(Error.Validation(_)) -> ()
       Result.Err(e) -> fail "wrong error: " <> e.message()
       Result.Ok(_) -> fail "expected an error"
     end
   end
 
   @test "parse_relation reads from, to, and type"
-  fn test_parse_relation -> Bool ! String
+  fn test_parse_relation ! String
     (from, to, kind) = JsonUtil.parse_relation(
       "{\"from\": \"a\", \"to\": \"b\", \"type\": \"knows\"}",
     )
       rescue e -> fail "expected Ok, got: " <> e.message()
 
-    unless from == "a" and to == "b" and kind == "knows"
+    if not (from == "a" and to == "b" and kind == "knows")
       fail "wrong fields: #{from}/#{to}/#{kind}"
     end
-
-    true
   end
 
   @test "decode_observations reads json_agg output"
-  fn test_decode_observations -> Bool ! String
+  fn test_decode_observations ! String
     text = "[{\"content\": \"a \\\"quoted\\\" fact\", " <>
       "\"created_at\": \"2026-09-01 15:00:00+00\", " <>
       "\"updated_at\": \"2026-09-01 15:30:00+00\"}]"
 
     decoded = JsonUtil.decode_observations(text)
 
-    unless decoded.length() == 1
+    if decoded.length() != 1
       fail "expected 1 observation, got #{decoded.length()}"
     end
 
@@ -102,44 +96,38 @@ struct JsonUtilTest
         Option.None -> fail "missing observation"
       end
 
-    unless observation.content == "a \"quoted\" fact"
+    if observation.content != "a \"quoted\" fact"
       fail "content did not survive: " <> observation.content
     end
 
-    unless observation.created_at == "2026-09-01 15:00:00+00"
+    if observation.created_at != "2026-09-01 15:00:00+00"
       fail "wrong created_at: " <> observation.created_at
     end
 
-    unless observation.updated_at == "2026-09-01 15:30:00+00"
+    if observation.updated_at != "2026-09-01 15:30:00+00"
       fail "wrong updated_at: " <> observation.updated_at
     end
-
-    true
   end
 
   @test "decode_observations is lenient on malformed text"
-  fn test_decode_observations_malformed -> Bool ! String
-    unless JsonUtil.decode_observations("{not json").empty?()
+  fn test_decode_observations_malformed ! String
+    if not JsonUtil.decode_observations("{not json").empty?()
       fail "expected an empty list"
     end
-
-    true
   end
 
   @test "distinct keeps first occurrences in order"
-  fn test_distinct -> Bool ! String
+  fn test_distinct ! String
     result = JsonUtil.distinct(["a", "b", "a", "c", "b"])
 
-    unless result.length() == 3
+    if result.length() != 3
       fail "expected 3 items, got #{result.length()}"
     end
 
-    unless result.get(0).or("") == "a" and result.get(1).or("") == "b"
-      and result.get(2).or("") == "c"
+    if not (result.get(0).or("") == "a" and result.get(1).or("") == "b"
+      and result.get(2).or("") == "c")
 
       fail "wrong order"
     end
-
-    true
   end
 end

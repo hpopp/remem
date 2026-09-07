@@ -659,69 +659,47 @@ struct EntityStore
 
     both = [Value.int(source_id), Value.int(target_id)]
 
-    # Written out step by step rather than looped: koja 0.18 does not
-    # rebind an outer variable through tuple destructuring inside a
-    # `for` body, so a loop would hand back a stale connection.
-    (conn, outcome) = exec_unit(conn, """
-      UPDATE observations
-      SET entity_id = $2, embedding = NULL
-      WHERE entity_id = $1
-        AND content NOT IN (SELECT content FROM observations WHERE entity_id = $2)
-      """, both)
+    steps = [("""
+        UPDATE observations
+        SET entity_id = $2, embedding = NULL
+        WHERE entity_id = $1
+          AND content NOT IN (SELECT content FROM observations WHERE entity_id = $2)
+        """, both), ("""
+        UPDATE relations r
+        SET from_entity_id = $2
+        WHERE r.from_entity_id = $1 AND r.to_entity_id <> $2
+          AND NOT EXISTS (
+            SELECT 1 FROM relations x
+            WHERE x.from_entity_id = $2 AND x.to_entity_id = r.to_entity_id
+              AND x.type = r.type
+          )
+        """, both), ("""
+        UPDATE relations r
+        SET to_entity_id = $2
+        WHERE r.to_entity_id = $1 AND r.from_entity_id <> $2
+          AND NOT EXISTS (
+            SELECT 1 FROM relations x
+            WHERE x.from_entity_id = r.from_entity_id AND x.to_entity_id = $2
+              AND x.type = r.type
+          )
+        """, both),
+      ("DELETE FROM entities WHERE id = $1", [Value.int(source_id)]),
+      (
+        "UPDATE entities SET updated_at = now() WHERE id = $1",
+        [Value.int(target_id)]
+      )]
 
-    match outcome
-      Result.Err(e) -> return (conn, Result.Err(e))
-      Result.Ok(_) -> ()
+    for step in steps
+      (sql, params) = step
+      (conn, outcome) = exec_unit(conn, sql, params)
+
+      match outcome
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(_) -> ()
+      end
     end
 
-    (conn, outcome) = exec_unit(conn, """
-      UPDATE relations r
-      SET from_entity_id = $2
-      WHERE r.from_entity_id = $1 AND r.to_entity_id <> $2
-        AND NOT EXISTS (
-          SELECT 1 FROM relations x
-          WHERE x.from_entity_id = $2 AND x.to_entity_id = r.to_entity_id
-            AND x.type = r.type
-        )
-      """, both)
-
-    match outcome
-      Result.Err(e) -> return (conn, Result.Err(e))
-      Result.Ok(_) -> ()
-    end
-
-    (conn, outcome) = exec_unit(conn, """
-      UPDATE relations r
-      SET to_entity_id = $2
-      WHERE r.to_entity_id = $1 AND r.from_entity_id <> $2
-        AND NOT EXISTS (
-          SELECT 1 FROM relations x
-          WHERE x.from_entity_id = r.from_entity_id AND x.to_entity_id = $2
-            AND x.type = r.type
-        )
-      """, both)
-
-    match outcome
-      Result.Err(e) -> return (conn, Result.Err(e))
-      Result.Ok(_) -> ()
-    end
-
-    (conn, outcome) = exec_unit(
-      conn,
-      "DELETE FROM entities WHERE id = $1",
-      [Value.int(source_id)],
-    )
-
-    match outcome
-      Result.Err(e) -> return (conn, Result.Err(e))
-      Result.Ok(_) -> ()
-    end
-
-    exec_unit(
-      conn,
-      "UPDATE entities SET updated_at = now() WHERE id = $1",
-      [Value.int(target_id)],
-    )
+    (conn, Result.Ok(()))
   end
 
   # Inserts observation rows, skipping ones the entity already holds,

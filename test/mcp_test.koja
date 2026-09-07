@@ -3,7 +3,7 @@ alias Postgres.Connection
 
 struct McpTest
   @test "tool catalog lists every tool with a schema"
-  fn test_tool_catalog -> Bool ! String
+  fn test_tool_catalog ! String
     encoded = JSON.encode(Mcp.tools())
 
     names = [
@@ -13,24 +13,22 @@ struct McpTest
     ]
 
     for name in names
-      unless encoded.contains?("\"#{name}\"")
+      if not encoded.contains?("\"#{name}\"")
         fail "catalog is missing #{name}"
       end
     end
 
-    unless encoded.contains?("\"inputSchema\"")
+    if not encoded.contains?("\"inputSchema\"")
       fail "catalog has no input schemas"
     end
 
-    unless encoded.contains?("\"confirm\"")
+    if not encoded.contains?("\"confirm\"")
       fail "create_entity schema is missing confirm"
     end
-
-    true
   end
 
   @test "search results serialize as entities with matching observations"
-  fn test_search_result_shape -> Bool ! String
+  fn test_search_result_shape ! String
     result = SearchResult{
       kind: "language",
       name: "koja",
@@ -40,7 +38,7 @@ struct McpTest
     encoded = JSON.encode(result.to_json())
 
     for key in ["\"name\"", "\"type\"", "\"score\"", "\"observations\""]
-      unless encoded.contains?(key)
+      if not encoded.contains?(key)
         fail "result is missing #{key}: " <> encoded
       end
     end
@@ -48,12 +46,10 @@ struct McpTest
     if encoded.contains?("\"entity\"")
       fail "result should not nest a full entity: " <> encoded
     end
-
-    true
   end
 
   @test "create_entity refuses a near-duplicate unless confirmed"
-  fn test_create_guard -> Bool ! String
+  fn test_create_guard ! String
     conn = try connect()
     conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
     conn = try cleanup(conn)
@@ -67,7 +63,7 @@ struct McpTest
       embedder,
     )
 
-    unless response.body.contains?("\"isError\":false")
+    if not response.body.contains?("\"isError\":false")
       fail "first create should succeed: " <> response.body
     end
 
@@ -77,11 +73,11 @@ struct McpTest
       embedder,
     )
 
-    unless response.body.contains?("\"isError\":true")
+    if not response.body.contains?("\"isError\":true")
       fail "near-duplicate create should be refused: " <> response.body
     end
 
-    unless response.body.contains?("similar entities exist")
+    if not response.body.contains?("similar entities exist")
       fail "refusal should name the similar entities: " <> response.body
     end
 
@@ -91,7 +87,7 @@ struct McpTest
       embedder,
     )
 
-    unless response.body.contains?("\"isError\":false")
+    if not response.body.contains?("\"isError\":false")
       fail "confirmed create should succeed: " <> response.body
     end
 
@@ -107,8 +103,6 @@ struct McpTest
     match conn.close()
       _ -> ()
     end
-
-    true
   end
 
   priv fn create_call(id: Int, name: String, confirm: Bool) -> String

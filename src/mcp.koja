@@ -302,7 +302,7 @@ struct Mcp
     end
 
     # Embedder down means fuzzy-only ranking, not a failed search.
-    embedding: Option<String> =
+    embedding =
       match embedder.embed(query)
         Result.Ok(vector) ->
           Option.Some(vector)

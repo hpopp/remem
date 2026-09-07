@@ -2,7 +2,7 @@
 entry = "App"
 koja = "0.18"
 name = "remem"
-version = "0.3.0"
+version = "0.3.1"
 
 [dependencies]
 conn = { path = "lib/conn" }

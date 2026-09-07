@@ -7,14 +7,14 @@ exercise `frame_request` directly.
 """
 struct WorkerTest
   @test "framing completes, waits, and splits pipelined bytes"
-  fn test_framing -> Bool ! String
+  fn test_framing ! String
     small = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n"
 
     match frame_request(small, HEADER_CAP, BODY_CAP)
       Frame.Complete(framed) ->
         (req, leftover) = framed
 
-        unless req == small and leftover.empty?()
+        if not (req == small and leftover.empty?())
           fail "small request should frame whole with no leftover"
         end
 
@@ -33,19 +33,17 @@ struct WorkerTest
       Frame.Complete(framed) ->
         (req, leftover) = framed
 
-        unless req == small and leftover == "GET /graph"
+        if not (req == small and leftover == "GET /graph")
           fail "pipelined bytes should stay in the leftover"
         end
 
       _ ->
         fail "pipelined request should frame complete"
     end
-
-    true
   end
 
   @test "framing enforces the header and body caps"
-  fn test_caps -> Bool ! String
+  fn test_caps ! String
     huge_body = "POST /entities HTTP/1.1\r\n" <>
       "Content-Length: #{BODY_CAP + 1}\r\n\r\n"
 
@@ -65,7 +63,5 @@ struct WorkerTest
       Frame.TooLarge -> ()
       _ -> fail "unterminated oversized headers should be too large"
     end
-
-    true
   end
 end

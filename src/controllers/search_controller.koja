@@ -59,7 +59,7 @@ priv fn search_db(db: Connection, embedder: Embedder, q: String, limit: Int)
     Result.Ok(_) -> ()
   end
 
-  embedding: Option<String> =
+  embedding =
     match embedder.embed(q)
       Result.Ok(vector) ->
         Option.Some(vector)

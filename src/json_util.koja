@@ -14,7 +14,7 @@ struct JsonUtil
     name = try required_string(root, "name")
     kind = try required_string(root, "type")
 
-    observations: List<String> =
+    observations =
       match field(root, "observations")
         Option.None -> List.new()
         Option.Some(value) ->

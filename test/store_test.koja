@@ -8,7 +8,7 @@ with `docker compose up -d` before `koja test`. Test entities use the
 """
 struct StoreTest
   @test "entity and relation lifecycle against compose Postgres"
-  fn test_lifecycle -> Bool ! String
+  fn test_lifecycle ! String
     conn = try connect()
     conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
     conn = try cleanup(conn)
@@ -24,11 +24,11 @@ struct StoreTest
     )
     (koja, koja_rows) = created rescue e -> fail "create koja: " <> e.message()
 
-    unless koja.name == "itest-koja" and koja.kind == "language"
+    if not (koja.name == "itest-koja" and koja.kind == "language")
       fail "created entity has wrong fields"
     end
 
-    unless koja_rows.length() == 1
+    if koja_rows.length() != 1
       fail "expected 1 inserted row, got #{koja_rows.length()}"
     end
 
@@ -42,7 +42,7 @@ struct StoreTest
     (postgres_entity, postgres_rows) = created
       rescue e -> fail "create postgres: " <> e.message()
 
-    unless postgres_entity.kind == "database"
+    if postgres_entity.kind != "database"
       fail "created postgres entity has wrong type"
     end
 
@@ -72,7 +72,7 @@ struct StoreTest
 
     match similar
       Result.Err(Error.Duplicate(message)) ->
-        unless message.contains?("itest-koja")
+        if not message.contains?("itest-koja")
           fail "guard did not name the similar entity: " <> message
         end
 
@@ -98,11 +98,11 @@ struct StoreTest
         Option.Some(present) -> present
       end
 
-    unless entity.observations.length() == 2
+    if entity.observations.length() != 2
       fail "expected 2 observations, got #{entity.observations.length()}"
     end
 
-    unless added_rows.length() == 1
+    if added_rows.length() != 1
       fail "expected 1 new row, got #{added_rows.length()}"
     end
 
@@ -121,7 +121,7 @@ struct StoreTest
         Option.Some(present) -> present
       end
 
-    unless entity.observations.length() == 1
+    if entity.observations.length() != 1
       fail "expected 1 observation, got #{entity.observations.length()}"
     end
 
@@ -134,7 +134,7 @@ struct StoreTest
     )
     relation = related rescue e -> fail "create relation: " <> e.message()
 
-    unless relation.from == "itest-koja" and relation.kind == "talks_to"
+    if not (relation.from == "itest-koja" and relation.kind == "talks_to")
       fail "created relation has wrong fields"
     end
 
@@ -167,7 +167,7 @@ struct StoreTest
     (conn, touching) = RelationStore.for_entity(conn, "itest-koja")
     relations = touching rescue e -> fail "for_entity: " <> e.message()
 
-    unless relations.length() == 1
+    if relations.length() != 1
       fail "expected 1 relation, got #{relations.length()}"
     end
 
@@ -175,7 +175,7 @@ struct StoreTest
     (conn, found) = EntityStore.search(conn, "itest-kojaa", Option.None, 10)
     results = found rescue e -> fail "fuzzy search: " <> e.message()
 
-    unless results.any?(r -> r.name == "itest-koja")
+    if not results.any?(r -> r.name == "itest-koja")
       fail "fuzzy search missed itest-koja"
     end
 
@@ -198,7 +198,7 @@ struct StoreTest
         fail "set_observation_embeddings: " <> e.message()
 
       Result.Ok(count) ->
-        unless count == 1
+        if count != 1
           fail "expected 1 embedded row, got #{count}"
         end
     end
@@ -219,19 +219,19 @@ struct StoreTest
         Option.Some(hit) -> hit
       end
 
-    unless top.name == "itest-postgres"
+    if top.name != "itest-postgres"
       fail "expected itest-postgres first, got " <> top.name
     end
 
-    unless top.observations.length() == 1
+    if top.observations.length() != 1
       fail "expected 1 matching observation, got #{top.observations.length()}"
     end
 
-    unless top.observations.any?(o -> o.content == "stores rows")
+    if not top.observations.any?(o -> o.content == "stores rows")
       fail "hit carries the wrong observation"
     end
 
-    unless results.all?(r -> r.name != "itest-koja")
+    if not results.all?(r -> r.name != "itest-koja")
       fail "unembedded itest-koja should not appear without a name match"
     end
 
@@ -251,7 +251,7 @@ struct StoreTest
         Option.Some(hit) -> hit
       end
 
-    unless top.name == "itest-postgres"
+    if top.name != "itest-postgres"
       fail "expected itest-postgres first in mixed search, got " <> top.name
     end
 
@@ -261,7 +261,7 @@ struct StoreTest
         Option.Some(hit) -> hit
       end
 
-    unless koja_hit.observations.empty?()
+    if not koja_hit.observations.empty?()
       fail "name-only hit should carry no observations"
     end
 
@@ -269,14 +269,14 @@ struct StoreTest
     (conn, removed) = EntityStore.remove(conn, "itest-postgres")
     deleted = removed rescue e -> fail "remove: " <> e.message()
 
-    unless deleted
+    if not deleted
       fail "expected a deleted row"
     end
 
     (conn, touching) = RelationStore.for_entity(conn, "itest-koja")
     relations = touching rescue e -> fail "for_entity after: " <> e.message()
 
-    unless relations.empty?()
+    if not relations.empty?()
       fail "relations should cascade on entity delete"
     end
 
@@ -285,12 +285,10 @@ struct StoreTest
     match conn.close()
       _ -> ()
     end
-
-    true
   end
 
   @test "merge, rename, summaries, and the near-duplicate guard"
-  fn test_curation -> Bool ! String
+  fn test_curation ! String
     conn = try connect()
     conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
     conn = try cleanup(conn)
@@ -343,7 +341,7 @@ struct StoreTest
     (conn, similar) = EntityStore.similar_names(conn, "Itest Merge A")
     names = similar rescue e -> fail "similar_names: " <> e.message()
 
-    unless names.any?(n -> n == "itest-merge-a")
+    if not names.any?(n -> n == "itest-merge-a")
       fail "similar_names missed itest-merge-a"
     end
 
@@ -376,11 +374,11 @@ struct StoreTest
     (conn, merged) = EntityStore.merge(conn, "itest-merge-a", "itest-merge-b")
     target = merged rescue e -> fail "merge: " <> e.message()
 
-    unless target.name == "itest-merge-b"
+    if target.name != "itest-merge-b"
       fail "merge returned " <> target.name
     end
 
-    unless target.observations.length() == 3
+    if target.observations.length() != 3
       fail "expected 3 observations after merge, got #{target.observations.length()}"
     end
 
@@ -389,7 +387,7 @@ struct StoreTest
         fail "alpha fact did not move"
 
       Option.Some(o) ->
-        unless o.created_at == alpha_created_at
+        if o.created_at != alpha_created_at
           fail "moved observation lost its created_at"
         end
     end
@@ -397,26 +395,26 @@ struct StoreTest
     (conn, found) = EntityStore.find(conn, "itest-merge-a")
     gone = found rescue e -> fail "find source: " <> e.message()
 
-    unless gone.none?()
+    if not gone.none?()
       fail "source survived the merge"
     end
 
     (conn, touching) = RelationStore.for_entity(conn, "itest-merge-b")
     relations = touching rescue e -> fail "for_entity: " <> e.message()
 
-    unless relations.length() == 2
+    if relations.length() != 2
       fail "expected 2 relations after merge, got #{relations.length()}"
     end
 
-    unless relations.any?(r -> r.from == "itest-merge-b" and r.kind == "uses")
+    if not relations.any?(r -> r.from == "itest-merge-b" and r.kind == "uses")
       fail "b -[uses]-> c should survive"
     end
 
-    unless relations.any?(r -> r.to == "itest-merge-b" and r.kind == "made_by")
+    if not relations.any?(r -> r.to == "itest-merge-b" and r.kind == "made_by")
       fail "c -[made_by]-> a should rewire to b"
     end
 
-    unless relations.all?(r -> r.kind != "likes")
+    if not relations.all?(r -> r.kind != "likes")
       fail "self-loop should drop"
     end
 
@@ -425,7 +423,7 @@ struct StoreTest
     (conn, pending) = EntityStore.unembedded(conn, 100000)
     rows = pending rescue e -> fail "unembedded after merge: " <> e.message()
 
-    unless rows.any?(r -> r.content == "alpha fact"
+    if not rows.any?(r -> r.content == "alpha fact"
       and r.name == "itest-merge-b")
 
       fail "moved observation should be pending an embedding"
@@ -440,7 +438,7 @@ struct StoreTest
         fail "rename lost the entity"
 
       Option.Some(entity) ->
-        unless entity.name == "itest-merge-z"
+        if entity.name != "itest-merge-z"
           fail "rename returned " <> entity.name
         end
     end
@@ -448,7 +446,7 @@ struct StoreTest
     (conn, touching) = RelationStore.for_entity(conn, "itest-merge-z")
     relations = touching rescue e -> fail "for_entity renamed: " <> e.message()
 
-    unless relations.length() == 2
+    if relations.length() != 2
       fail "expected 2 relations after rename, got #{relations.length()}"
     end
 
@@ -463,7 +461,7 @@ struct StoreTest
     (conn, unknown) = EntityStore.rename(conn, "itest-ghost", "itest-anything")
     nobody = unknown rescue e -> fail "rename unknown: " <> e.message()
 
-    unless nobody.none?()
+    if not nobody.none?()
       fail "renaming an unknown entity returned one"
     end
 
@@ -477,7 +475,7 @@ struct StoreTest
         Option.Some(s) -> s
       end
 
-    unless z.observation_count == 3 and z.kind == "tool"
+    if not (z.observation_count == 3 and z.kind == "tool")
       fail "summary for itest-merge-z is wrong"
     end
 
@@ -487,7 +485,7 @@ struct StoreTest
         Option.Some(s) -> s
       end
 
-    unless c.observation_count == 0
+    if c.observation_count != 0
       fail "summary for itest-merge-c should count 0"
     end
 
@@ -496,12 +494,10 @@ struct StoreTest
     match conn.close()
       _ -> ()
     end
-
-    true
   end
 
   @test "search log records queries with timestamps"
-  fn test_search_log -> Bool ! String
+  fn test_search_log ! String
     conn = try connect()
     conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
 
@@ -530,11 +526,11 @@ struct StoreTest
         Option.Some(present) -> present
       end
 
-    unless row.get(0).map(v -> v.int_or(0)).or(0) >= 1
+    if row.get(0).map(v -> v.int_or(0)).or(0) < 1
       fail "expected a logged query row"
     end
 
-    unless not row.get(1).map(v -> v.string_or("")).or("").empty?()
+    if row.get(1).map(v -> v.string_or("")).or("").empty?()
       fail "logged query has no created_at"
     end
 
@@ -550,8 +546,6 @@ struct StoreTest
     match conn.close()
       _ -> ()
     end
-
-    true
   end
 
   # Creates a `tool` entity, bypassing the near-duplicate guard since

@@ -8,3 +8,5 @@ Initial release.
 - Borrow resources with `Pool.checkout`, queueing callers in FIFO order when every resource is lent out.
 - Return resources with `Pool.checkin`, preserving updates made while borrowed.
 - Replace broken resources with `Pool.discard`, which rebuilds them with the factory.
+- `Config.valid` runs on every checked-in resource. A value that fails the check is dropped and its slot refilled.
+- Empty slots refill on a backoff timer when the factory fails, bounded by `Config.backoff_min_ms` and `Config.backoff_max_ms`. The pool never shrinks.

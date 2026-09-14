@@ -76,6 +76,65 @@ struct PoolTest
     end
   end
 
+  @test "checkin drops an invalid resource and refills the slot"
+  fn test_invalid_checkin ! String
+    config = Config{
+      create: fn () -> Result<Int, String> Result.Ok(7) end,
+      size: 1,
+      valid: Option.Some(fn (n: Int) -> Bool n != 0 end),
+    }
+
+    pool = Pool.start(config)
+    _ = pool.checkout(1000) rescue _ -> fail "initial checkout failed"
+
+    pool.checkin(0)
+
+    replacement = pool.checkout(1000)
+      rescue _ -> fail "checkout after invalid checkin failed"
+
+    pool.stop()
+
+    if replacement != 7
+      fail "expected replacement 7, got #{replacement}"
+    end
+  end
+
+  @test "a failing factory retries on a timer until it recovers"
+  fn test_refill_backoff ! String
+    # Startup succeeds, the next two builds fail, then it recovers.
+    script = spawn Script.start([true, false, false])
+
+    config = Config{
+      backoff_max_ms: 40,
+      backoff_min_ms: 10,
+      create: fn () -> Result<Int, String>
+        match script.call((), 1000)
+          Result.Ok(true) -> Result.Ok(7)
+          Result.Ok(false) -> Result.Err("boom")
+          Result.Err(_) -> Result.Err("script down")
+        end
+      end,
+      size: 1,
+    }
+
+    pool = Pool.start(config)
+    _ = pool.checkout(1000) rescue _ -> fail "initial checkout failed"
+
+    pool.discard(1000) rescue _ -> fail "discard failed"
+
+    # The slot is empty and the first retry fails too. The second
+    # retry (at 10ms + 20ms) succeeds and answers the waiting checkout.
+    replacement = pool.checkout(1000)
+      rescue _ -> fail "pool never refilled the discarded slot"
+
+    pool.stop()
+    script.kill()
+
+    if replacement != 7
+      fail "expected replacement 7, got #{replacement}"
+    end
+  end
+
   @test "a failing factory brings the pool down"
   fn test_start_failure ! String
     config = Config{
@@ -90,5 +149,28 @@ struct PoolTest
       Result.Err(_) -> fail "expected PoolDown error"
       Result.Ok(_) -> fail "checkout should not succeed on a dead pool"
     end
+  end
+end
+
+# Scripts a factory's outcomes. Each call pops the next Bool. Once
+# the script runs out, every call answers true.
+priv struct Script: Process<List<Bool>, (), Bool>
+  outcomes: List<Bool>
+
+  fn start(outcomes: List<Bool>) -> Self ! Process.StopReason
+    Script{outcomes: outcomes}
+  end
+
+  fn handle(self, msg: (), from: Option<ReplyTo<Bool>>) -> Process.Step<Self>
+    match self.outcomes.first()
+      Option.None ->
+        _ = ReplyTo.reply(from, true)
+
+      Option.Some(outcome) ->
+        _ = ReplyTo.reply(from, outcome)
+        self.outcomes = self.outcomes.slice(1, self.outcomes.length() - 1)
+    end
+
+    Process.Step.Continue(self)
   end
 end

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-09-14
+
+### Fixed
+
+- The database pool now drops connections that come back closed or
+  mid-transaction and refills the slot, so a Postgres restart no
+  longer leaves broken sockets in the pool until the pod restarts.
+  When Postgres is down, refills retry with backoff instead of
+  shrinking the pool.
+
+### Changed
+
+- postgres-koja 0.3.1, which tracks connection and transaction state.
+
 ## [0.3.1] - 2026-09-07
 
 ### Fixed

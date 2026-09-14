@@ -92,8 +92,10 @@ end
 
 @doc """
 Checks a connection out of the pool, runs `work`, and always checks
-the connection back in. Checkout failure surfaces as `Unavailable`,
-which renders 503.
+the connection back in. The pool inspects the returned value and
+replaces it when the connection is no longer idle, so callers never
+need to discard. Checkout failure surfaces as `Unavailable`, which
+renders 503.
 """
 fn with_db<T>(
   pool: Pool<Connection>,

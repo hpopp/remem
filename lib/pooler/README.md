@@ -9,7 +9,8 @@ single process that lends resources to callers one at a time.
 - Fixed-size pool built eagerly from a factory closure
 - FIFO waitlist: checkout callers block (with a timeout) until a resource frees up
 - Checked-in values replace the lent copy, so in-place updates survive the round trip
-- Broken resources are discarded and rebuilt with the factory
+- Optional `valid` check at checkin drops broken resources before the next borrower sees them
+- Empty slots refill with the factory, on a backoff timer when the factory fails
 
 ## Installation
 
@@ -29,6 +30,7 @@ alias Pooler.Pool
 config = Config{
   create: fn () -> Result<Connection, String> connect() end,
   size: 5,
+  valid: Option.Some(fn (conn: Connection) -> Bool conn.idle?() end),
 }
 
 pool = Pool.start(config)
@@ -53,17 +55,17 @@ pool.stop()
 
 Checkout failures are a `Pooler.Error`:
 
-| Variant          | Meaning                                             |
-| ---------------- | --------------------------------------------------- |
-| `Timeout`        | No resource freed up within the checkout timeout    |
-| `PoolDown`       | The pool process is not running                     |
-| `Failed(String)` | The factory failed while rebuilding after a discard |
+| Variant          | Meaning                                          |
+| ---------------- | ------------------------------------------------ |
+| `Timeout`        | No resource freed up within the checkout timeout |
+| `PoolDown`       | The pool process is not running                  |
+| `Failed(String)` | The pool answered with an unexpected reply       |
 
 ## Not yet supported
 
 - Lease reclamation: a crashed borrower's resource is lost until discarded
 - Dynamic resizing and overflow resources
-- Idle health checks
+- Idle health checks: `valid` runs at checkin only, never on shelved resources
 
 ## Development
 

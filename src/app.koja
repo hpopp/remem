@@ -16,7 +16,7 @@ alias Process.StopReason
 alias Trail.Config as TrailConfig
 alias Trail.Worker
 
-const VERSION: String = "0.3.1"
+const VERSION: String = "0.3.2"
 
 const POOL_SIZE: Int = 10
 
@@ -62,7 +62,16 @@ struct App: Process<List<String>, TCPEvent, String>
         Connection.connect(db_config).map_err(e -> e.message())
       end
 
-    pool = Pool.start(PoolConfig{create: create, size: POOL_SIZE})
+    # The pool drops any connection that comes back closed or stuck in
+    # a transaction and refills the slot, so a database restart heals
+    # instead of leaving broken sockets on the shelf.
+    pool = Pool.start(
+      PoolConfig{
+        create: create,
+        size: POOL_SIZE,
+        valid: Option.Some(fn (conn: Connection) -> Bool conn.idle?() end),
+      },
+    )
 
     # The pool builds its connections eagerly but reports factory
     # failure as PoolDown on first use. Probe once so a bad database

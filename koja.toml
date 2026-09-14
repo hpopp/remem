@@ -2,10 +2,10 @@
 entry = "App"
 koja = "0.18"
 name = "remem"
-version = "0.3.1"
+version = "0.3.2"
 
 [dependencies]
 conn = { path = "lib/conn" }
 pooler = { path = "lib/pooler" }
-postgres = { github = "hpopp/postgres-koja", tag = "v0.3.0" }
+postgres = { github = "hpopp/postgres-koja", tag = "v0.3.1" }
 trail = { path = "lib/trail" }

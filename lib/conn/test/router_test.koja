@@ -109,8 +109,7 @@ struct RouterTest
     response = router.dispatch(request(Method.Get, "/secret"))
     assert response.status.code == 401, "halted by middleware"
     assert response.body == "no credentials", "middleware response body"
-    assert response.headers.get("X-First") == Option.Some("1"),
-      "earlier middleware still applied"
+    assert response.headers.get("X-First") == Option.Some("1"), "earlier middleware still applied"
 
     authed = request(Method.Get, "/secret")
     authed.headers = authed.headers.set("Authorization", "Bearer x")
@@ -147,10 +146,9 @@ struct RouterTest
 
     response = router.dispatch(request(Method.Get, "/data"))
     assert response.body == "{\"ok\":true}", "json body"
-    assert response.headers.get("Content-Type") == Option.Some("application/json"),
-      "content type"
-    assert response.headers.get("Content-Length") == Option.Some("11"),
-      "content length"
+    assert response.headers.get("Content-Type") ==
+      Option.Some("application/json"), "content type"
+    assert response.headers.get("Content-Length") == Option.Some("11"), "content length"
   end
 
   test "custom fallback and unresponded conns"
@@ -165,7 +163,6 @@ struct RouterTest
     assert response.body == "\"no route for /nowhere\"", "custom fallback body"
 
     response = router.dispatch(request(Method.Get, "/forgot"))
-    assert response.status.code == 500,
-      "handler that never responds becomes 500"
+    assert response.status.code == 500, "handler that never responds becomes 500"
   end
 end

@@ -168,7 +168,7 @@ priv fn split_segments(path: String) -> List<String>
   segments: List<String> = List.new()
 
   for segment in path.split("/")
-    unless segment.empty?()
+    if not segment.empty?()
       segments = segments.append(segment)
     end
   end
@@ -195,7 +195,7 @@ priv fn bind_params(pattern: List<String>, path: List<String>)
       name = expected.slice(Range{start: 1, stop: expected.length() - 1})
       params = params.append((name, actual))
     else
-      unless expected == actual
+      if expected != actual
         return Option.None
       end
     end

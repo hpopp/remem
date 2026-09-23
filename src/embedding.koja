@@ -55,7 +55,7 @@ struct Embedder
     response = HTTP.post(self.url <> "/embed", JSON.encode(payload), headers)
       rescue e -> fail Error.Embedding(e.message())
 
-    unless response.status.code == 200
+    if response.status.code != 200
       fail Error.Embedding("embedding server returned #{response.status.code}: " <>
         response.body)
     end
@@ -65,7 +65,7 @@ struct Embedder
 
     vectors = try vector_literals(decoded)
 
-    unless vectors.length() == texts.length()
+    if vectors.length() != texts.length()
       fail Error.Embedding("expected #{texts.length()} vectors, got #{vectors.length()}")
     end
 

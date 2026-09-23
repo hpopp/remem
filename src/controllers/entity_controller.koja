@@ -102,7 +102,7 @@ struct EntityController
     name = try Params.name(c)
     deleted = try with_db(self.pool, db -> EntityStore.remove(db, name))
 
-    unless deleted
+    if not deleted
       fail Error.NotFound("no entity named #{name}")
     end
 

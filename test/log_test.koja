@@ -1,18 +1,12 @@
+alias Duration.Unit as TimeUnit
+
 struct LogTest
-  @test "iso8601 formats known timestamps"
-  fn test_iso8601 ! String
-    if Log.iso8601(0) != "1970-01-01T00:00:00.000Z"
-      fail "epoch zero: " <> Log.iso8601(0)
-    end
-
-    # 2026-09-02 23:08:12.123 UTC
-    if Log.iso8601(1788390492123) != "2026-09-02T23:08:12.123Z"
-      fail "modern date: " <> Log.iso8601(1788390492123)
-    end
-
-    # Leap day boundary: 2024-02-29 23:59:59.999 UTC
-    if Log.iso8601(1709251199999) != "2024-02-29T23:59:59.999Z"
-      fail "leap day: " <> Log.iso8601(1709251199999)
-    end
+  test "elapsed picks the unit from the size"
+    assert Log.elapsed(Duration.new(0, TimeUnit.Nanoseconds)) == "0µs"
+    assert Log.elapsed(Duration.new(452, TimeUnit.Microseconds)) == "452µs"
+    assert Log.elapsed(Duration.new(3_120, TimeUnit.Microseconds)) == "3ms"
+    assert Log.elapsed(Duration.new(999, TimeUnit.Milliseconds)) == "999ms"
+    assert Log.elapsed(Duration.new(1_234, TimeUnit.Milliseconds)) == "1.2s"
+    assert Log.elapsed(Duration.new(75, TimeUnit.Seconds)) == "75.0s"
   end
 end

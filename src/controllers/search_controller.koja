@@ -32,7 +32,7 @@ struct SearchController
 
     limit = try Params.int(c, "limit", DEFAULT_SEARCH_LIMIT)
 
-    unless limit >= 1 and limit <= MAX_SEARCH_LIMIT
+    if limit < 1 or limit > MAX_SEARCH_LIMIT
       fail Error.Validation("limit must be between 1 and #{MAX_SEARCH_LIMIT}")
     end
 

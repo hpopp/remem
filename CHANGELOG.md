@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-23
+
+### Changed
+
+- Requires Koja 0.19. `unless` is gone from the sources, tests use
+  `test` blocks with `assert`, and elapsed times flow through the
+  new `Duration` and `Instant` types.
+- postgres-koja 0.4.0.
+- Access log durations pick their unit from the size, so a request
+  logs as `452µs`, `3ms`, or `1.2s`.
+- Log timestamps come from the standard library ISO 8601 renderer
+  and carry microseconds, as in `2026-09-23T13:13:57.586073Z`.
+
+### Removed
+
+- The hand-rolled `Log.iso8601` calendar conversion.
+
 ## [0.3.2] - 2026-09-14
 
 ### Fixed

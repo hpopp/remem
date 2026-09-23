@@ -159,7 +159,7 @@ struct JsonUtil
     seen: List<String> = List.new()
 
     for item in items
-      unless seen.any?(s -> s == item)
+      if not seen.any?(s -> s == item)
         seen = seen.append(item)
       end
     end

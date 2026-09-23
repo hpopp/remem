@@ -40,7 +40,7 @@ chainable `with_` functions adjust the rest:
 | `with_on_reject`                   | no-op      | Rejected request hook            |
 
 `on_request` fires after each dispatched request with the request,
-the response, and the elapsed milliseconds. `on_reject` fires when
+the response, and the elapsed time as a `Duration`. `on_reject` fires when
 the worker rejects a request itself, before a handler could run.
 
 ## Known gaps

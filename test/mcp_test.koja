@@ -2,8 +2,7 @@ alias Postgres.Config as DbConfig
 alias Postgres.Connection
 
 struct McpTest
-  @test "tool catalog lists every tool with a schema"
-  fn test_tool_catalog ! String
+  test "tool catalog lists every tool with a schema"
     encoded = JSON.encode(Mcp.tools())
 
     names = [
@@ -13,22 +12,15 @@ struct McpTest
     ]
 
     for name in names
-      if not encoded.contains?("\"#{name}\"")
-        fail "catalog is missing #{name}"
-      end
+      assert encoded.contains?("\"#{name}\""), "catalog is missing #{name}"
     end
 
-    if not encoded.contains?("\"inputSchema\"")
-      fail "catalog has no input schemas"
-    end
-
-    if not encoded.contains?("\"confirm\"")
-      fail "create_entity schema is missing confirm"
-    end
+    assert encoded.contains?("\"inputSchema\""), "catalog has no input schemas"
+    assert encoded.contains?("\"confirm\""),
+      "create_entity schema is missing confirm"
   end
 
-  @test "search results serialize as entities with matching observations"
-  fn test_search_result_shape ! String
+  test "search results serialize as entities with matching observations"
     result = SearchResult{
       kind: "language",
       name: "koja",
@@ -38,20 +30,16 @@ struct McpTest
     encoded = JSON.encode(result.to_json())
 
     for key in ["\"name\"", "\"type\"", "\"score\"", "\"observations\""]
-      if not encoded.contains?(key)
-        fail "result is missing #{key}: " <> encoded
-      end
+      assert encoded.contains?(key), "result is missing #{key}: #{encoded}"
     end
 
-    if encoded.contains?("\"entity\"")
-      fail "result should not nest a full entity: " <> encoded
-    end
+    assert not encoded.contains?("\"entity\""),
+      "result should not nest a full entity: #{encoded}"
   end
 
-  @test "create_entity refuses a near-duplicate unless confirmed"
-  fn test_create_guard ! String
+  test "create_entity refuses a near-duplicate unless confirmed"
     conn = try connect()
-    conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
+    conn = Migrator.run(conn) rescue e -> fail "migrate: #{e.message()}"
     conn = try cleanup(conn)
 
     # The embedder is never reached, since no observations are sent.
@@ -63,9 +51,8 @@ struct McpTest
       embedder,
     )
 
-    if not response.body.contains?("\"isError\":false")
-      fail "first create should succeed: " <> response.body
-    end
+    assert response.body.contains?("\"isError\":false"),
+      "first create should succeed: #{response.body}"
 
     (response, conn) = Mcp.handle(
       create_call(2, "Itest MCP Guard", false),
@@ -73,13 +60,10 @@ struct McpTest
       embedder,
     )
 
-    if not response.body.contains?("\"isError\":true")
-      fail "near-duplicate create should be refused: " <> response.body
-    end
-
-    if not response.body.contains?("similar entities exist")
-      fail "refusal should name the similar entities: " <> response.body
-    end
+    assert response.body.contains?("\"isError\":true"),
+      "near-duplicate create should be refused: #{response.body}"
+    assert response.body.contains?("similar entities exist"),
+      "refusal should name the similar entities: #{response.body}"
 
     (response, conn) = Mcp.handle(
       create_call(3, "Itest MCP Guard", true),
@@ -87,16 +71,15 @@ struct McpTest
       embedder,
     )
 
-    if not response.body.contains?("\"isError\":false")
-      fail "confirmed create should succeed: " <> response.body
-    end
+    assert response.body.contains?("\"isError\":false"),
+      "confirmed create should succeed: #{response.body}"
 
     (conn, outcome) = conn.query(
       "DELETE FROM entities WHERE name ILIKE 'itest%'",
     )
 
     match outcome
-      Result.Err(e) -> fail "cleanup: " <> e.message()
+      Result.Err(e) -> fail "cleanup: #{e.message()}"
       Result.Ok(_) -> ()
     end
 
@@ -111,20 +94,20 @@ struct McpTest
       "{\"name\":\"#{name}\",\"type\":\"test\",\"confirm\":#{confirm}}}}"
   end
 
-  priv fn connect -> Connection ! String
+  priv fn connect -> Connection ! Test.Failure
     config = DbConfig.new("127.0.0.1", 5435, "postgres", "remem")
 
     Connection.connect(config)
-      rescue e -> fail "connect (is docker compose up?): " <> e.message()
+      rescue e -> fail "connect (is docker compose up?): #{e.message()}"
   end
 
-  priv fn cleanup(conn: Connection) -> Connection ! String
+  priv fn cleanup(conn: Connection) -> Connection ! Test.Failure
     (conn, outcome) = conn.query(
       "DELETE FROM entities WHERE name ILIKE 'itest%'",
     )
 
     match outcome
-      Result.Err(e) -> fail "cleanup: " <> e.message()
+      Result.Err(e) -> fail "cleanup: #{e.message()}"
       Result.Ok(_) -> conn
     end
   end

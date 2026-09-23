@@ -1,56 +1,43 @@
 @doc """
 Leveled stdout logging with UTC ISO-8601 timestamps, like:
 
-    2026-09-01T23:08:12.123Z INFO POST /entities 201 12ms
+    2026-09-01T23:08:12.123456Z INFO POST /entities 201 12ms
 """
 struct Log
   fn info(message: String)
-    IO.puts("#{iso8601(DateTime.now().timestamp_millis())} INFO #{message}")
+    IO.puts("#{now()} INFO #{message}")
   end
 
   fn warn(message: String)
-    IO.puts("#{iso8601(DateTime.now().timestamp_millis())} WARN #{message}")
+    IO.puts("#{now()} WARN #{message}")
   end
 
   fn error(message: String)
-    IO.puts("#{iso8601(DateTime.now().timestamp_millis())} ERROR #{message}")
+    IO.puts("#{now()} ERROR #{message}")
   end
 
   @doc """
-  Formats epoch milliseconds as UTC ISO-8601, public for tests.
-  Uses the civil-from-days calendar conversion.
+  Formats an elapsed time the way `koja test` does. The unit follows
+  the size, so `452µs` below one millisecond, `3ms` below one second,
+  and `1.2s` from there.
   """
-  fn iso8601(millis: Int) -> String
-    days = millis / 86400000
-    rem = millis % 86400000
-    hour = rem / 3600000
-    minute = rem % 3600000 / 60000
-    second = rem % 60000 / 1000
-    milli = rem % 1000
+  fn elapsed(duration: Duration) -> String
+    microseconds = duration.to_microseconds()
 
-    z = days + 719468
-    era = z / 146097
-    doe = z - era * 146097
-    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
-    doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
-    mp = (5 * doy + 2) / 153
-    day = doy - (153 * mp + 2) / 5 + 1
-    month = mp < 10 ? mp + 3 : mp - 9
-    year = yoe + era * 400 + (month <= 2 ? 1 : 0)
-
-    "#{year}-#{pad2(month)}-#{pad2(day)}T#{pad2(hour)}:#{pad2(minute)}" <>
-      ":#{pad2(second)}.#{pad3(milli)}Z"
-  end
-
-  priv fn pad2(n: Int) -> String
-    n < 10 ? "0#{n}" : "#{n}"
-  end
-
-  priv fn pad3(n: Int) -> String
     cond
-      n < 10 -> "00#{n}"
-      n < 100 -> "0#{n}"
-      else -> "#{n}"
+      microseconds < 1_000 ->
+        "#{microseconds}µs"
+
+      microseconds < 1_000_000 ->
+        "#{duration.to_milliseconds()}ms"
+
+      else ->
+        tenths = duration.to_milliseconds() / 100
+        "#{tenths / 10}.#{tenths % 10}s"
     end
+  end
+
+  priv fn now() -> String
+    DateTime.now(TimeZone.UTC).to_string()
   end
 end

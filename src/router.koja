@@ -207,11 +207,11 @@ struct Params
     limit = try Params.int(c, "limit", DEFAULT_PAGE_LIMIT)
     offset = try Params.int(c, "offset", 0)
 
-    unless limit >= 1 and limit <= MAX_PAGE_LIMIT
+    if limit < 1 or limit > MAX_PAGE_LIMIT
       fail Error.Validation("limit must be between 1 and #{MAX_PAGE_LIMIT}")
     end
 
-    unless offset >= 0
+    if offset < 0
       fail Error.Validation("offset must not be negative")
     end
 
@@ -251,7 +251,7 @@ priv fn secure_equal?(a: String, b: String) -> Bool
   mismatches = 0
 
   for i in Range{start: 0, stop: a.length() - 1}
-    unless a.get(i) == b.get(i)
+    if a.get(i) != b.get(i)
       mismatches = mismatches + 1
     end
   end

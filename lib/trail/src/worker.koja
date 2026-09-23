@@ -88,7 +88,7 @@ struct Worker: Process<Worker, (), ()>
   # Parses and dispatches one raw request. Returns the response
   # paired with whether the client wants the connection kept open.
   priv fn respond(self, raw: String) -> (Response, Bool)
-    started = DateTime.now().timestamp_millis()
+    started = Instant.now()
 
     match Parser.parse_request(raw)
       Result.Err(_) ->
@@ -103,7 +103,7 @@ struct Worker: Process<Worker, (), ()>
         handler = self.config.handler
         response = handler(req)
 
-        elapsed = DateTime.now().timestamp_millis() - started
+        elapsed = started.elapsed()
         observe = self.config.on_request
         observe(req, response, elapsed)
         (response, keep)

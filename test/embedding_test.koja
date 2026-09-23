@@ -1,10 +1,6 @@
 struct EmbeddingTest
-  @test "embedding_text leads with the entity name and type"
-  fn test_shape ! String
+  test "embedding_text leads with the entity name and type"
     actual = embedding_text("Koja", "language", "compiled to native")
-
-    if actual != "Koja (language): compiled to native"
-      fail "got: " <> actual
-    end
+    assert actual == "Koja (language): compiled to native"
   end
 end

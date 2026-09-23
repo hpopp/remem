@@ -17,8 +17,13 @@ end
 Handlers and middleware share one shape, `fn (Conn) -> Conn`, so a
 pipeline is just function application. `halt` marks the conn done
 and stops `Router` from running anything after the current step.
+
+`assigns` carries request-scoped values that are not headers, such
+as an authenticated user or a trace context, from whoever built the
+conn through middleware to the handler.
 """
 struct Conn
+  assigns: Map<String, String>
   body: String
   halted: Bool
   headers: Headers
@@ -38,8 +43,10 @@ struct Conn
   fn from_request(request: Request) -> Conn
     parts = request.path.split("?")
     empty_params: List<(String, String)> = List.new()
+    empty_assigns: Map<String, String> = Map.new()
 
     Conn{
+      assigns: empty_assigns,
       body: request.body,
       halted: false,
       headers: request.headers,
@@ -95,6 +102,23 @@ struct Conn
   """
   fn get_header(self, name: String) -> Option<String>
     self.headers.get(name)
+  end
+
+  @doc """
+  Returns a value stored with `assign`.
+  """
+  fn assigned(self, key: String) -> Option<String>
+    self.assigns.get(key)
+  end
+
+  # --- request-scoped state ---
+  @doc """
+  Stores a request-scoped value for later steps to read with
+  `assigned`. Replaces any existing value under `key`.
+  """
+  fn assign(self, key: String, value: String) -> Conn
+    self.assigns = self.assigns.put(key, value)
+    self
   end
 
   # --- response writes ---

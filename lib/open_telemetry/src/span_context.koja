@@ -1,0 +1,40 @@
+@doc """
+The identity a span carries across process and service boundaries.
+`trace_id` is 32 lowercase hex characters, `span_id` is 16. `sampled?`
+mirrors the W3C trace flags bit. When it is false the span is not
+recorded and neither are its children.
+
+A context is what gets passed explicitly today. The runtime slot
+described in `design/OBSERVABILITY.md` will carry the same three
+fields later.
+"""
+struct SpanContext
+  sampled?: Bool
+  span_id: String
+  trace_id: String
+
+  @doc """
+  Starts a new trace with fresh random identifiers. The root is
+  always sampled. An upstream sampler expresses its decision through
+  the incoming `traceparent` instead.
+  """
+  fn root -> SpanContext
+    SpanContext{
+      sampled?: true,
+      span_id: Base.encode16(Random.bytes(8)),
+      trace_id: Base.encode16(Random.bytes(16)),
+    }
+  end
+
+  @doc """
+  Derives a child context. The trace id and sampling decision carry
+  over, the span id is new.
+  """
+  fn child(self) -> SpanContext
+    SpanContext{
+      sampled?: self.sampled?,
+      span_id: Base.encode16(Random.bytes(8)),
+      trace_id: self.trace_id,
+    }
+  end
+end

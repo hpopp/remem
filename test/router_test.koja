@@ -2,6 +2,7 @@ alias Conn.Conn
 alias HTTP.Headers
 alias HTTP.Method
 alias HTTP.Request
+alias OpenTelemetry.Tracer
 alias Pooler.Config as PoolConfig
 alias Pooler.Pool
 alias Postgres.Config as DbConfig
@@ -19,6 +20,7 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
+      Tracer.noop(),
     )
 
     response = router.dispatch(request(Method.Post, "/entities", ""))
@@ -39,6 +41,7 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
+      Tracer.noop(),
     )
 
     response = router.dispatch(
@@ -54,6 +57,7 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
+      Tracer.noop(),
     )
 
     response = router.dispatch(
@@ -68,6 +72,7 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
+      Tracer.noop(),
     )
 
     response = router.dispatch(
@@ -86,7 +91,12 @@ struct RouterTest
       end
 
     pool = Pool.start(PoolConfig{create: create, size: 1})
-    router = build_router(pool, test_embedder(), Option.Some("test-key"))
+    router = build_router(
+      pool,
+      test_embedder(),
+      Option.Some("test-key"),
+      Tracer.noop(),
+    )
 
     # No Authorization header at all.
     response = router.dispatch(request(Method.Get, "/health", ""))

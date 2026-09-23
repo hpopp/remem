@@ -26,20 +26,29 @@ port 8081. Schema migrations run at startup.
 
 Environment variables, with defaults that match the compose stack:
 
-| Variable             | Default                 | Purpose                       |
-| -------------------- | ----------------------- | ----------------------------- |
-| `PORT`               | `8080`                  | HTTP listen port              |
-| `DB_HOST`            | `127.0.0.1`             | PostgreSQL host               |
-| `DB_PORT`            | `5435`                  | PostgreSQL port               |
-| `DB_USER`            | `postgres`              | PostgreSQL user               |
-| `DB_PASSWORD`        | none                    | PostgreSQL password           |
-| `DB_NAME`            | `remem`                 | Database name                 |
-| `DB_STATEMENT_CACHE` | `256`                   | Driver statement cache size   |
-| `EMBEDDING_URL`      | `http://127.0.0.1:8081` | TEI embedding server          |
-| `API_KEY`            | none                    | When set, require bearer auth |
+| Variable                      | Default                 | Purpose                        |
+| ----------------------------- | ----------------------- | ------------------------------ |
+| `PORT`                        | `8080`                  | HTTP listen port               |
+| `DB_HOST`                     | `127.0.0.1`             | PostgreSQL host                |
+| `DB_PORT`                     | `5435`                  | PostgreSQL port                |
+| `DB_USER`                     | `postgres`              | PostgreSQL user                |
+| `DB_PASSWORD`                 | none                    | PostgreSQL password            |
+| `DB_NAME`                     | `remem`                 | Database name                  |
+| `DB_STATEMENT_CACHE`          | `256`                   | Driver statement cache size    |
+| `EMBEDDING_URL`               | `http://127.0.0.1:8081` | TEI embedding server           |
+| `API_KEY`                     | none                    | When set, require bearer auth  |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | none                    | When set, export traces (OTLP) |
+| `OTEL_SERVICE_NAME`           | `remem`                 | Service name on exported spans |
 
 When `API_KEY` is set, every route except `GET /health` requires an
 `Authorization: Bearer <key>` header.
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` names an OTLP/HTTP collector,
+every request runs in a server span that continues the caller's
+`traceparent`, with child spans for the database phase, embedding
+requests, and MCP tool calls. The response carries the server span
+as a `traceparent` header and the access log line starts with the
+trace id. `GET /health` is not traced.
 
 ## API
 

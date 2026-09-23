@@ -9,6 +9,7 @@ Relation endpoints. Both take the same `{from, to, type}` body.
 """
 struct RelationController
   pool: Pool<Connection>
+  trace: Trace
 
   fn create(self, c: Conn) -> Conn
     self.do_create(c) rescue e -> Render.from_error(c, e)
@@ -23,6 +24,7 @@ struct RelationController
 
     relation = try with_db(
       self.pool,
+      self.trace.at(c),
       db -> RelationStore.create(db, from, to, kind),
     )
     Render.json(c, Status.created(), relation)
@@ -33,6 +35,7 @@ struct RelationController
 
     deleted = try with_db(
       self.pool,
+      self.trace.at(c),
       db -> RelationStore.remove(db, from, to, kind),
     )
 

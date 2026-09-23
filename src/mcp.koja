@@ -2,6 +2,8 @@ alias HTTP.Headers
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
+alias OpenTelemetry.Attribute
+alias OpenTelemetry.SpanKind
 alias Postgres.Connection
 
 const MCP_PROTOCOL_VERSION: String = "2025-06-18"
@@ -22,9 +24,14 @@ agents to search before writing and to keep the graph curated.
 struct Mcp
   @doc """
   Handles one JSON-RPC message. Notifications get 202 with no body.
+  A `tools/call` runs in its own span under `trace`.
   """
-  fn handle(body: String, conn: Connection, embedder: Embedder)
-    -> (Response, Connection)
+  fn handle(
+    body: String,
+    conn: Connection,
+    embedder: Embedder,
+    trace: Trace = Trace{},
+  ) -> (Response, Connection)
 
     root =
       match JSON.decode(body)
@@ -47,7 +54,7 @@ struct Mcp
       "initialize" -> (rpc_result(id, initialize_result()), conn)
       "ping" -> (rpc_result(id, empty_object()), conn)
       "tools/list" -> (rpc_result(id, tools_result()), conn)
-      "tools/call" -> call_tool(root, id, conn, embedder)
+      "tools/call" -> call_tool(root, id, conn, embedder, trace)
       _ -> (rpc_error(id, -32601, "no such method #{method}"), conn)
     end
   end
@@ -222,8 +229,15 @@ struct Mcp
   # Tool dispatch
   # ---------------------------------------------------------------
 
-  priv fn call_tool(root: Json, id: Json, conn: Connection, embedder: Embedder)
-    -> (Response, Connection)
+  # Names the tool in the log and the trace, then dispatches it. The
+  # embedder rebinds under the tool span so its request nests there.
+  priv fn call_tool(
+    root: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+    trace: Trace,
+  ) -> (Response, Connection)
 
     params = JsonUtil.get(root, "params").or(Json.Null)
     name = JsonUtil.get_string(params, "name").or("")
@@ -231,6 +245,30 @@ struct Mcp
 
     # The access log only shows POST /mcp, so name the tool here.
     Log.info("mcp tools/call #{name}")
+
+    attributes: Map<String, Attribute> = ["mcp.tool": Attribute.from(name)]
+
+    trace.span(
+      "tools/call",
+      SpanKind.Internal,
+      attributes,
+      ctx -> dispatch_tool(
+        name,
+        arguments,
+        id,
+        conn,
+        embedder.with_trace(trace.under(ctx)),
+      ),
+    )
+  end
+
+  priv fn dispatch_tool(
+    name: String,
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+  ) -> (Response, Connection)
 
     match name
       "search_memory" ->

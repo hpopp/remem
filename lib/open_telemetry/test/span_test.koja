@@ -1,0 +1,121 @@
+alias JSON.Value
+alias Test.require
+
+struct SpanTest
+  priv fn sample(status: Status, parent: Option<String>) -> Span
+    context = SpanContext{
+      sampled?: true,
+      span_id: "00f067aa0ba902b7",
+      trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+    }
+    attributes: Map<String, Attribute> = [
+      "http.route": "/entities", "status": 200
+    ]
+
+    Span{
+      attributes: attributes,
+      context: context,
+      ended_at: Timestamp.new(1700000001, Duration.Unit.Seconds),
+      kind: SpanKind.Server,
+      name: "GET /entities",
+      parent_span_id: parent,
+      started_at: Timestamp.new(1700000000, Duration.Unit.Seconds),
+      status: status,
+    }
+  end
+
+  priv fn field(object: Value, key: String) -> Value ! Test.Failure
+    match object
+      Value.Object(entries) ->
+        match entries.find(entry -> first(entry) == key)
+          Option.Some(entry) -> second(entry)
+          Option.None -> fail "missing field #{key}"
+        end
+
+      _ ->
+        fail "expected an object for #{key}"
+    end
+  end
+
+  priv fn first(entry: (String, Value)) -> String
+    (key, _) = entry
+    key
+  end
+
+  priv fn second(entry: (String, Value)) -> Value
+    (_, value) = entry
+    value
+  end
+
+  test "attribute literals convert from every scalar"
+    attributes: Map<String, Attribute> = [
+      "s": "text", "i": 7, "b": true, "f": 1.5
+    ]
+
+    assert attributes.get("s") == Option.Some(Attribute{value: "text"})
+    assert attributes.get("i") == Option.Some(Attribute{value: 7})
+    assert attributes.get("b") == Option.Some(Attribute{value: true})
+    assert attributes.get("f") == Option.Some(Attribute{value: 1.5})
+  end
+
+  test "attribute from wraps a variable"
+    route = "/entities/:name"
+    assert Attribute.from(route) == Attribute{value: "/entities/:name"}
+  end
+
+  test "attribute encodes as an OTLP any value"
+    assert JSON.encode(Attribute.from("x")) == "{\"stringValue\":\"x\"}"
+    assert JSON.encode(Attribute.from(42)) == "{\"intValue\":\"42\"}"
+    assert JSON.encode(Attribute.from(false)) == "{\"boolValue\":false}"
+    assert JSON.encode(Attribute.from(2.5)) == "{\"doubleValue\":2.5}"
+  end
+
+  test "span kinds map to OTLP codes"
+    assert SpanKind.Internal.code() == 1
+    assert SpanKind.Server.code() == 2
+    assert SpanKind.Client.code() == 3
+  end
+
+  test "span encodes identifiers times and attributes"
+    json = sample(Status.Unset, Option.None).to_json()
+
+    assert try field(json, "traceId") ==
+      "4bf92f3577b34da6a3ce929d0e0e4736".to_json()
+    assert try field(json, "spanId") == "00f067aa0ba902b7".to_json()
+    assert try field(json, "name") == "GET /entities".to_json()
+    assert try field(json, "kind") == 2.to_json()
+    assert try field(json, "startTimeUnixNano") ==
+      "1700000000000000000".to_json()
+    assert try field(json, "endTimeUnixNano") == "1700000001000000000".to_json()
+
+    attributes = try field(json, "attributes")
+    expected: Value = [
+      ["key": "http.route", "value": ["stringValue": "/entities"]],
+      ["key": "status", "value": ["intValue": "200"]]
+    ]
+    assert attributes == expected
+  end
+
+  test "span omits parent and status when unset"
+    text = JSON.encode(sample(Status.Unset, Option.None))
+
+    assert not text.contains?("\"parentSpanId\"")
+    assert not text.contains?("\"status\":{")
+  end
+
+  test "span includes parent and error status when set"
+    parent: Option<String> = Option.Some("b7ad6b7169203331")
+    json = sample(Status.Error("boom"), parent).to_json()
+
+    assert try field(json, "parentSpanId") == "b7ad6b7169203331".to_json()
+
+    expected: Value = ["code": 2, "message": "boom"]
+    assert try field(json, "status") == expected
+  end
+
+  test "ok status encodes code one"
+    json = sample(Status.Ok, Option.None).to_json()
+    expected: Value = ["code": 1]
+    assert try field(json, "status") == expected
+  end
+end

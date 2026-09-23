@@ -1,0 +1,131 @@
+@doc """
+Why a `traceparent` header did not parse.
+"""
+enum Propagation.Error
+  InvalidFlags
+  InvalidFormat
+  InvalidSpanId
+  InvalidTraceId
+  UnsupportedVersion
+end
+
+priv const FLAG_SAMPLED: Int = 1
+priv const SPAN_ID_LENGTH: Int = 16
+priv const TRACE_ID_LENGTH: Int = 32
+
+@doc """
+W3C Trace Context over HTTP headers. `parse` reads an incoming
+`traceparent` and `header` writes an outgoing one. The header shape
+is `00-<trace id>-<span id>-<flags>` with lowercase hex fields.
+
+```
+parent = Propagation.parse(header).ok()
+outgoing = Headers.new().set(Propagation.HEADER, Propagation.header(ctx))
+```
+"""
+struct Propagation
+  @doc """
+  The HTTP header name that carries the context.
+  """
+  const HEADER: String = "traceparent"
+
+  @doc """
+  Parses a `traceparent` header value. Hex fields are accepted in
+  either case and normalized to lowercase. An all-zero trace id or
+  span id is invalid, as is version `ff`. Versions above `00` parse
+  when their first four fields follow the `00` layout.
+  """
+  fn parse(header: String) -> SpanContext ! Propagation.Error
+    parts = header.trim().split("-")
+
+    if parts.length() < 4
+      fail Propagation.Error.InvalidFormat
+    end
+
+    version = parts.get(0).or("")
+
+    if version.length() != 2 or not hex?(version)
+      fail Propagation.Error.InvalidFormat
+    end
+
+    if version == "ff"
+      fail Propagation.Error.UnsupportedVersion
+    end
+
+    if version == "00" and parts.length() != 4
+      fail Propagation.Error.InvalidFormat
+    end
+
+    trace_id = try identifier(
+      parts.get(1).or(""),
+      TRACE_ID_LENGTH,
+      Propagation.Error.InvalidTraceId,
+    )
+    span_id = try identifier(
+      parts.get(2).or(""),
+      SPAN_ID_LENGTH,
+      Propagation.Error.InvalidSpanId,
+    )
+    flags = try flags(parts.get(3).or(""))
+
+    SpanContext{
+      sampled?: flags % 2 == FLAG_SAMPLED,
+      span_id: span_id,
+      trace_id: trace_id,
+    }
+  end
+
+  @doc """
+  Writes a context as a version `00` `traceparent` value.
+  """
+  fn header(context: SpanContext) -> String
+    flags = context.sampled? ? "01" : "00"
+    "00-#{context.trace_id}-#{context.span_id}-#{flags}"
+  end
+
+  # Validates a hex identifier of `length` characters and returns it
+  # in lowercase. Rejects an all-zero value.
+  priv fn identifier(text: String, length: Int, error: Propagation.Error)
+    -> String ! Propagation.Error
+
+    if text.length() != length
+      fail error
+    end
+
+    bytes = Base.decode16(text) rescue _ -> fail error
+
+    if zero?(bytes)
+      fail error
+    end
+
+    Base.encode16(bytes)
+  end
+
+  priv fn zero?(bytes: Binary) -> Bool
+    i = 0
+
+    while i < bytes.byte_size()
+      if bytes.at(i).or(0) != 0
+        return false
+      end
+
+      i = i + 1
+    end
+
+    true
+  end
+
+  # Reads the two hex digit flags field as an integer.
+  priv fn flags(text: String) -> Int ! Propagation.Error
+    if text.length() != 2
+      fail Propagation.Error.InvalidFlags
+    end
+
+    bytes = Base.decode16(text) rescue _ -> fail Propagation.Error.InvalidFlags
+    bytes.at(0).or(0)
+  end
+
+  priv fn hex?(text: String) -> Bool
+    Base.decode16(text).ok?()
+  end
+end

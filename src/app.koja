@@ -1,3 +1,4 @@
+alias Conn.Conn
 alias Conn.Router
 alias HTTP.Method
 alias HTTP.Request
@@ -6,6 +7,14 @@ alias HTTP.Status
 alias Net.TCPServer
 alias Net.TCPServer.Config as TCPServerConfig
 alias Net.TCPServer.Event as TCPEvent
+alias OpenTelemetry.Attribute
+alias OpenTelemetry.Config as TracerConfig
+alias OpenTelemetry.Outcome
+alias OpenTelemetry.Propagation
+alias OpenTelemetry.SpanContext
+alias OpenTelemetry.SpanKind
+alias OpenTelemetry.Status as SpanStatus
+alias OpenTelemetry.Tracer
 alias Pooler.Config as PoolConfig
 alias Pooler.Pool
 alias Postgres.Config as DbConfig
@@ -16,7 +25,7 @@ alias Process.StopReason
 alias Trail.Config as TrailConfig
 alias Trail.Worker
 
-const VERSION: String = "0.3.2"
+const VERSION: String = "0.4.0"
 
 const POOL_SIZE: Int = 10
 
@@ -35,8 +44,8 @@ priv const BACKFILL_INTERVAL_MS: Int = 60000
 The remem entry process. `start` loads config from the environment,
 runs schema migrations on a dedicated connection, spawns a pool of
 `POOL_SIZE` Postgres connections, builds the route table once, starts
-the search log sweeper and the embedding backfill, and spawns a
-`Net.TCPServer` acceptor that delivers connected sockets as
+the tracer, the search log sweeper, and the embedding backfill, and
+spawns a `Net.TCPServer` acceptor that delivers connected sockets as
 `TCPEvent.Connected` messages. Each connection is handed to a
 one-shot `Trail.Worker`, so requests are handled concurrently and
 the entry process never blocks on IO.
@@ -91,8 +100,16 @@ struct App: Process<List<String>, TCPEvent, String>
         fail StopReason.Shutdown
     end
 
+    tracer = Tracer.start(
+      TracerConfig{
+        endpoint: settings.otel_endpoint,
+        service_name: settings.otel_service_name,
+        service_version: Option.Some(VERSION),
+      },
+    )
+
     embedder = Embedder{url: settings.embedding_url}
-    router = build_router(pool, embedder, settings.api_key)
+    router = build_router(pool, embedder, settings.api_key, tracer)
 
     _cleaner = spawn Cleaner.start(
       Cleaner.Config{interval_ms: SWEEP_INTERVAL_MS, pool: pool},
@@ -112,11 +129,13 @@ struct App: Process<List<String>, TCPEvent, String>
     )
 
     auth = settings.api_key.some?() ? "required" : "off"
+    tracing = settings.otel_endpoint.or("off")
     Log.info("remem #{VERSION} listening on http://127.0.0.1:#{settings.port}")
     Log.info("embedding server: #{settings.embedding_url}")
     Log.info("api key auth: #{auth}, #{POOL_SIZE} pooled db connections")
+    Log.info("trace export: #{tracing}")
 
-    App{server: server_config(router)}
+    App{server: server_config(router, tracer)}
   end
 
   fn handle(self, msg: TCPEvent, from: Option<ReplyTo<String>>) -> Step<Self>
@@ -174,12 +193,23 @@ struct App: Process<List<String>, TCPEvent, String>
 end
 
 # Wires the route table and remem's logging and error shape into a
-# trail worker config. Rejected requests render the same JSON error
-# body as routed failures, and every dispatched request logs one
-# access line. Successful health probes are the exception, since
-# they arrive every few seconds and would drown the log.
-priv fn server_config(router: Router) -> TrailConfig
-  handler = fn (request: Request) -> Response router.dispatch(request) end
+# trail worker config. Every dispatched request runs inside a server
+# span that continues the caller's trace when it sent a `traceparent`
+# header, and the response carries the span's own `traceparent` so a
+# client can find its trace. Rejected requests render the same JSON
+# error body as routed failures, and every dispatched request logs
+# one access line with the trace id in front when tracing is on.
+# Successful health probes are the exception, since they arrive every
+# few seconds and would drown both the log and the trace store.
+priv fn server_config(router: Router, tracer: Tracer) -> TrailConfig
+  handler =
+    fn (request: Request) -> Response
+      if health_probe?(request)
+        return router.dispatch(request)
+      end
+
+      traced_dispatch(router, tracer, request)
+    end
 
   error_response =
     fn (status: Status, message: String) -> Response
@@ -188,12 +218,14 @@ priv fn server_config(router: Router) -> TrailConfig
 
   on_request =
     fn (request: Request, response: Response, elapsed: Duration)
-      if healthy_probe?(request, response)
+      if health_probe?(request) and response.status.ok?()
         return
       end
 
+      prefix = tracer.enabled?() ? trace_prefix(response) : ""
+
       Log.info(
-        "#{request.method.to_string()} #{request.path} " <>
+        "#{prefix}#{request.method.to_string()} #{request.path} " <>
           "#{response.status.code} #{Log.elapsed(elapsed)}",
       )
     end
@@ -213,9 +245,60 @@ priv fn server_config(router: Router) -> TrailConfig
     .with_on_reject(on_reject)
 end
 
-# True for a `GET /health` that passed. Failed probes still log so a
-# sick database shows up.
-priv fn healthy_probe?(request: Request, response: Response) -> Bool
+# Runs the router inside a server span. The span records the method,
+# path, and status code, and a 5xx marks it as an error. The conn
+# carries the span so handlers open their children under it.
+priv fn traced_dispatch(router: Router, tracer: Tracer, request: Request)
+  -> Response
+
+  method = request.method.to_string()
+  parent = request.headers.get(Propagation.HEADER)
+    .then(header -> Propagation.parse(header).ok())
+  attributes: Map<String, Attribute> = [
+    "http.request.method": Attribute.from(method),
+    "url.path": Attribute.from(request.path)
+  ]
+
+  work =
+    fn (ctx: SpanContext) -> (Response, Outcome)
+      conn = Trace.put(Conn.from_request(request), ctx)
+      response = router.dispatch_conn(conn)
+      code = response.status.code
+      response.headers = response.headers.set(
+        Propagation.HEADER,
+        Propagation.header(ctx),
+      )
+
+      outcome = Outcome{
+        attributes: ["http.response.status_code": Attribute.from(code)],
+        status: code >= 500
+          ? SpanStatus.Error("HTTP #{code}")
+          : SpanStatus.Unset,
+      }
+
+      (response, outcome)
+    end
+
+  tracer.span_with(
+    "#{method} #{request.path}",
+    SpanKind.Server,
+    parent,
+    attributes,
+    work,
+  )
+end
+
+# The trace id from the `traceparent` the server span put on the
+# response, ready to lead an access log line.
+priv fn trace_prefix(response: Response) -> String
+  response.headers.get(Propagation.HEADER)
+    .then(header -> Propagation.parse(header).ok())
+    .map(ctx -> "#{ctx.trace_id} ")
+    .or("")
+end
+
+# True for a `GET /health`. Probes are neither traced nor, when they
+# pass, logged. A failed probe still logs so a sick database shows up.
+priv fn health_probe?(request: Request) -> Bool
   request.method == Method.Get and request.path == "/health"
-    and response.status.ok?()
 end

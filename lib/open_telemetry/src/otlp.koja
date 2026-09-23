@@ -1,0 +1,30 @@
+alias JSON.Value
+
+# The instrumentation scope this package reports under.
+priv const SCOPE_NAME: String = "open_telemetry"
+priv const SCOPE_VERSION: String = "0.1.0"
+
+@doc """
+OTLP/JSON encoding for the traces signal. The output is one
+`ExportTraceServiceRequest` body, ready to POST to `/v1/traces`.
+"""
+struct OTLP
+  @doc """
+  Encodes a batch of spans under one resource and one scope.
+  """
+  fn traces(resource: Map<String, Attribute>, spans: List<Span>) -> String
+    scope: Value = [
+      "name": SCOPE_NAME.to_json(), "version": SCOPE_VERSION.to_json()
+    ]
+    scope_spans: Value = [
+      "scope": scope, "spans": Value.Array(spans.map(span -> span.to_json()))
+    ]
+    resource_spans: Value = [
+      "resource": ["attributes": Span.attributes_json(resource)],
+      "scopeSpans": Value.Array([scope_spans])
+    ]
+    request: Value = ["resourceSpans": Value.Array([resource_spans])]
+
+    JSON.encode(request)
+  end
+end

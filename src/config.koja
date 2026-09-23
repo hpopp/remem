@@ -15,6 +15,8 @@ struct Config
   db_statement_cache: Int
   db_user: String
   embedding_url: String
+  otel_endpoint: Option<String>
+  otel_service_name: String
   port: Int
 
   @doc """
@@ -22,7 +24,9 @@ struct Config
   suitable for local development against the bundled compose stack.
   Set `API_KEY` to require bearer auth on every route except
   `GET /health`. Set `DB_STATEMENT_CACHE=0` to turn the driver
-  statement cache off.
+  statement cache off. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to the base
+  URL of an OTLP/HTTP collector to export traces. Tracing is off when
+  it is unset. `OTEL_SERVICE_NAME` overrides the reported service.
   """
   fn load -> Config
     Config{
@@ -34,6 +38,8 @@ struct Config
       db_statement_cache: env_int("DB_STATEMENT_CACHE", 256),
       db_user: env_or("DB_USER", "postgres"),
       embedding_url: env_or("EMBEDDING_URL", "http://127.0.0.1:8081"),
+      otel_endpoint: env_opt("OTEL_EXPORTER_OTLP_ENDPOINT"),
+      otel_service_name: env_or("OTEL_SERVICE_NAME", "remem"),
       port: env_int("PORT", 8080),
     }
   end

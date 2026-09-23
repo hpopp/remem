@@ -5,6 +5,9 @@ alias HTTP.Method
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
+alias OpenTelemetry.Attribute
+alias OpenTelemetry.SpanKind
+alias OpenTelemetry.Tracer
 alias Pooler.Pool
 alias Postgres.Connection
 
@@ -28,12 +31,14 @@ fn build_router(
   pool: Pool<Connection>,
   embedder: Embedder,
   api_key: Option<String>,
+  tracer: Tracer,
 ) -> Router
 
-  entities = EntityController{embedder: embedder, pool: pool}
-  relations = RelationController{pool: pool}
-  search = SearchController{embedder: embedder, pool: pool}
-  meta = MetaController{embedder: embedder, pool: pool}
+  trace = Trace{tracer: Option.Some(tracer)}
+  entities = EntityController{embedder: embedder, pool: pool, trace: trace}
+  relations = RelationController{pool: pool, trace: trace}
+  search = SearchController{embedder: embedder, pool: pool, trace: trace}
+  meta = MetaController{embedder: embedder, pool: pool, trace: trace}
 
   auth =
     fn (c: Conn) -> Conn
@@ -96,21 +101,36 @@ the connection back in. The pool inspects the returned value and
 replaces it when the connection is no longer idle, so callers never
 need to discard. Checkout failure surfaces as `Unavailable`, which
 renders 503.
+
+The whole phase, checkout wait included, runs inside a `db.query`
+span under `trace`, and an `Err` outcome marks the span as failed.
 """
 fn with_db<T>(
   pool: Pool<Connection>,
+  trace: Trace,
   work: fn (Connection) -> (Connection, Result<T, Error>),
-) -> Result<T, Error>
+) -> T ! Error
 
-  match pool.checkout(CHECKOUT_MS)
-    Result.Err(_) ->
-      Result.Err(Error.Unavailable("no database connection available"))
+  attributes: Map<String, Attribute> = ["db.system": "postgresql"]
+  try trace.span_result(
+    "db.query",
+    SpanKind.Internal,
+    attributes,
+    _ -> run_db(pool, work),
+  )
+end
 
-    Result.Ok(db) ->
-      (db, outcome) = work(db)
-      pool.checkin(db)
-      outcome
-  end
+priv fn run_db<T>(
+  pool: Pool<Connection>,
+  work: fn (Connection) -> (Connection, Result<T, Error>),
+) -> T ! Error
+
+  db = pool.checkout(CHECKOUT_MS)
+    rescue _ -> fail Error.Unavailable("no database connection available")
+
+  (db, outcome) = work(db)
+  pool.checkin(db)
+  try outcome
 end
 
 @doc """

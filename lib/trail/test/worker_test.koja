@@ -6,17 +6,14 @@ Framing tests. The worker itself needs a live socket, so these
 exercise `frame_request` directly.
 """
 struct WorkerTest
-  @test "framing completes, waits, and splits pipelined bytes"
-  fn test_framing ! String
+  test "framing completes, waits, and splits pipelined bytes"
     small = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n"
 
     match frame_request(small, HEADER_CAP, BODY_CAP)
       Frame.Complete(framed) ->
         (req, leftover) = framed
-
-        if not (req == small and leftover.empty?())
-          fail "small request should frame whole with no leftover"
-        end
+        assert req == small
+        assert leftover.empty?(), "small request should leave no leftover"
 
       _ ->
         fail "small request should frame complete"
@@ -32,18 +29,15 @@ struct WorkerTest
     match frame_request(pipelined, HEADER_CAP, BODY_CAP)
       Frame.Complete(framed) ->
         (req, leftover) = framed
-
-        if not (req == small and leftover == "GET /graph")
-          fail "pipelined bytes should stay in the leftover"
-        end
+        assert req == small
+        assert leftover == "GET /graph", "pipelined bytes should stay in the leftover"
 
       _ ->
         fail "pipelined request should frame complete"
     end
   end
 
-  @test "framing enforces the header and body caps"
-  fn test_caps ! String
+  test "framing enforces the header and body caps"
     huge_body = "POST /entities HTTP/1.1\r\n" <>
       "Content-Length: #{BODY_CAP + 1}\r\n\r\n"
 

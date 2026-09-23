@@ -28,7 +28,7 @@ struct Migrator
     (conn, applied) = try applied_versions(conn)
 
     for migration in migrations()
-      unless applied.any?(v -> v == migration.version)
+      if not applied.any?(v -> v == migration.version)
         conn = try exec(conn, migration.sql)
         conn = try record(conn, migration.version)
       end

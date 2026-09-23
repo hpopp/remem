@@ -36,7 +36,7 @@ struct RelationController
       db -> RelationStore.remove(db, from, to, kind),
     )
 
-    unless deleted
+    if not deleted
       fail Error.NotFound("no relation #{from} -[#{kind}]-> #{to}")
     end
 

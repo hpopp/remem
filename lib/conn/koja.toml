@@ -1,5 +1,5 @@
 [project]
-koja = "0.18"
+koja = "0.19"
 name = "conn"
 namespace = "Conn"
 version = "0.1.0"

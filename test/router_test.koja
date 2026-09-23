@@ -14,8 +14,7 @@ connect, which proves those paths answer without a database
 connection. The health test uses the compose Postgres (port 5435).
 """
 struct RouterTest
-  @test "auth middleware rejects requests before any pool checkout"
-  fn test_auth_rejects ! String
+  test "auth middleware rejects requests before any pool checkout"
     router = build_router(
       broken_pool(),
       test_embedder(),
@@ -24,26 +23,18 @@ struct RouterTest
 
     response = router.dispatch(request(Method.Post, "/entities", ""))
 
-    if response.status.code != 401
-      fail "a missing key should answer 401, got #{response.status.code}"
-    end
-
-    if not response.body.contains?("missing or invalid API key")
-      fail "401 body should name the API key error"
-    end
+    assert response.status.code == 401, "a missing key should answer 401"
+    assert response.body.contains?("missing or invalid API key"), "401 body should name the API key error"
 
     wrong = Headers.new().set("Authorization", "Bearer wrong-key")
     response = router.dispatch(
       request_with_headers(Method.Post, "/entities", "", wrong),
     )
 
-    if response.status.code != 401
-      fail "a wrong key should answer 401, got #{response.status.code}"
-    end
+    assert response.status.code == 401, "a wrong key should answer 401"
   end
 
-  @test "404 fallback answers without a pool checkout"
-  fn test_not_found ! String
+  test "404 fallback answers without a pool checkout"
     router = build_router(
       broken_pool(),
       test_embedder(),
@@ -54,17 +45,11 @@ struct RouterTest
       request_with_headers(Method.Get, "/.env", "", bearer()),
     )
 
-    if response.status.code != 404
-      fail "expected 404, got #{response.status.code}"
-    end
-
-    if not response.body.contains?("no such route")
-      fail "404 body should say no such route"
-    end
+    assert response.status.code == 404
+    assert response.body.contains?("no such route"), "404 body should say no such route"
   end
 
-  @test "method guard answers 405 for verbs no route uses"
-  fn test_method_guard ! String
+  test "method guard answers 405 for verbs no route uses"
     router = build_router(
       broken_pool(),
       test_embedder(),
@@ -75,13 +60,10 @@ struct RouterTest
       request_with_headers(Method.Put, "/entities", "{}", bearer()),
     )
 
-    if response.status.code != 405
-      fail "expected 405, got #{response.status.code}"
-    end
+    assert response.status.code == 405
   end
 
-  @test "GET /mcp answers 405 and points at POST"
-  fn test_mcp_get ! String
+  test "GET /mcp answers 405 and points at POST"
     router = build_router(
       broken_pool(),
       test_embedder(),
@@ -92,17 +74,11 @@ struct RouterTest
       request_with_headers(Method.Get, "/mcp", "", bearer()),
     )
 
-    if response.status.code != 405
-      fail "expected 405, got #{response.status.code}"
-    end
-
-    if not response.body.contains?("POST JSON-RPC messages to /mcp")
-      fail "GET /mcp should point clients at POST"
-    end
+    assert response.status.code == 405
+    assert response.body.contains?("POST JSON-RPC messages to /mcp"), "GET /mcp should point clients at POST"
   end
 
-  @test "GET /health stays exempt from auth, against compose Postgres"
-  fn test_health_exempt ! String
+  test "GET /health stays exempt from auth, against compose Postgres"
     create =
       fn () -> Result<Connection, String>
         config = DbConfig.new("127.0.0.1", 5435, "postgres", "remem")
@@ -115,42 +91,30 @@ struct RouterTest
     # No Authorization header at all.
     response = router.dispatch(request(Method.Get, "/health", ""))
 
-    if response.status.code != 200
-      fail "expected 200 (is docker compose up?), got #{response.status.code}"
-    end
-
-    if not response.body.contains?("ok")
-      fail "health body should report ok"
-    end
+    assert response.status.code == 200, "expected 200 (is docker compose up?)"
+    assert response.body.contains?("ok"), "health body should report ok"
   end
 
-  @test "path params percent-decode and reject malformed encoding"
-  fn test_name_param ! String
+  test "path params percent-decode and reject malformed encoding"
     c = Conn.from_request(request(Method.Get, "/entities/x", ""))
     c.path_params = [("name", "Foo%20Bar")]
 
-    decoded = Params.name(c) rescue e -> fail "decode: " <> e.message()
-
-    if decoded != "Foo Bar"
-      fail "expected 'Foo Bar', got '#{decoded}'"
-    end
+    decoded = Params.name(c) rescue e -> fail "decode: #{e.message()}"
+    assert decoded == "Foo Bar"
 
     c.path_params = [("name", "%zz")]
 
     outcome = Params.name(c) rescue e -> match e
         Error.Validation(_) -> "__rejected__"
-        _ -> fail "expected Validation, got " <> e.message()
+        _ -> fail "expected Validation, got #{e.message()}"
       end
 
-    if outcome != "__rejected__"
-      fail "malformed encoding should fail, got '#{outcome}'"
-    end
+    assert outcome == "__rejected__", "malformed encoding should fail"
   end
 
-  @test "search log prune deletes at most the sweep bound"
-  fn test_prune_bound ! String
+  test "search log prune deletes at most the sweep bound"
     conn = try connect()
-    conn = Migrator.run(conn) rescue e -> fail "migrate: " <> e.message()
+    conn = Migrator.run(conn) rescue e -> fail "migrate: #{e.message()}"
     conn = try clear_prune_rows(conn)
 
     for i in Range{start: 0, stop: 2}
@@ -160,26 +124,18 @@ struct RouterTest
       """)
 
       match outcome
-        Result.Err(e) -> fail "seed: " <> e.message()
+        Result.Err(e) -> fail "seed: #{e.message()}"
         Result.Ok(_) -> ()
       end
     end
 
     (conn, pruned) = SearchLog.prune(conn, 90, 2)
-
-    first = pruned rescue e -> fail "first prune: " <> e.message()
-
-    if first != 2
-      fail "expected 2 pruned rows, got #{first}"
-    end
+    first = pruned rescue e -> fail "first prune: #{e.message()}"
+    assert first == 2
 
     (conn, pruned) = SearchLog.prune(conn, 90, 2)
-
-    second = pruned rescue e -> fail "second prune: " <> e.message()
-
-    if second != 1
-      fail "expected 1 pruned row, got #{second}"
-    end
+    second = pruned rescue e -> fail "second prune: #{e.message()}"
+    assert second == 1
 
     conn = try clear_prune_rows(conn)
 
@@ -229,20 +185,20 @@ struct RouterTest
     Embedder{url: "http://127.0.0.1:1"}
   end
 
-  priv fn connect -> Connection ! String
+  priv fn connect -> Connection ! Test.Failure
     config = DbConfig.new("127.0.0.1", 5435, "postgres", "remem")
 
     Connection.connect(config)
-      rescue e -> fail "connect (is docker compose up?): " <> e.message()
+      rescue e -> fail "connect (is docker compose up?): #{e.message()}"
   end
 
-  priv fn clear_prune_rows(conn: Connection) -> Connection ! String
+  priv fn clear_prune_rows(conn: Connection) -> Connection ! Test.Failure
     (conn, outcome) = conn.query(
       "DELETE FROM search_log WHERE query = 'itest-prune'",
     )
 
     match outcome
-      Result.Err(e) -> fail "cleanup: " <> e.message()
+      Result.Err(e) -> fail "cleanup: #{e.message()}"
       Result.Ok(_) -> conn
     end
   end

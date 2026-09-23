@@ -187,14 +187,14 @@ priv fn server_config(router: Router) -> TrailConfig
     end
 
   on_request =
-    fn (request: Request, response: Response, elapsed: Int)
+    fn (request: Request, response: Response, elapsed: Duration)
       if healthy_probe?(request, response)
         return
       end
 
       Log.info(
         "#{request.method.to_string()} #{request.path} " <>
-          "#{response.status.code} #{elapsed}ms",
+          "#{response.status.code} #{Log.elapsed(elapsed)}",
       )
     end
 

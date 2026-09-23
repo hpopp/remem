@@ -1,3 +1,5 @@
+alias Test.require
+
 struct PoolTest
   priv fn int_pool(size: Int) -> Pool<Int>
     config = Config{
@@ -8,46 +10,36 @@ struct PoolTest
     Pool.start(config)
   end
 
-  @test "checkout lends a resource and checkin returns the updated value"
-  fn test_round_trip ! String
+  test "checkout lends a resource and checkin returns the updated value"
     pool = int_pool(1)
-    first = pool.checkout(1000) rescue _ -> fail "first checkout failed"
-
-    if first != 7
-      fail "expected fresh resource 7, got #{first}"
-    end
+    first = try require(pool.checkout(1000))
+    assert first == 7
 
     pool.checkin(first + 1)
 
-    second = pool.checkout(1000) rescue _ -> fail "second checkout failed"
+    second = try require(pool.checkout(1000))
     pool.stop()
 
-    if second != 8
-      fail "expected checked-in 8, got #{second}"
-    end
+    assert second == 8
   end
 
-  @test "an exhausted pool queues callers until a checkin"
-  fn test_waitlist ! String
+  test "an exhausted pool queues callers until a checkin"
     pool = int_pool(1)
-    lent = pool.checkout(1000) rescue _ -> fail "initial checkout failed"
+    lent = try require(pool.checkout(1000))
     waiter = Task.async(fn () -> Result<Int, Error> pool.checkout(3000) end)
 
     pool.checkin(lent)
 
-    outcome = Task.await(waiter) rescue _ -> fail "waiter task failed"
+    outcome = try require(Task.await(waiter))
     pool.stop()
 
-    match outcome
-      Result.Ok(_) -> ()
-      Result.Err(_) -> fail "queued checkout should be answered by checkin"
-    end
+    answered = try require(outcome)
+    assert answered == lent
   end
 
-  @test "checkout times out when every resource stays lent"
-  fn test_timeout ! String
+  test "checkout times out when every resource stays lent"
     pool = int_pool(1)
-    _ = pool.checkout(1000) rescue _ -> fail "initial checkout failed"
+    _ = try require(pool.checkout(1000))
 
     second = pool.checkout(100)
     pool.stop()
@@ -59,25 +51,19 @@ struct PoolTest
     end
   end
 
-  @test "discard builds a replacement resource"
-  fn test_discard ! String
+  test "discard builds a replacement resource"
     pool = int_pool(1)
-    _ = pool.checkout(1000) rescue _ -> fail "initial checkout failed"
+    _ = try require(pool.checkout(1000))
 
-    pool.discard(1000) rescue _ -> fail "discard failed"
+    try require(pool.discard(1000))
 
-    replacement = pool.checkout(1000)
-      rescue _ -> fail "checkout after discard failed"
-
+    replacement = try require(pool.checkout(1000))
     pool.stop()
 
-    if replacement != 7
-      fail "expected replacement 7, got #{replacement}"
-    end
+    assert replacement == 7
   end
 
-  @test "checkin drops an invalid resource and refills the slot"
-  fn test_invalid_checkin ! String
+  test "checkin drops an invalid resource and refills the slot"
     config = Config{
       create: fn () -> Result<Int, String> Result.Ok(7) end,
       size: 1,
@@ -85,22 +71,17 @@ struct PoolTest
     }
 
     pool = Pool.start(config)
-    _ = pool.checkout(1000) rescue _ -> fail "initial checkout failed"
+    _ = try require(pool.checkout(1000))
 
     pool.checkin(0)
 
-    replacement = pool.checkout(1000)
-      rescue _ -> fail "checkout after invalid checkin failed"
-
+    replacement = try require(pool.checkout(1000))
     pool.stop()
 
-    if replacement != 7
-      fail "expected replacement 7, got #{replacement}"
-    end
+    assert replacement == 7
   end
 
-  @test "a failing factory retries on a timer until it recovers"
-  fn test_refill_backoff ! String
+  test "a failing factory retries on a timer until it recovers"
     # Startup succeeds, the next two builds fail, then it recovers.
     script = spawn Script.start([true, false, false])
 
@@ -118,9 +99,9 @@ struct PoolTest
     }
 
     pool = Pool.start(config)
-    _ = pool.checkout(1000) rescue _ -> fail "initial checkout failed"
+    _ = try require(pool.checkout(1000))
 
-    pool.discard(1000) rescue _ -> fail "discard failed"
+    try require(pool.discard(1000))
 
     # The slot is empty and the first retry fails too. The second
     # retry (at 10ms + 20ms) succeeds and answers the waiting checkout.
@@ -130,13 +111,10 @@ struct PoolTest
     pool.stop()
     script.kill()
 
-    if replacement != 7
-      fail "expected replacement 7, got #{replacement}"
-    end
+    assert replacement == 7
   end
 
-  @test "a failing factory brings the pool down"
-  fn test_start_failure ! String
+  test "a failing factory brings the pool down"
     config = Config{
       create: fn () -> Result<Int, String> Result.Err("boom") end,
       size: 1,

@@ -14,14 +14,14 @@ the chainable `with_` functions:
 ```
 config = Config.new(handler)
   .with_max_body_bytes(4 * 1024 * 1024)
-  .with_on_request((req, resp, ms) -> log_access(req, resp, ms))
+  .with_on_request((req, resp, elapsed) -> log_access(req, resp, elapsed))
 ```
 
 `handler` runs once per parsed request. `error_response` builds the
 bodies for requests the worker rejects before a handler could run
 (unparseable, or over a size cap). The hooks default to no-ops.
 `on_request` fires after each dispatched request with the elapsed
-milliseconds, and `on_reject` fires when the worker rejects a
+time as a `Duration`, and `on_reject` fires when the worker rejects a
 request itself.
 """
 struct Config
@@ -31,7 +31,7 @@ struct Config
   max_header_bytes: Int
   max_requests_per_connection: Int
   on_reject: fn (Status) -> ()
-  on_request: fn (Request, Response, Int) -> ()
+  on_request: fn (Request, Response, Duration) -> ()
 
   fn new(handler: fn (Request) -> Response) -> Config
     Config{
@@ -70,7 +70,9 @@ struct Config
     self
   end
 
-  fn with_on_request(self, observe: fn (Request, Response, Int) -> ()) -> Config
+  fn with_on_request(self, observe: fn (Request, Response, Duration) -> ())
+    -> Config
+
     self.on_request = observe
     self
   end
@@ -89,6 +91,6 @@ priv fn ignore_reject(status: Status)
   ()
 end
 
-priv fn ignore_request(request: Request, response: Response, elapsed: Int)
+priv fn ignore_request(request: Request, response: Response, elapsed: Duration)
   ()
 end

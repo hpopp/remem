@@ -286,7 +286,7 @@ struct Mcp
 
     limit = JsonUtil.get_int(arguments, "limit").or(MCP_DEFAULT_SEARCH_LIMIT)
 
-    unless limit >= 1 and limit <= MCP_MAX_SEARCH_LIMIT
+    if limit < 1 or limit > MCP_MAX_SEARCH_LIMIT
       return (
         tool_err(id, "limit must be between 1 and #{MCP_MAX_SEARCH_LIMIT}"),
         conn
@@ -467,13 +467,13 @@ struct Mcp
     limit = JsonUtil.get_int(arguments, "limit").or(DEFAULT_PAGE_LIMIT)
     offset = JsonUtil.get_int(arguments, "offset").or(0)
 
-    unless limit >= 1 and limit <= MAX_PAGE_LIMIT
+    if limit < 1 or limit > MAX_PAGE_LIMIT
       return (
         tool_err(id, "limit must be between 1 and #{MAX_PAGE_LIMIT}"), conn
       )
     end
 
-    unless offset >= 0
+    if offset < 0
       return (tool_err(id, "offset must not be negative"), conn)
     end
 

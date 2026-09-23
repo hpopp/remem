@@ -37,7 +37,7 @@ struct Log
     end
   end
 
-  priv fn now() -> String
+  priv fn now -> String
     DateTime.now(TimeZone.UTC).to_string()
   end
 end

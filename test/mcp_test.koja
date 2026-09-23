@@ -16,8 +16,7 @@ struct McpTest
     end
 
     assert encoded.contains?("\"inputSchema\""), "catalog has no input schemas"
-    assert encoded.contains?("\"confirm\""),
-      "create_entity schema is missing confirm"
+    assert encoded.contains?("\"confirm\""), "create_entity schema is missing confirm"
   end
 
   test "search results serialize as entities with matching observations"
@@ -33,8 +32,7 @@ struct McpTest
       assert encoded.contains?(key), "result is missing #{key}: #{encoded}"
     end
 
-    assert not encoded.contains?("\"entity\""),
-      "result should not nest a full entity: #{encoded}"
+    assert not encoded.contains?("\"entity\""), "result should not nest a full entity: #{encoded}"
   end
 
   test "create_entity refuses a near-duplicate unless confirmed"
@@ -51,8 +49,7 @@ struct McpTest
       embedder,
     )
 
-    assert response.body.contains?("\"isError\":false"),
-      "first create should succeed: #{response.body}"
+    assert response.body.contains?("\"isError\":false"), "first create should succeed: #{response.body}"
 
     (response, conn) = Mcp.handle(
       create_call(2, "Itest MCP Guard", false),
@@ -60,10 +57,8 @@ struct McpTest
       embedder,
     )
 
-    assert response.body.contains?("\"isError\":true"),
-      "near-duplicate create should be refused: #{response.body}"
-    assert response.body.contains?("similar entities exist"),
-      "refusal should name the similar entities: #{response.body}"
+    assert response.body.contains?("\"isError\":true"), "near-duplicate create should be refused: #{response.body}"
+    assert response.body.contains?("similar entities exist"), "refusal should name the similar entities: #{response.body}"
 
     (response, conn) = Mcp.handle(
       create_call(3, "Itest MCP Guard", true),
@@ -71,8 +66,7 @@ struct McpTest
       embedder,
     )
 
-    assert response.body.contains?("\"isError\":false"),
-      "confirmed create should succeed: #{response.body}"
+    assert response.body.contains?("\"isError\":false"), "confirmed create should succeed: #{response.body}"
 
     (conn, outcome) = conn.query(
       "DELETE FROM entities WHERE name ILIKE 'itest%'",

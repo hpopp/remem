@@ -65,14 +65,9 @@ struct StoreTest
 
     match similar
       Result.Err(Error.Duplicate(message)) ->
-        assert message.contains?("itest-koja"),
-          "guard did not name the similar entity: #{message}"
-
-      Result.Err(e) ->
-        fail "wrong near-duplicate error: #{e.message()}"
-
-      Result.Ok(_) ->
-        fail "near-duplicate create should fail without confirm"
+        assert message.contains?("itest-koja"), "guard did not name the similar entity: #{message}"
+      Result.Err(e) -> fail "wrong near-duplicate error: #{e.message()}"
+      Result.Ok(_) -> fail "near-duplicate create should fail without confirm"
     end
 
     # Observations append (deduplicated) and only new rows come back.
@@ -156,8 +151,7 @@ struct StoreTest
     (conn, found) = EntityStore.search(conn, "itest-kojaa", Option.None, 10)
     results = found rescue e -> fail "fuzzy search: #{e.message()}"
 
-    assert results.any?(r -> r.name == "itest-koja"),
-      "fuzzy search missed itest-koja"
+    assert results.any?(r -> r.name == "itest-koja"), "fuzzy search missed itest-koja"
 
     # Embed only the postgres observation. koja stays unembedded, so
     # it can only surface through its name.
@@ -174,11 +168,8 @@ struct StoreTest
     )
 
     match stored
-      Result.Err(e) ->
-        fail "set_observation_embeddings: #{e.message()}"
-
-      Result.Ok(count) ->
-        assert count == 1
+      Result.Err(e) -> fail "set_observation_embeddings: #{e.message()}"
+      Result.Ok(count) -> assert count == 1
     end
 
     # Hybrid search with no name overlap returns only the entity with
@@ -199,10 +190,8 @@ struct StoreTest
 
     assert top.name == "itest-postgres"
     assert top.observations.length() == 1
-    assert top.observations.any?(o -> o.content == "stores rows"),
-      "hit carries the wrong observation"
-    assert results.all?(r -> r.name != "itest-koja"),
-      "unembedded itest-koja should not appear without a name match"
+    assert top.observations.any?(o -> o.content == "stores rows"), "hit carries the wrong observation"
+    assert results.all?(r -> r.name != "itest-koja"), "unembedded itest-koja should not appear without a name match"
 
     # A query both names match ranks the semantic hit first, and the
     # name-only hit comes back with no observations.
@@ -228,8 +217,7 @@ struct StoreTest
         Option.Some(hit) -> hit
       end
 
-    assert koja_hit.observations.empty?(),
-      "name-only hit should carry no observations"
+    assert koja_hit.observations.empty?(), "name-only hit should carry no observations"
 
     # Deleting an entity cascades its relations.
     (conn, removed) = EntityStore.remove(conn, "itest-postgres")
@@ -300,8 +288,7 @@ struct StoreTest
     (conn, similar) = EntityStore.similar_names(conn, "Itest Merge A")
     names = similar rescue e -> fail "similar_names: #{e.message()}"
 
-    assert names.any?(n -> n == "itest-merge-a"),
-      "similar_names missed itest-merge-a"
+    assert names.any?(n -> n == "itest-merge-a"), "similar_names missed itest-merge-a"
 
     # Merge validation.
     (conn, self_merge) = EntityStore.merge(
@@ -336,12 +323,9 @@ struct StoreTest
     assert target.observations.length() == 3
 
     match target.observations.find(o -> o.content == "alpha fact")
-      Option.None ->
-        fail "alpha fact did not move"
-
+      Option.None -> fail "alpha fact did not move"
       Option.Some(o) ->
-        assert o.created_at == alpha_created_at,
-          "moved observation lost its created_at"
+        assert o.created_at == alpha_created_at, "moved observation lost its created_at"
     end
 
     (conn, found) = EntityStore.find(conn, "itest-merge-a")
@@ -352,10 +336,8 @@ struct StoreTest
     relations = touching rescue e -> fail "for_entity: #{e.message()}"
 
     assert relations.length() == 2
-    assert relations.any?(r -> r.from == "itest-merge-b" and r.kind == "uses"),
-      "b -[uses]-> c should survive"
-    assert relations.any?(r -> r.to == "itest-merge-b" and r.kind == "made_by"),
-      "c -[made_by]-> a should rewire to b"
+    assert relations.any?(r -> r.from == "itest-merge-b" and r.kind == "uses"), "b -[uses]-> c should survive"
+    assert relations.any?(r -> r.to == "itest-merge-b" and r.kind == "made_by"), "c -[made_by]-> a should rewire to b"
     assert relations.all?(r -> r.kind != "likes"), "self-loop should drop"
 
     # The moved observation lost its embedding. The shared database
@@ -364,19 +346,15 @@ struct StoreTest
     rows = pending rescue e -> fail "unembedded after merge: #{e.message()}"
 
     assert rows.any?(r -> r.content == "alpha fact"
-      and r.name == "itest-merge-b"),
-      "moved observation should be pending an embedding"
+      and r.name == "itest-merge-b"), "moved observation should be pending an embedding"
 
     # Rename keeps relations and refuses taken names.
     (conn, renamed) = EntityStore.rename(conn, "itest-merge-b", "itest-merge-z")
     maybe = renamed rescue e -> fail "rename: #{e.message()}"
 
     match maybe
-      Option.None ->
-        fail "rename lost the entity"
-
-      Option.Some(entity) ->
-        assert entity.name == "itest-merge-z"
+      Option.None -> fail "rename lost the entity"
+      Option.Some(entity) -> assert entity.name == "itest-merge-z"
     end
 
     (conn, touching) = RelationStore.for_entity(conn, "itest-merge-z")
@@ -452,10 +430,8 @@ struct StoreTest
         Option.Some(present) -> present
       end
 
-    assert row.get(0).map(v -> v.int_or(0)).or(0) >= 1,
-      "expected a logged query row"
-    assert not row.get(1).map(v -> v.string_or("")).or("").empty?(),
-      "logged query has no created_at"
+    assert row.get(0).map(v -> v.int_or(0)).or(0) >= 1, "expected a logged query row"
+    assert not row.get(1).map(v -> v.string_or("")).or("").empty?(), "logged query has no created_at"
 
     (conn, outcome) = conn.query(
       "DELETE FROM search_log WHERE query = 'itest-query'",

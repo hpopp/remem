@@ -1,0 +1,87 @@
+alias Conn.Conn
+alias OpenTelemetry.Attribute
+alias OpenTelemetry.Propagation
+alias OpenTelemetry.SpanContext
+alias OpenTelemetry.SpanKind
+alias OpenTelemetry.Tracer
+
+@doc """
+The tracer and the current parent span, carried together through a
+request. Controllers hold a `Trace` with no parent. `at` binds it to
+the server span stored on the conn, and `under` binds it to a span
+the code just opened. The default value traces nothing, so code
+built without a tracer, such as tests, keeps working.
+
+The conn carries the server span as a `traceparent` string in
+`assigns`, so `Conn` stays free of an `open_telemetry` dependency.
+"""
+struct Trace
+  parent: Option<SpanContext> = Option.None
+  tracer: Option<Tracer> = Option.None
+
+  @doc """
+  The `assigns` key that holds the current span as a `traceparent`.
+  """
+  const ASSIGN: String = "traceparent"
+
+  @doc """
+  Stores `context` on the conn for handlers to pick up with `get`.
+  """
+  fn put(c: Conn, context: SpanContext) -> Conn
+    c.assign(Trace.ASSIGN, Propagation.header(context))
+  end
+
+  @doc """
+  Reads the span a conn carries, or `None` when nothing was stored.
+  """
+  fn get(c: Conn) -> Option<SpanContext>
+    c.assigned(Trace.ASSIGN).then(header -> Propagation.parse(header).ok())
+  end
+
+  @doc """
+  A copy of this trace whose parent is the span on the conn.
+  """
+  fn at(self, c: Conn) -> Trace
+    Trace{parent: Trace.get(c), tracer: self.tracer}
+  end
+
+  @doc """
+  A copy of this trace whose parent is `context`.
+  """
+  fn under(self, context: SpanContext) -> Trace
+    Trace{parent: Option.Some(context), tracer: self.tracer}
+  end
+
+  @doc """
+  Runs `work` in a child span of the current parent.
+  """
+  fn span<T>(
+    self,
+    name: String,
+    kind: SpanKind,
+    attributes: Map<String, Attribute>,
+    work: fn (SpanContext) -> T,
+  ) -> T
+
+    self.active().span(name, kind, self.parent, attributes, work)
+  end
+
+  @doc """
+  Runs `work` in a child span of the current parent and marks the
+  span as an error when `work` returns `Err`.
+  """
+  fn span_result<T, E: Debug>(
+    self,
+    name: String,
+    kind: SpanKind,
+    attributes: Map<String, Attribute>,
+    work: fn (SpanContext) -> Result<T, E>,
+  ) -> Result<T, E>
+
+    self.active().span_result(name, kind, self.parent, attributes, work)
+  end
+
+  priv fn active(self) -> Tracer
+    self.tracer.or(Tracer.noop())
+  end
+end

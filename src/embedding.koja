@@ -1,5 +1,9 @@
 alias HTTP.Headers
 alias JSON.Value as Json
+alias OpenTelemetry.Attribute
+alias OpenTelemetry.Propagation
+alias OpenTelemetry.SpanContext
+alias OpenTelemetry.SpanKind
 
 # TEI rejects batches above its default `max-client-batch-size`.
 priv const EMBED_BATCH: Int = 32
@@ -8,9 +12,22 @@ priv const EMBED_BATCH: Int = 32
 Client for a TEI-protocol embedding server (nomic-embed-text,
 768 dimensions). Vectors come back as pgvector text literals
 (`[0.1,0.2,...]`), ready to bind as `$n::vector` parameters.
+
+Each request runs in a `Client` span under `trace` and carries the
+span as a `traceparent` header. The default `trace` records nothing.
+Handlers bind the request's trace with `with_trace` before the call.
 """
 struct Embedder
+  trace: Trace = Trace{}
   url: String
+
+  @doc """
+  A copy of this client whose spans open under `trace`.
+  """
+  fn with_trace(self, trace: Trace) -> Embedder
+    self.trace = trace
+    self
+  end
 
   @doc """
   Requests an embedding for one text. Fails with `Error.Embedding`
@@ -49,8 +66,27 @@ struct Embedder
   end
 
   priv fn request(self, texts: List<String>) -> List<String> ! Error
+    attributes: Map<String, Attribute> = [
+      "http.request.method": "POST",
+      "url.full": Attribute.from(self.url <> "/embed"),
+      "embedding.batch_size": Attribute.from(texts.length())
+    ]
+
+    try self.trace.span_result(
+      "POST /embed",
+      SpanKind.Client,
+      attributes,
+      ctx -> self.post(ctx, texts),
+    )
+  end
+
+  priv fn post(self, context: SpanContext, texts: List<String>)
+    -> List<String> ! Error
+
     payload: Json = ["inputs": Json.Array(texts.map(t -> t.to_json()))]
-    headers = Headers.new().set("Content-Type", "application/json")
+    headers = Headers.new()
+      .set("Content-Type", "application/json")
+      .set(Propagation.HEADER, Propagation.header(context))
 
     response = HTTP.post(self.url <> "/embed", JSON.encode(payload), headers)
       rescue e -> fail Error.Embedding(e.message())

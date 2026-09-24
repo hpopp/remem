@@ -1,0 +1,59 @@
+alias HTTP.Headers
+
+@doc """
+Why an export attempt failed. `Transport` wraps the HTTP client
+message. `Rejected` carries a non 2xx status code from the collector.
+"""
+enum Export.Error
+  Rejected(Int)
+  Transport(String)
+end
+
+@doc """
+An exporter is a closure from an encoded OTLP body to a result. The
+`Tracer` calls it from its own process, so a slow collector delays
+the tracer and nothing else. `http` is the default the `Tracer` uses
+when a `Config` names an endpoint.
+
+```
+tracer = Tracer.start(Config{
+  exporter: Option.Some(Export.http("http://collector:4318")),
+  service_name: "remem",
+})
+```
+"""
+struct Export
+  @doc """
+  Builds an exporter that POSTs each batch to `<endpoint>/v1/traces`
+  as JSON. A trailing slash on the endpoint is fine.
+  """
+  fn http(endpoint: String) -> fn (String) -> Result<(), Export.Error>
+    url = traces_url(endpoint)
+
+    fn (payload: String) -> Result<(), Export.Error> post(url, payload) end
+  end
+
+  # One export request. A closure cannot spell an error channel, so
+  # the fallible body lives here and the closure above calls it.
+  priv fn post(url: String, payload: String) ! Export.Error
+    headers = Headers.new().set("Content-Type", "application/json")
+
+    response = HTTP.post(url, payload, headers)
+      rescue e -> fail Export.Error.Transport(e.message())
+
+    if not response.status.ok?()
+      fail Export.Error.Rejected(response.status.code)
+    end
+  end
+
+  @doc """
+  Joins the collector endpoint with the traces path.
+  """
+  fn traces_url(endpoint: String) -> String
+    base = endpoint.ends_with?("/")
+      ? endpoint.slice(Range{start: 0, stop: endpoint.length() - 2})
+      : endpoint
+
+    base <> "/v1/traces"
+  end
+end

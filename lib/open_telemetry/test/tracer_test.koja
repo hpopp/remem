@@ -1,0 +1,406 @@
+alias Process.Step
+alias Process.StopReason
+alias Test.require
+
+# A fake collector. `Store` records a payload. `WaitFor(n)` answers
+# once at least `n` payloads have arrived, which lets a test wait on
+# the tracer's timer without sleeping.
+enum SinkMsg
+  Store(String)
+  WaitFor(Int)
+end
+
+enum SinkReply
+  Payloads(List<String>)
+end
+
+struct Sink: Process<Int, SinkMsg, SinkReply>
+  payloads: List<String>
+  waiting: List<(Int, ReplyTo<SinkReply>)>
+
+  fn start(_config: Int) -> Self ! StopReason
+    payloads: List<String> = List.new()
+    waiting: List<(Int, ReplyTo<SinkReply>)> = List.new()
+    Sink{payloads: payloads, waiting: waiting}
+  end
+
+  fn handle(self, msg: SinkMsg, from: Option<ReplyTo<SinkReply>>) -> Step<Self>
+    match msg
+      SinkMsg.Store(payload) ->
+        self.payloads = self.payloads.append(payload)
+        Step.Continue(self.answer())
+
+      SinkMsg.WaitFor(count) ->
+        match from
+          Option.Some(caller) ->
+            self.waiting = self.waiting.append((count, caller))
+          Option.None -> ()
+        end
+
+        Step.Continue(self.answer())
+    end
+  end
+
+  priv fn answer(self) -> Self
+    still_waiting: List<(Int, ReplyTo<SinkReply>)> = List.new()
+
+    for (count, caller) in self.waiting
+      if self.payloads.length() >= count
+        _ = caller.send(SinkReply.Payloads(self.payloads))
+      else
+        still_waiting = still_waiting.append((count, caller))
+      end
+    end
+
+    self.waiting = still_waiting
+    self
+  end
+end
+
+struct TracerTest
+  priv fn sink -> Ref<SinkMsg, SinkReply>
+    spawn Sink.start(0)
+  end
+
+  priv fn payloads(collector: Ref<SinkMsg, SinkReply>, count: Int)
+    -> List<String> ! Test.Failure
+
+    match collector.call(SinkMsg.WaitFor(count), 2000)
+      Result.Ok(SinkReply.Payloads(list)) -> list
+      Result.Err(_) -> fail "sink never received #{count} payloads"
+    end
+  end
+
+  priv fn tracer(
+    collector: Ref<SinkMsg, SinkReply>,
+    max_batch: Int,
+    flush_ms: Int,
+  ) -> Tracer
+
+    capturing =
+      fn (payload: String) -> Result<(), Export.Error>
+        collector.cast(SinkMsg.Store(payload))
+        Result.Ok(())
+      end
+
+    Tracer.start(
+      Config{
+        exporter: Option.Some(capturing),
+        flush_ms: flush_ms,
+        max_batch: max_batch,
+        service_name: "test-service",
+        service_version: Option.Some("1.2.3"),
+      },
+    )
+  end
+
+  priv fn no_attributes -> Map<String, Attribute>
+    Map.new()
+  end
+
+  test "a tracer with no exporter and no endpoint is a no-op"
+    tracer = Tracer.start(Config{service_name: "quiet"})
+
+    assert not tracer.enabled?()
+
+    value = tracer.span(
+      "work",
+      SpanKind.Internal,
+      Option.None,
+      no_attributes(),
+      ctx -> ctx.trace_id.length() + ctx.span_id.length(),
+    )
+
+    assert value == 48
+    try require(tracer.flush())
+  end
+
+  test "an endpoint alone enables the tracer"
+    endpoint: Option<String> = Option.Some("http://127.0.0.1:1")
+    tracer = Tracer.start(Config{endpoint: endpoint, service_name: "remem"})
+
+    assert tracer.enabled?()
+    tracer.stop()
+  end
+
+  test "span records a root span with resource attributes on flush"
+    collector = sink()
+    tracer = tracer(collector, 512, 60000)
+    attributes: Map<String, Attribute> = [
+      "http.route": "/entities", "status": 200
+    ]
+
+    value = tracer.span(
+      "GET /entities",
+      SpanKind.Server,
+      Option.None,
+      attributes,
+      ctx -> ctx.sampled? ? 1 : 0,
+    )
+
+    assert value == 1
+    try require(tracer.flush())
+
+    payloads = try payloads(collector, 1)
+    tracer.stop()
+
+    assert payloads.length() == 1
+
+    body = payloads.first().or("")
+    assert body.starts_with?(
+      "{\"resourceSpans\":[{\"resource\":{\"attributes\":[",
+    )
+    assert body.contains?(
+      "{\"key\":\"service.name\",\"value\":{\"stringValue\":\"test-service\"}}",
+    )
+    assert body.contains?(
+      "{\"key\":\"service.version\",\"value\":{\"stringValue\":\"1.2.3\"}}",
+    )
+    assert body.contains?(
+      "\"scope\":{\"name\":\"open_telemetry\",\"version\":\"0.1.0\"}",
+    )
+    assert body.contains?("\"name\":\"GET /entities\",\"kind\":2,")
+    assert body.contains?(
+      "{\"key\":\"http.route\",\"value\":{\"stringValue\":\"/entities\"}}",
+    )
+    assert body.contains?(
+      "{\"key\":\"status\",\"value\":{\"intValue\":\"200\"}}",
+    )
+    assert not body.contains?("parentSpanId")
+  end
+
+  test "a child span links to its parent"
+    collector = sink()
+    tracer = tracer(collector, 512, 60000)
+    parent = SpanContext{
+      sampled?: true,
+      span_id: "00f067aa0ba902b7",
+      trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+    }
+
+    child = tracer.span(
+      "db.query",
+      SpanKind.Internal,
+      Option.Some(parent),
+      no_attributes(),
+      ctx -> ctx,
+    )
+
+    assert child.trace_id == parent.trace_id
+    assert child.span_id != parent.span_id
+    try require(tracer.flush())
+
+    body = try payloads(collector, 1)
+    tracer.stop()
+
+    text = body.first().or("")
+    assert text.contains?("\"traceId\":\"4bf92f3577b34da6a3ce929d0e0e4736\"")
+    assert text.contains?("\"spanId\":\"#{child.span_id}\"")
+    assert text.contains?("\"parentSpanId\":\"00f067aa0ba902b7\"")
+    assert text.contains?("\"kind\":1,")
+  end
+
+  test "an unsampled parent records nothing"
+    collector = sink()
+    tracer = tracer(collector, 512, 60000)
+    parent = SpanContext{
+      sampled?: false,
+      span_id: "00f067aa0ba902b7",
+      trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+    }
+
+    child = tracer.span(
+      "skipped",
+      SpanKind.Internal,
+      Option.Some(parent),
+      no_attributes(),
+      ctx -> ctx,
+    )
+
+    assert not child.sampled?
+    try require(tracer.flush())
+
+    outcome = collector.call(SinkMsg.WaitFor(1), 200)
+    tracer.stop()
+
+    assert outcome == Result.Err(Process.CallError.Timeout)
+  end
+
+  test "reaching max_batch exports without a flush"
+    collector = sink()
+    tracer = tracer(collector, 2, 60000)
+
+    for n in Range{start: 1, stop: 3}
+      _ = tracer.span(
+        "span #{n}",
+        SpanKind.Internal,
+        Option.None,
+        no_attributes(),
+        _ -> n,
+      )
+    end
+
+    batch = try payloads(collector, 1)
+    assert batch.length() == 1
+
+    first = batch.first().or("")
+    assert first.contains?("\"name\":\"span 1\"")
+    assert first.contains?("\"name\":\"span 2\"")
+    assert not first.contains?("\"name\":\"span 3\"")
+
+    try require(tracer.flush())
+    rest = try payloads(collector, 2)
+    tracer.stop()
+
+    assert rest.length() == 2
+    assert rest.last().or("").contains?("\"name\":\"span 3\"")
+  end
+
+  test "the timer exports without a flush"
+    collector = sink()
+    tracer = tracer(collector, 512, 20)
+
+    _ = tracer.span(
+      "timed",
+      SpanKind.Internal,
+      Option.None,
+      no_attributes(),
+      _ -> 0,
+    )
+
+    batch = try payloads(collector, 1)
+    tracer.stop()
+
+    assert batch.first().or("").contains?("\"name\":\"timed\"")
+  end
+
+  test "a failing exporter drops the batch and keeps running"
+    failing =
+      fn (_payload: String) -> Result<(), Export.Error>
+        Result.Err(Export.Error.Rejected(503))
+      end
+
+    tracer = Tracer.start(
+      Config{
+        exporter: Option.Some(failing),
+        flush_ms: 60000,
+        service_name: "unlucky",
+      },
+    )
+
+    first = tracer.span(
+      "one",
+      SpanKind.Internal,
+      Option.None,
+      no_attributes(),
+      _ -> 1,
+    )
+    try require(tracer.flush())
+
+    second = tracer.span(
+      "two",
+      SpanKind.Internal,
+      Option.None,
+      no_attributes(),
+      _ -> 2,
+    )
+    try require(tracer.flush())
+    tracer.stop()
+
+    assert first + second == 3
+  end
+
+  test "span_result marks an error status from the Err value"
+    collector = sink()
+    tracer = tracer(collector, 512, 60000)
+
+    refuse =
+      fn (_ctx: SpanContext) -> Result<Int, String>
+        Result.Err("connection refused")
+      end
+
+    accept = fn (_ctx: SpanContext) -> Result<Int, String> Result.Ok(7) end
+
+    failed = tracer.span_result(
+      "embed",
+      SpanKind.Client,
+      Option.None,
+      no_attributes(),
+      refuse,
+    )
+    passed = tracer.span_result(
+      "embed",
+      SpanKind.Client,
+      Option.None,
+      no_attributes(),
+      accept,
+    )
+
+    assert failed == Result.Err("connection refused")
+    assert passed == Result.Ok(7)
+    try require(tracer.flush())
+
+    body = try payloads(collector, 1)
+    tracer.stop()
+
+    text = body.first().or("")
+    assert text.contains?(
+      "\"status\":{\"code\":2,\"message\":\"\\\"connection refused\\\"\"}",
+    )
+    assert text.contains?("\"kind\":3,")
+  end
+
+  test "span_with merges outcome attributes and status"
+    collector = sink()
+    tracer = tracer(collector, 512, 60000)
+    attributes: Map<String, Attribute> = ["http.method": "GET"]
+
+    handler =
+      fn (_ctx: SpanContext) -> (Int, Outcome)
+        outcome = Outcome{
+          attributes: ["http.status_code": 500],
+          status: Status.Error("HTTP 500"),
+        }
+        (500, outcome)
+      end
+
+    code = tracer.span_with(
+      "GET /boom",
+      SpanKind.Server,
+      Option.None,
+      attributes,
+      handler,
+    )
+
+    assert code == 500
+    try require(tracer.flush())
+
+    body = try payloads(collector, 1)
+    tracer.stop()
+
+    text = body.first().or("")
+    assert text.contains?(
+      "{\"key\":\"http.method\",\"value\":{\"stringValue\":\"GET\"}}",
+    )
+    assert text.contains?(
+      "{\"key\":\"http.status_code\",\"value\":{\"intValue\":\"500\"}}",
+    )
+    assert text.contains?("\"status\":{\"code\":2,\"message\":\"HTTP 500\"}")
+  end
+
+  test "traces_url joins the endpoint with the traces path"
+    assert Export.traces_url("http://collector:4318") ==
+      "http://collector:4318/v1/traces"
+    assert Export.traces_url("http://collector:4318/") ==
+      "http://collector:4318/v1/traces"
+  end
+
+  test "the http exporter reports a transport failure"
+    export = Export.http("http://127.0.0.1:1")
+
+    match export("{}")
+      Result.Err(Export.Error.Transport(_)) -> ()
+      other -> fail "expected a transport error, got #{other}"
+    end
+  end
+end

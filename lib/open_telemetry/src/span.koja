@@ -1,0 +1,112 @@
+alias JSON.Value
+
+@doc """
+What role a span plays in a request. `Server` handles an incoming
+request, `Client` makes an outgoing one, and `Internal` is work in
+between, such as a database query or a tool dispatch.
+"""
+enum SpanKind
+  Client
+  Internal
+  Server
+
+  @doc """
+  The OTLP wire code for the kind.
+  """
+  fn code(self) -> Int
+    match self
+      SpanKind.Internal -> 1
+      SpanKind.Server -> 2
+      SpanKind.Client -> 3
+    end
+  end
+end
+
+@doc """
+How a span ended. `Unset` is the default and means nothing went
+wrong that the code chose to report. `Error` carries a short
+message. `Ok` is an explicit success mark and is rarely needed.
+"""
+enum Status
+  Error(String)
+  Ok
+  Unset
+
+  @doc """
+  Encodes the status for OTLP. `Unset` produces no status object.
+  """
+  fn to_json(self) -> Option<Value>
+    match self
+      Status.Unset ->
+        Option.None
+
+      Status.Ok ->
+        ok: Value = ["code": 1]
+        Option.Some(ok)
+
+      Status.Error(message) ->
+        error: Value = ["code": 2, "message": message.to_json()]
+        Option.Some(error)
+    end
+  end
+end
+
+@doc """
+A finished span. `Tracer.span` builds one when its closure returns,
+so a `Span` value always has both ends. `parent_span_id` is `None`
+for the root of a trace.
+"""
+struct Span: JSON.Encoding
+  attributes: Map<String, Attribute>
+  context: SpanContext
+  ended_at: Timestamp
+  kind: SpanKind
+  name: String
+  parent_span_id: Option<String>
+  started_at: Timestamp
+  status: Status
+
+  @doc """
+  Encodes the span as an OTLP `Span` object. Times are nanoseconds
+  since the epoch as decimal strings.
+  """
+  fn to_json(self) -> Value
+    fields: List<(String, Value)> = [
+      ("traceId", self.context.trace_id.to_json()),
+      ("spanId", self.context.span_id.to_json()), ("name", self.name.to_json()),
+      ("kind", self.kind.code().to_json()),
+      ("startTimeUnixNano", nanos(self.started_at)),
+      ("endTimeUnixNano", nanos(self.ended_at)),
+      ("attributes", attributes_json(self.attributes))
+    ]
+
+    match self.parent_span_id
+      Option.Some(id) -> fields = fields.append(("parentSpanId", id.to_json()))
+      Option.None -> ()
+    end
+
+    match self.status.to_json()
+      Option.Some(status) -> fields = fields.append(("status", status))
+      Option.None -> ()
+    end
+
+    Value.Object(fields)
+  end
+
+  @doc """
+  Encodes an attribute map as an OTLP `KeyValue` list.
+  """
+  fn attributes_json(attributes: Map<String, Attribute>) -> Value
+    items: List<Value> = List.new()
+
+    for (key, value) in attributes
+      items = items.append(["key": key.to_json(), "value": value.to_json()])
+    end
+
+    Value.Array(items)
+  end
+
+  priv fn nanos(at: Timestamp) -> Value
+    "#{at.since_epoch.to_nanoseconds()}".to_json()
+  end
+end

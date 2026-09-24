@@ -12,6 +12,7 @@ JSON-RPC endpoint.
 struct MetaController
   embedder: Embedder
   pool: Pool<Connection>
+  trace: Trace
 
   fn health(self, c: Conn) -> Conn
     self.do_health(c) rescue e -> Render.from_error(c, e)
@@ -34,14 +35,18 @@ struct MetaController
   end
 
   priv fn do_health(self, c: Conn) -> Conn ! Error
-    try with_db(self.pool, db -> health_db(db))
+    try with_db(self.pool, self.trace.at(c), db -> health_db(db))
 
     body: Json = ["status": "ok".to_json()]
     Render.json(c, Status.ok(), body)
   end
 
   priv fn do_graph(self, c: Conn) -> Conn ! Error
-    (entities, relations) = try with_db(self.pool, db -> graph_db(db))
+    (entities, relations) = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> graph_db(db),
+    )
 
     body: Json = [
       "entities": Json.Array(entities.map(e -> e.to_json())),
@@ -51,9 +56,14 @@ struct MetaController
   end
 
   priv fn do_mcp(self, c: Conn) -> Conn ! Error
-    embedder = self.embedder
+    trace = self.trace.at(c)
+    embedder = self.embedder.with_trace(trace)
     body = c.body
-    response = try with_db(self.pool, db -> mcp_db(db, embedder, body))
+    response = try with_db(
+      self.pool,
+      trace,
+      db -> mcp_db(db, embedder, body, trace),
+    )
     Render.http(c, response)
   end
 end
@@ -90,9 +100,9 @@ end
 
 # Runs one MCP message. `Mcp.handle` renders JSON-RPC level errors
 # itself, so the outcome only fails when the pool does.
-priv fn mcp_db(db: Connection, embedder: Embedder, body: String)
+priv fn mcp_db(db: Connection, embedder: Embedder, body: String, trace: Trace)
   -> (Connection, Result<Response, Error>)
 
-  (response, db) = Mcp.handle(body, db, embedder)
+  (response, db) = Mcp.handle(body, db, embedder, trace)
   (db, Result.Ok(response))
 end

@@ -16,6 +16,7 @@ search.
 struct SearchController
   embedder: Embedder
   pool: Pool<Connection>
+  trace: Trace
 
   fn search(self, c: Conn) -> Conn
     self.do_search(c) rescue e -> Render.from_error(c, e)
@@ -36,8 +37,12 @@ struct SearchController
       fail Error.Validation("limit must be between 1 and #{MAX_SEARCH_LIMIT}")
     end
 
-    embedder = self.embedder
-    results = try with_db(self.pool, db -> search_db(db, embedder, q, limit))
+    embedder = self.embedder.with_trace(self.trace.at(c))
+    results = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> search_db(db, embedder, q, limit),
+    )
 
     body: Json = [
       "query": q.to_json(), "results": Json.Array(results.map(r -> r.to_json()))

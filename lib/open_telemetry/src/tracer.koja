@@ -1,0 +1,357 @@
+alias Process.CallError
+alias Process.Step
+alias Process.StopReason
+
+@doc """
+Settings for a `Tracer`. `service_name` becomes the `service.name`
+resource attribute, `service_version` becomes `service.version`, and
+`resource` adds anything else, such as `deployment.environment`.
+
+Spans leave in batches. A batch goes out when it reaches `max_batch`
+spans or when `flush_ms` passes, whichever comes first.
+
+`exporter` receives each encoded batch. When it is `None`, the tracer
+POSTs to `endpoint` with `Export.http`. When both are `None`, the
+tracer is a no-op. Spans still get contexts, so propagation keeps
+working, but nothing is recorded.
+
+The package reads no environment variables. The application decides
+where `endpoint` comes from.
+"""
+struct Config
+  endpoint: Option<String> = Option.None
+  exporter: Option<fn (String) -> Result<(), Export.Error>> = Option.None
+  flush_ms: Int = 5000
+  max_batch: Int = 512
+  resource: Map<String, Attribute> = [:]
+  service_name: String
+  service_version: Option<String> = Option.None
+end
+
+@doc """
+What a span learns while its closure runs. `Tracer.span_with` merges
+`attributes` into the span and applies `status` when the closure
+returns. A server span uses it to record the response code.
+"""
+struct Outcome
+  attributes: Map<String, Attribute> = [:]
+  status: Status = Status.Unset
+end
+
+@doc """
+The tracer's message contract. `Record` is a cast from `span`.
+`Flush` is a call that exports now and answers `Done`. `Tick` is the
+tracer's own timer.
+"""
+enum Msg
+  Flush
+  Record(Span)
+  Tick
+end
+
+@doc """
+The tracer's reply contract.
+"""
+enum Reply
+  Done
+end
+
+@doc """
+Why `Tracer.flush` did not complete. `Timeout` means the export did
+not finish within the deadline. `Down` means the tracer process is
+not running.
+"""
+enum Tracer.Error
+  Down
+  Timeout
+end
+
+@doc """
+A handle to a running tracer, or a no-op when tracing is off. Spans
+are closure-scoped. Each `span` call derives a child context, runs
+the closure with it, and records the finished span when the closure
+returns. The closure passes the context on to anything it calls.
+
+```
+response = tracer.span("GET /entities", SpanKind.Server, parent, attrs, ctx ->
+  handle(request, ctx))
+```
+
+Recording is a cast, so a slow or absent collector never blocks the
+code that made the span.
+"""
+struct Tracer
+  ref: Option<Ref<Msg, Reply>>
+
+  @doc """
+  Spawns a tracer process for `config`, or returns a no-op tracer
+  when `config` names neither an exporter nor an endpoint.
+  """
+  fn start(config: Config) -> Tracer
+    exporter =
+      match config.exporter
+        Option.Some(export) -> Option.Some(export)
+        Option.None -> config.endpoint.map(url -> Export.http(url))
+      end
+
+    match exporter
+      Option.None ->
+        Tracer.noop()
+
+      Option.Some(export) ->
+        server = Server.Config{
+          export: export,
+          flush_ms: config.flush_ms,
+          max_batch: config.max_batch,
+          resource: resource_attributes(config),
+        }
+        Tracer{ref: Option.Some(spawn Server.start(server))}
+    end
+  end
+
+  @doc """
+  A tracer that records nothing.
+  """
+  fn noop -> Tracer
+    Tracer{ref: Option.None}
+  end
+
+  @doc """
+  True when spans reach an exporter.
+  """
+  fn enabled?(self) -> Bool
+    match self.ref
+      Option.Some(_) -> true
+      Option.None -> false
+    end
+  end
+
+  @doc """
+  Runs `work` inside a span named `name`. The closure receives the
+  span's own context to pass downstream. Any failure inside `work`
+  is the caller's to model in `T`.
+  """
+  fn span<T>(
+    self,
+    name: String,
+    kind: SpanKind,
+    parent: Option<SpanContext>,
+    attributes: Map<String, Attribute>,
+    work: fn (SpanContext) -> T,
+  ) -> T
+
+    self.span_with(
+      name,
+      kind,
+      parent,
+      attributes,
+      ctx -> (work(ctx), Outcome{}),
+    )
+  end
+
+  @doc """
+  Like `span`, for work that returns a `Result`. An `Err` marks the
+  span status as `Error` with the error's `format` text.
+  """
+  fn span_result<T, E: Debug>(
+    self,
+    name: String,
+    kind: SpanKind,
+    parent: Option<SpanContext>,
+    attributes: Map<String, Attribute>,
+    work: fn (SpanContext) -> Result<T, E>,
+  ) -> Result<T, E>
+
+    self.span_with(name, kind, parent, attributes, ctx -> judged(work(ctx)))
+  end
+
+  @doc """
+  Like `span`, for work that learns attributes or a status while it
+  runs. The closure returns its value and an `Outcome`.
+  """
+  fn span_with<T>(
+    self,
+    name: String,
+    kind: SpanKind,
+    parent: Option<SpanContext>,
+    attributes: Map<String, Attribute>,
+    work: fn (SpanContext) -> (T, Outcome),
+  ) -> T
+
+    context =
+      match parent
+        Option.Some(p) -> p.child()
+        Option.None -> SpanContext.root()
+      end
+
+    started_at = Timestamp.now()
+    (value, outcome) = work(context)
+    ended_at = Timestamp.now()
+
+    match self.ref
+      Option.None ->
+        ()
+
+      Option.Some(ref) ->
+        if context.sampled?
+          merged = attributes
+
+          for (key, attribute) in outcome.attributes
+            merged = merged.put(key, attribute)
+          end
+
+          ref.cast(
+            Msg.Record(Span{
+              attributes: merged,
+              context: context,
+              ended_at: ended_at,
+              kind: kind,
+              name: name,
+              parent_span_id: parent.map(p -> p.span_id),
+              started_at: started_at,
+              status: outcome.status,
+            }),
+          )
+        end
+    end
+
+    value
+  end
+
+  @doc """
+  Exports buffered spans now and waits for the export to finish. A
+  no-op tracer has nothing to flush and returns at once.
+  """
+  fn flush(self, timeout_ms: Int = 5000) ! Tracer.Error
+    match self.ref
+      Option.None ->
+        ()
+
+      Option.Some(ref) ->
+        match ref.call(Msg.Flush, timeout_ms)
+          Result.Ok(Reply.Done) -> ()
+          Result.Err(CallError.Timeout) -> fail Tracer.Error.Timeout
+          Result.Err(CallError.ProcessDown) -> fail Tracer.Error.Down
+        end
+    end
+  end
+
+  @doc """
+  Terminates the tracer process. Buffered spans are lost, so call
+  `flush` first when they matter.
+  """
+  fn stop(self)
+    match self.ref
+      Option.Some(ref) -> ref.kill()
+      Option.None -> ()
+    end
+  end
+
+  # Pairs a result with the outcome it implies for the span.
+  priv fn judged<T, E: Debug>(result: Result<T, E>) -> (Result<T, E>, Outcome)
+    match result
+      Result.Ok(_) -> (result, Outcome{})
+      Result.Err(e) -> (result, Outcome{status: Status.Error(e.format())})
+    end
+  end
+
+  priv fn resource_attributes(config: Config) -> Map<String, Attribute>
+    resource = config.resource.put(
+      "service.name",
+      Attribute.from(config.service_name),
+    )
+
+    match config.service_version
+      Option.Some(version) ->
+        resource.put("service.version", Attribute.from(version))
+
+      Option.None ->
+        resource
+    end
+  end
+end
+
+# Settings the tracer process needs after `Tracer.start` has resolved
+# the exporter and resource.
+priv struct Server.Config
+  export: fn (String) -> Result<(), Export.Error>
+  flush_ms: Int
+  max_batch: Int
+  resource: Map<String, Attribute>
+end
+
+# The process behind a `Tracer` handle. Buffers spans and exports
+# them on a count or a timer. A failed export drops the batch and
+# warns once, then stays quiet until an export succeeds again.
+priv struct Server: Process<Server.Config, Msg, Reply>
+  buffer: List<Span>
+  export: fn (String) -> Result<(), Export.Error>
+  flush_ms: Int
+  max_batch: Int
+  resource: Map<String, Attribute>
+  warned?: Bool
+
+  fn start(config: Server.Config) -> Self ! StopReason
+    buffer: List<Span> = List.new()
+    me: Ref<Msg, Reply> = Ref.self_ref()
+    me.send_after(Msg.Tick, config.flush_ms)
+
+    Server{
+      buffer: buffer,
+      export: config.export,
+      flush_ms: config.flush_ms,
+      max_batch: config.max_batch,
+      resource: config.resource,
+      warned?: false,
+    }
+  end
+
+  fn handle(self, msg: Msg, from: Option<ReplyTo<Reply>>) -> Step<Self>
+    match msg
+      Msg.Record(span) ->
+        self.buffer = self.buffer.append(span)
+
+        if self.buffer.length() >= self.max_batch
+          self = self.export_batch()
+        end
+
+        Step.Continue(self)
+
+      Msg.Tick ->
+        me: Ref<Msg, Reply> = Ref.self_ref()
+        me.send_after(Msg.Tick, self.flush_ms)
+        Step.Continue(self.export_batch())
+
+      Msg.Flush ->
+        server = self.export_batch()
+        done: Reply = Reply.Done
+        _ = ReplyTo.reply(from, done)
+        Step.Continue(server)
+    end
+  end
+
+  # Encodes and sends everything buffered. The buffer is cleared
+  # either way, so a collector outage costs spans, not memory.
+  priv fn export_batch(self) -> Self
+    if self.buffer.empty?()
+      return self
+    end
+
+    payload = OTLP.traces(self.resource, self.buffer)
+    self.buffer = List.new()
+
+    match self.export(payload)
+      Result.Ok(_) ->
+        self.warned? = false
+        self
+
+      Result.Err(error) ->
+        if not self.warned?
+          IO.warn("open_telemetry: export failed, dropping spans (#{error})")
+        end
+
+        self.warned? = true
+        self
+    end
+  end
+end

@@ -1,0 +1,110 @@
+alias Test.require
+
+priv const SPAN_ID: String = "00f067aa0ba902b7"
+priv const TRACE_ID: String = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+struct PropagationTest
+  test "parse reads a sampled traceparent"
+    context = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-01"))
+
+    assert context.trace_id == TRACE_ID
+    assert context.span_id == SPAN_ID
+    assert context.sampled?
+  end
+
+  test "parse reads an unsampled flag"
+    context = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-00"))
+
+    assert not context.sampled?
+  end
+
+  test "parse lowercases uppercase hex"
+    context = try require(
+      Propagation.parse(
+        "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01",
+      ),
+    )
+
+    assert context.trace_id == TRACE_ID
+    assert context.span_id == SPAN_ID
+  end
+
+  test "parse trims surrounding whitespace"
+    context = try require(Propagation.parse(" 00-#{TRACE_ID}-#{SPAN_ID}-01 "))
+
+    assert context.trace_id == TRACE_ID
+  end
+
+  test "parse accepts a newer version with extra fields"
+    context = try require(
+      Propagation.parse("01-#{TRACE_ID}-#{SPAN_ID}-01-extra"),
+    )
+
+    assert context.trace_id == TRACE_ID
+    assert context.sampled?
+  end
+
+  test "parse rejects a malformed header"
+    assert Propagation.parse("") == Result.Err(Propagation.Error.InvalidFormat)
+    assert Propagation.parse("garbage") ==
+      Result.Err(Propagation.Error.InvalidFormat)
+    assert Propagation.parse("0-#{TRACE_ID}-#{SPAN_ID}-01") ==
+      Result.Err(Propagation.Error.InvalidFormat)
+    assert Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-01-extra") ==
+      Result.Err(Propagation.Error.InvalidFormat)
+  end
+
+  test "parse rejects version ff"
+    assert Propagation.parse("ff-#{TRACE_ID}-#{SPAN_ID}-01") ==
+      Result.Err(Propagation.Error.UnsupportedVersion)
+  end
+
+  test "parse rejects bad identifiers"
+    assert Propagation.parse("00-#{SPAN_ID}-#{SPAN_ID}-01") ==
+      Result.Err(Propagation.Error.InvalidTraceId)
+    assert Propagation.parse(
+        "00-00000000000000000000000000000000-#{SPAN_ID}-01",
+      ) == Result.Err(Propagation.Error.InvalidTraceId)
+    assert Propagation.parse("00-#{TRACE_ID}-0000000000000000-01") ==
+      Result.Err(Propagation.Error.InvalidSpanId)
+    assert Propagation.parse("00-#{TRACE_ID}-zzf067aa0ba902b7-01") ==
+      Result.Err(Propagation.Error.InvalidSpanId)
+  end
+
+  test "parse rejects bad flags"
+    assert Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-1") ==
+      Result.Err(Propagation.Error.InvalidFlags)
+    assert Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-zz") ==
+      Result.Err(Propagation.Error.InvalidFlags)
+  end
+
+  test "header round trips through parse"
+    original = SpanContext{sampled?: true, span_id: SPAN_ID, trace_id: TRACE_ID}
+    header = Propagation.header(original)
+
+    assert header == "00-#{TRACE_ID}-#{SPAN_ID}-01"
+
+    parsed = try require(Propagation.parse(header))
+    assert parsed == original
+  end
+
+  test "header writes the unsampled flag"
+    context = SpanContext{sampled?: false, span_id: SPAN_ID, trace_id: TRACE_ID}
+    assert Propagation.header(context) == "00-#{TRACE_ID}-#{SPAN_ID}-00"
+  end
+
+  test "root and child contexts have well formed identifiers"
+    root = SpanContext.root()
+    child = root.child()
+
+    assert root.trace_id.length() == 32
+    assert root.span_id.length() == 16
+    assert root.sampled?
+    assert child.trace_id == root.trace_id
+    assert child.span_id != root.span_id
+    assert child.span_id.length() == 16
+
+    reparsed = try require(Propagation.parse(Propagation.header(child)))
+    assert reparsed == child
+  end
+end

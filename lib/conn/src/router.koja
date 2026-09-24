@@ -116,8 +116,14 @@ struct Router
   route, returning the response. No match runs the fallback.
   """
   fn dispatch(self, request: Request) -> Response
-    conn = Conn.from_request(request)
+    self.dispatch_conn(Conn.from_request(request))
+  end
 
+  @doc """
+  Like `dispatch`, for a conn the caller built. Use it to seed
+  `assigns` before any middleware runs.
+  """
+  fn dispatch_conn(self, conn: Conn) -> Response
     for middleware in self.middleware
       if conn.halted
         return conn.to_response()

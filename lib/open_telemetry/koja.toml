@@ -1,0 +1,14 @@
+[project]
+authors = ["Henry Popp <henry@hpopp.dev>"]
+description = "OpenTelemetry tracing for Koja with W3C context propagation and OTLP/JSON export"
+koja = "0.19"
+license = "MIT"
+name = "open_telemetry"
+namespace = "OpenTelemetry"
+version = "0.1.0"
+
+[index]
+categories = ["observability"]
+description = "OpenTelemetry tracing with W3C traceparent propagation, closure-scoped spans, and a batching OTLP/JSON exporter"
+keywords = ["opentelemetry", "otlp", "tracing", "traceparent"]
+kind = "library"

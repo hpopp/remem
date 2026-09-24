@@ -165,4 +165,25 @@ struct RouterTest
     response = router.dispatch(request(Method.Get, "/forgot"))
     assert response.status.code == 500, "handler that never responds becomes 500"
   end
+
+  test "assigns seeded on the conn reach middleware and handlers"
+    router = Router.new()
+      .use(fn (conn: Conn) -> Conn
+        conn.assign("seen", conn.assigned("trace").or("none"))
+      end)
+      .get(
+        "/whoami",
+        fn (conn: Conn) -> Conn
+          conn.text(Status.ok(), conn.assigned("seen").or("missing"))
+        end,
+      )
+
+    conn = Conn.from_request(request(Method.Get, "/whoami"))
+      .assign("trace", "abc")
+    response = router.dispatch_conn(conn)
+    assert response.body == "abc", "assign flows through the pipeline"
+
+    response = router.dispatch(request(Method.Get, "/whoami"))
+    assert response.body == "none", "dispatch starts with empty assigns"
+  end
 end

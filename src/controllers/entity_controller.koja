@@ -14,6 +14,7 @@ response at the surface.
 struct EntityController
   embedder: Embedder
   pool: Pool<Connection>
+  trace: Trace
 
   fn list(self, c: Conn) -> Conn
     self.do_list(c) rescue e -> Render.from_error(c, e)
@@ -51,6 +52,7 @@ struct EntityController
     (limit, offset) = try Params.page(c)
     summaries = try with_db(
       self.pool,
+      self.trace.at(c),
       db -> EntityStore.summaries(db, limit, offset),
     )
 
@@ -60,7 +62,11 @@ struct EntityController
 
   priv fn do_show(self, c: Conn) -> Conn ! Error
     name = try Params.name(c)
-    (entity, relations) = try with_db(self.pool, db -> show_db(db, name))
+    (entity, relations) = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> show_db(db, name),
+    )
 
     body: Json = [
       "entity": entity.to_json(),
@@ -73,10 +79,11 @@ struct EntityController
     (name, kind, observations) = try JsonUtil.parse_entity(c.body)
     observations = JsonUtil.distinct(observations)
     confirm = JsonUtil.parse_confirm(c.body)
-    embedder = self.embedder
+    embedder = self.embedder.with_trace(self.trace.at(c))
 
     entity = try with_db(
       self.pool,
+      self.trace.at(c),
       db -> create_db(db, embedder, name, kind, observations, confirm),
     )
     Render.json(c, Status.created(), entity)
@@ -86,7 +93,11 @@ struct EntityController
     name = try Params.name(c)
     new_name = try JsonUtil.parse_string_field(c.body, "name")
 
-    entity = try with_db(self.pool, db -> rename_db(db, name, new_name))
+    entity = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> rename_db(db, name, new_name),
+    )
     Render.json(c, Status.ok(), entity)
   end
 
@@ -94,13 +105,21 @@ struct EntityController
     source = try Params.name(c)
     into = try JsonUtil.parse_string_field(c.body, "into")
 
-    entity = try with_db(self.pool, db -> EntityStore.merge(db, source, into))
+    entity = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> EntityStore.merge(db, source, into),
+    )
     Render.json(c, Status.ok(), entity)
   end
 
   priv fn do_delete(self, c: Conn) -> Conn ! Error
     name = try Params.name(c)
-    deleted = try with_db(self.pool, db -> EntityStore.remove(db, name))
+    deleted = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> EntityStore.remove(db, name),
+    )
 
     if not deleted
       fail Error.NotFound("no entity named #{name}")
@@ -112,10 +131,11 @@ struct EntityController
   priv fn do_add_observations(self, c: Conn) -> Conn ! Error
     name = try Params.name(c)
     observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
-    embedder = self.embedder
+    embedder = self.embedder.with_trace(self.trace.at(c))
 
     entity = try with_db(
       self.pool,
+      self.trace.at(c),
       db -> add_db(db, embedder, name, observations),
     )
     Render.json(c, Status.ok(), entity)
@@ -125,7 +145,11 @@ struct EntityController
     name = try Params.name(c)
     observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
 
-    entity = try with_db(self.pool, db -> remove_db(db, name, observations))
+    entity = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> remove_db(db, name, observations),
+    )
     Render.json(c, Status.ok(), entity)
   end
 end

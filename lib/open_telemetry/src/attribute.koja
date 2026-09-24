@@ -1,0 +1,63 @@
+alias JSON.Value
+
+@doc """
+The scalar types an attribute value can hold.
+"""
+type Scalar = String | Int | Bool | Float
+
+@doc """
+A span attribute value. Literals convert on their own wherever the
+compiler knows it wants an `Attribute`, so an attribute map reads as
+a plain map literal.
+
+```
+attrs: Map<String, Attribute> = ["http.route": "/entities", "status": 200]
+```
+
+A variable does not convert. Wrap it with `Attribute.from`.
+
+```
+["http.route": Attribute.from(route)]
+```
+"""
+struct Attribute:
+  StringLiteral, IntLiteral, BoolLiteral, FloatLiteral, JSON.Encoding
+
+  value: Scalar
+
+  @doc """
+  Wraps a runtime value as an attribute.
+  """
+  fn from(value: Scalar) -> Attribute
+    Attribute{value: value}
+  end
+
+  fn from_bool(value: Bool) -> Attribute
+    Attribute{value: value}
+  end
+
+  fn from_float(value: Float) -> Attribute
+    Attribute{value: value}
+  end
+
+  fn from_int(value: Int) -> Attribute
+    Attribute{value: value}
+  end
+
+  fn from_string(value: String) -> Attribute
+    Attribute{value: value}
+  end
+
+  @doc """
+  Encodes the value as an OTLP `AnyValue`. Integers travel as decimal
+  strings, which is how OTLP/JSON carries 64-bit values.
+  """
+  fn to_json(self) -> Value
+    match self.value
+      s: String -> ["stringValue": s.to_json()]
+      i: Int -> ["intValue": "#{i}"]
+      b: Bool -> ["boolValue": b.to_json()]
+      f: Float -> ["doubleValue": f.to_json()]
+    end
+  end
+end

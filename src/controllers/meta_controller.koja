@@ -8,7 +8,9 @@ alias Postgres.Connection
 
 @doc """
 Service endpoints for liveness, the whole graph, and the MCP
-JSON-RPC endpoint.
+JSON-RPC endpoint. Liveness only reports that the server is up. A
+database outage surfaces on the routes that use the database, and a
+restart would not repair it.
 """
 struct MetaController
   embedder: Embedder
@@ -17,7 +19,8 @@ struct MetaController
   trace: Trace
 
   fn health(self, c: Conn) -> Conn
-    self.do_health(c) rescue e -> Render.from_error(c, e)
+    body: Json = ["status": "ok".to_json()]
+    Render.json(c, Status.ok(), body)
   end
 
   fn graph(self, c: Conn) -> Conn
@@ -34,13 +37,6 @@ struct MetaController
       Status.method_not_allowed(),
       "no SSE stream, POST JSON-RPC messages to /mcp",
     )
-  end
-
-  priv fn do_health(self, c: Conn) -> Conn ! Error
-    try with_db(self.pool, self.trace.at(c), db -> health_db(db))
-
-    body: Json = ["status": "ok".to_json()]
-    Render.json(c, Status.ok(), body)
   end
 
   priv fn do_graph(self, c: Conn) -> Conn ! Error
@@ -68,16 +64,6 @@ struct MetaController
       db -> mcp_db(db, embedder, body, trace, log),
     )
     Render.http(c, response)
-  end
-end
-
-# Probes the database for the health check. Failure maps to 503.
-priv fn health_db(db: Connection) -> (Connection, Result<(), Error>)
-  (db, outcome) = db.query("SELECT 1")
-
-  match outcome
-    Result.Ok(_) -> (db, Result.Ok(()))
-    Result.Err(e) -> (db, Result.Err(Error.Unavailable(e.message())))
   end
 end
 

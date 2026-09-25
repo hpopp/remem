@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.1] - 2026-09-24
+
+- `GET /health` no longer queries the database.
+
 ## [0.5.0] - 2026-09-24
 
 ### Added
@@ -20,8 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exporter process.
 - `Conn.assigns` for request-scoped values, with `assign`,
   `assigned`, and `Router.dispatch_conn`.
-- `design/OBSERVABILITY.md`, the design for runtime-owned trace
-  context, logging, and metrics in Koja.
 - Structured logging behind `GCP_PROJECT_ID`. When it is set, every
   log line is one Cloud Logging JSON object with `severity`,
   `message`, and `time`. Access lines carry the method, path,

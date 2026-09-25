@@ -11,9 +11,9 @@ alias Postgres.Connection
 
 @doc """
 Route table and worker framing tests. Middleware tests (auth, method
-guard, 404 fallback) run against a router whose pool can never
-connect, which proves those paths answer without a database
-connection. The health test uses the compose Postgres (port 5435).
+guard, 404 fallback) and the health test run against a router whose
+pool can never connect, which proves those paths answer without a
+database connection.
 """
 struct RouterTest
   test "auth middleware rejects requests before any pool checkout"
@@ -84,16 +84,9 @@ struct RouterTest
     assert response.body.contains?("POST JSON-RPC messages to /mcp"), "GET /mcp should point clients at POST"
   end
 
-  test "GET /health stays exempt from auth, against compose Postgres"
-    create =
-      fn () -> Result<Connection, String>
-        config = DbConfig.new("127.0.0.1", 5435, "postgres", "remem")
-        Connection.connect(config).map_err(e -> e.message())
-      end
-
-    pool = Pool.start(PoolConfig{create: create, size: 1})
+  test "GET /health stays exempt from auth and needs no database"
     router = build_router(
-      pool,
+      broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
       Tracer.noop(),
@@ -102,7 +95,7 @@ struct RouterTest
     # No Authorization header at all.
     response = router.dispatch(request(Method.Get, "/health", ""))
 
-    assert response.status.code == 200, "expected 200 (is docker compose up?)"
+    assert response.status.code == 200
     assert response.body.contains?("ok"), "health body should report ok"
   end
 

@@ -66,7 +66,7 @@ trace id. `GET /health` is not traced.
 
 | Route                                 | Purpose                                   |
 | ------------------------------------- | ----------------------------------------- |
-| `GET /health`                         | Liveness plus a database probe            |
+| `GET /health`                         | Healthcheck, for probes                   |
 | `GET /graph`                          | Every entity and relation                 |
 | `GET /entities?limit=&offset=`        | Entity summaries, most observations first |
 | `POST /entities`                      | Create from `{name, type, observations?}` |

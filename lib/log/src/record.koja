@@ -1,0 +1,19 @@
+@doc """
+One log record, built by a `Logger` and handed to a formatter.
+`attributes` holds the fields bound on the logger merged with the
+fields passed at the call.
+"""
+struct Record
+  attributes: Map<String, Attribute>
+  level: Level
+  message: String
+  timestamp: Timestamp
+
+  @doc """
+  The timestamp as ISO 8601 in UTC with microseconds, such as
+  `2026-09-23T20:00:00.123456Z`.
+  """
+  fn time(self) -> String
+    DateTime{timestamp: self.timestamp, zone: TimeZone.UTC}.to_string()
+  end
+end

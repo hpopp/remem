@@ -2,6 +2,7 @@ alias Conn.Conn
 alias HTTP.Headers
 alias HTTP.Method
 alias HTTP.Request
+alias Log.Logger
 alias OpenTelemetry.Tracer
 alias Pooler.Config as PoolConfig
 alias Pooler.Pool
@@ -192,7 +193,7 @@ struct RouterTest
   end
 
   priv fn test_embedder -> Embedder
-    Embedder{url: "http://127.0.0.1:1"}
+    Embedder{log: Logger.default(), url: "http://127.0.0.1:1"}
   end
 
   priv fn connect -> Connection ! Test.Failure

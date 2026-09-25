@@ -1,3 +1,63 @@
+alias Log.Level
+
+@doc """
+Where Postgres is and how to connect. Set `DB_STATEMENT_CACHE=0` to
+turn the driver statement cache off.
+"""
+struct Config.Database
+  host: String
+  name: String
+  password: String
+  port: Int
+  statement_cache: Int
+  user: String
+
+  fn load -> Config.Database
+    Config.Database{
+      host: env_or("DB_HOST", "127.0.0.1"),
+      name: env_or("DB_NAME", "remem"),
+      password: env_or("DB_PASSWORD", ""),
+      port: env_int("DB_PORT", 5435),
+      statement_cache: env_int("DB_STATEMENT_CACHE", 256),
+      user: env_or("DB_USER", "postgres"),
+    }
+  end
+end
+
+@doc """
+The Google Cloud project the service runs in. Present only when
+`GCP_PROJECT_ID` is set, which switches logs to Cloud Logging JSON.
+`GCP_SERVICE_NAME` names the service on error lines.
+"""
+struct Config.GCP
+  project_id: String
+  service_name: String
+
+  fn load -> Option<Config.GCP>
+    env_opt("GCP_PROJECT_ID").map(project_id -> Config.GCP{
+      project_id: project_id,
+      service_name: env_or("GCP_SERVICE_NAME", "remem"),
+    })
+  end
+end
+
+@doc """
+Where traces go. `OTEL_EXPORTER_OTLP_ENDPOINT` is the base URL of an
+OTLP/HTTP collector, and tracing is off when it is unset.
+`OTEL_SERVICE_NAME` overrides the reported service.
+"""
+struct Config.Tracing
+  endpoint: Option<String>
+  service_name: String
+
+  fn load -> Config.Tracing
+    Config.Tracing{
+      endpoint: env_opt("OTEL_EXPORTER_OTLP_ENDPOINT"),
+      service_name: env_or("OTEL_SERVICE_NAME", "remem"),
+    }
+  end
+end
+
 @doc """
 Runtime configuration, resolved from the environment with defaults
 that match `docker-compose.yml`.
@@ -8,60 +68,58 @@ environment directly rather than trusting the passed-in value.
 """
 struct Config
   api_key: Option<String>
-  db_host: String
-  db_name: String
-  db_password: String
-  db_port: Int
-  db_statement_cache: Int
-  db_user: String
+  database: Config.Database
   embedding_url: String
-  otel_endpoint: Option<String>
-  otel_service_name: String
+  gcp: Option<Config.GCP>
+  log_level: Level
   port: Int
+  tracing: Config.Tracing
 
   @doc """
   Builds a `Config` from the environment, falling back to defaults
   suitable for local development against the bundled compose stack.
   Set `API_KEY` to require bearer auth on every route except
-  `GET /health`. Set `DB_STATEMENT_CACHE=0` to turn the driver
-  statement cache off. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to the base
-  URL of an OTLP/HTTP collector to export traces. Tracing is off when
-  it is unset. `OTEL_SERVICE_NAME` overrides the reported service.
+  `GET /health`. `LOG_LEVEL` is the floor, `info` by default.
   """
   fn load -> Config
     Config{
       api_key: env_opt("API_KEY"),
-      db_host: env_or("DB_HOST", "127.0.0.1"),
-      db_name: env_or("DB_NAME", "remem"),
-      db_password: env_or("DB_PASSWORD", ""),
-      db_port: env_int("DB_PORT", 5435),
-      db_statement_cache: env_int("DB_STATEMENT_CACHE", 256),
-      db_user: env_or("DB_USER", "postgres"),
+      database: Config.Database.load(),
       embedding_url: env_or("EMBEDDING_URL", "http://127.0.0.1:8081"),
-      otel_endpoint: env_opt("OTEL_EXPORTER_OTLP_ENDPOINT"),
-      otel_service_name: env_or("OTEL_SERVICE_NAME", "remem"),
+      gcp: Config.GCP.load(),
+      log_level: env_level("LOG_LEVEL", Level.Info),
       port: env_int("PORT", 8080),
+      tracing: Config.Tracing.load(),
     }
   end
+end
 
-  priv fn env_opt(key: String) -> Option<String>
-    match System.get_env(key)
-      Option.Some(value) -> value.empty?() ? Option.None : Option.Some(value)
-      Option.None -> Option.None
-    end
+priv fn env_int(key: String, fallback: Int) -> Int
+  match System.get_env(key)
+    Option.None -> fallback
+    Option.Some(value) -> value.to_int() rescue _ -> fallback
   end
+end
 
-  priv fn env_or(key: String, fallback: String) -> String
-    match System.get_env(key)
-      Option.Some(value) -> value.empty?() ? fallback : value
-      Option.None -> fallback
-    end
+priv fn env_level(key: String, fallback: Level) -> Level
+  match System.get_env(key)
+    Option.None -> fallback
+    Option.Some(value) -> Level.parse(value) rescue _ -> fallback
   end
+end
 
-  priv fn env_int(key: String, fallback: Int) -> Int
-    match System.get_env(key)
-      Option.None -> fallback
-      Option.Some(value) -> value.to_int() rescue _ -> fallback
-    end
+# An unset or empty variable is `None`.
+priv fn env_opt(key: String) -> Option<String>
+  match System.get_env(key)
+    Option.Some(value) -> value.empty?() ? Option.None : Option.Some(value)
+    Option.None -> Option.None
+  end
+end
+
+# An unset or empty variable is `fallback`.
+priv fn env_or(key: String, fallback: String) -> String
+  match System.get_env(key)
+    Option.Some(value) -> value.empty?() ? fallback : value
+    Option.None -> fallback
   end
 end

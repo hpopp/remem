@@ -1,0 +1,29 @@
+alias Test.require
+
+struct LevelTest
+  test "at_least? orders the levels"
+    assert Level.Error.at_least?(Level.Debug)
+    assert Level.Error.at_least?(Level.Error)
+    assert Level.Info.at_least?(Level.Info)
+    assert not Level.Info.at_least?(Level.Warn)
+    assert not Level.Debug.at_least?(Level.Info)
+  end
+
+  test "parse reads names in any case with surrounding whitespace"
+    assert try require(Level.parse("debug")) == Level.Debug
+    assert try require(Level.parse("INFO")) == Level.Info
+    assert try require(Level.parse(" Warn ")) == Level.Warn
+    assert try require(Level.parse("error")) == Level.Error
+  end
+
+  test "parse rejects an unknown name"
+    assert Level.parse("loud") == Result.Err(Level.ParseError.Unknown("loud"))
+  end
+
+  test "to_string is the upper case name"
+    assert Level.Debug.to_string() == "DEBUG"
+    assert Level.Info.to_string() == "INFO"
+    assert Level.Warn.to_string() == "WARN"
+    assert Level.Error.to_string() == "ERROR"
+  end
+end

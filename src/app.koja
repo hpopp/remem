@@ -4,6 +4,11 @@ alias HTTP.Method
 alias HTTP.Request
 alias HTTP.Response
 alias HTTP.Status
+alias Log.Attribute as LogAttribute
+alias Log.Config as LogConfig
+alias Log.GCP
+alias Log.Logger
+alias Log.Text
 alias Net.TCPServer
 alias Net.TCPServer.Config as TCPServerConfig
 alias Net.TCPServer.Event as TCPEvent
@@ -42,29 +47,32 @@ priv const BACKFILL_INTERVAL_MS: Int = 60000
 
 @doc """
 The remem entry process. `start` loads config from the environment,
-runs schema migrations on a dedicated connection, spawns a pool of
-`POOL_SIZE` Postgres connections, builds the route table once, starts
-the tracer, the search log sweeper, and the embedding backfill, and
-spawns a `Net.TCPServer` acceptor that delivers connected sockets as
-`TCPEvent.Connected` messages. Each connection is handed to a
-one-shot `Trail.Worker`, so requests are handled concurrently and
-the entry process never blocks on IO.
+builds the logger, runs schema migrations on a dedicated connection,
+spawns a pool of `POOL_SIZE` Postgres connections, builds the route
+table once, starts the tracer, the search log sweeper, and the
+embedding backfill, and spawns a `Net.TCPServer` acceptor that
+delivers connected sockets as `TCPEvent.Connected` messages. Each
+connection is handed to a one-shot `Trail.Worker`, so requests are
+handled concurrently and the entry process never blocks on IO.
 """
 struct App: Process<List<String>, TCPEvent, String>
+  log: Logger
   server: TrailConfig
 
   fn start(config: List<String>) -> Self ! StopReason
     settings = Config.load()
+    log = build_logger(settings)
+    database = settings.database
     db_config = DbConfig.new(
-      settings.db_host,
-      settings.db_port,
-      settings.db_user,
-      settings.db_name,
+      database.host,
+      database.port,
+      database.user,
+      database.name,
     )
-      .with_password(settings.db_password)
-      .with_statement_cache_size(settings.db_statement_cache)
+      .with_password(database.password)
+      .with_statement_cache_size(database.statement_cache)
 
-    try migrate(db_config)
+    try migrate(db_config, log)
 
     create =
       fn () -> Result<Connection, String>
@@ -90,35 +98,36 @@ struct App: Process<List<String>, TCPEvent, String>
         pool.checkin(conn)
 
       Result.Err(Pooler.Error.Timeout) ->
-        Log.error(
+        log.error(
           "database connections are still warming up, try again shortly",
         )
         fail StopReason.Shutdown
 
       Result.Err(_) ->
-        Log.error("database connection failed (is the compose stack up?)")
+        log.error("database connection failed (is the compose stack up?)")
         fail StopReason.Shutdown
     end
 
     tracer = Tracer.start(
       TracerConfig{
-        endpoint: settings.otel_endpoint,
-        service_name: settings.otel_service_name,
+        endpoint: settings.tracing.endpoint,
+        service_name: settings.tracing.service_name,
         service_version: Option.Some(VERSION),
       },
     )
 
-    embedder = Embedder{url: settings.embedding_url}
-    router = build_router(pool, embedder, settings.api_key, tracer)
+    embedder = Embedder{log: log, url: settings.embedding_url}
+    router = build_router(pool, embedder, settings.api_key, tracer, log)
 
     _cleaner = spawn Cleaner.start(
-      Cleaner.Config{interval_ms: SWEEP_INTERVAL_MS, pool: pool},
+      Cleaner.Config{interval_ms: SWEEP_INTERVAL_MS, log: log, pool: pool},
     )
 
     _backfill = spawn Backfill.start(
       Backfill.Config{
         embedder: embedder,
         interval_ms: BACKFILL_INTERVAL_MS,
+        log: log,
         pool: pool,
       },
     )
@@ -129,13 +138,13 @@ struct App: Process<List<String>, TCPEvent, String>
     )
 
     auth = settings.api_key.some?() ? "required" : "off"
-    tracing = settings.otel_endpoint.or("off")
-    Log.info("remem #{VERSION} listening on http://127.0.0.1:#{settings.port}")
-    Log.info("embedding server: #{settings.embedding_url}")
-    Log.info("api key auth: #{auth}, #{POOL_SIZE} pooled db connections")
-    Log.info("trace export: #{tracing}")
+    tracing = settings.tracing.endpoint.or("off")
+    log.info("remem #{VERSION} listening on http://127.0.0.1:#{settings.port}")
+    log.info("embedding server: #{settings.embedding_url}")
+    log.info("api key auth: #{auth}, #{POOL_SIZE} pooled db connections")
+    log.info("trace export: #{tracing}")
 
-    App{server: server_config(router, tracer)}
+    App{log: log, server: server_config(router, tracer, log)}
   end
 
   fn handle(self, msg: TCPEvent, from: Option<ReplyTo<String>>) -> Step<Self>
@@ -148,7 +157,7 @@ struct App: Process<List<String>, TCPEvent, String>
         Step.Continue(self)
 
       TCPEvent.Error(e) ->
-        Log.error("listener error: " <> e.message())
+        self.log.error("listener error: " <> e.message())
         Step.Done(StopReason.Shutdown)
     end
   end
@@ -157,24 +166,24 @@ struct App: Process<List<String>, TCPEvent, String>
     match signal
       Lifecycle.Interrupt ->
         IO.puts("")
-        Log.info("received SIGINT, shutting down...")
+        self.log.info("received SIGINT, shutting down...")
         Step.Done(StopReason.Normal)
 
       Lifecycle.Reload ->
         Step.Continue(self)
 
       Lifecycle.Shutdown ->
-        Log.info("received SIGTERM, shutting down...")
+        self.log.info("received SIGTERM, shutting down...")
         Step.Done(StopReason.Shutdown)
     end
   end
 
   # Runs pending migrations on a dedicated connection, closed after.
-  priv fn migrate(db_config: DbConfig) ! StopReason
+  priv fn migrate(db_config: DbConfig, log: Logger) ! StopReason
     conn =
       match Connection.connect(db_config)
         Result.Err(e) ->
-          Log.error("migration connect failed: " <> e.message())
+          log.error("migration connect failed: " <> e.message())
           fail StopReason.Shutdown
 
         Result.Ok(connected) ->
@@ -186,10 +195,32 @@ struct App: Process<List<String>, TCPEvent, String>
         _ = migrated.close()
 
       Result.Err(e) ->
-        Log.error("migration failed: " <> e.message())
+        log.error("migration failed: " <> e.message())
         fail StopReason.Shutdown
     end
   end
+end
+
+# Picks the log format from the settings. A `GCP_PROJECT_ID` means
+# the service runs on GKE, where the logging agent reads Cloud
+# Logging JSON. Without one, lines are text for a terminal.
+priv fn build_logger(settings: Config) -> Logger
+  formatter =
+    match settings.gcp
+      Option.Some(gcp) ->
+        GCP.formatter(
+          GCP.Config{
+            project_id: gcp.project_id,
+            service_name: gcp.service_name,
+            service_version: VERSION,
+          },
+        )
+
+      Option.None ->
+        Text.formatter()
+    end
+
+  Logger.new(LogConfig{formatter: formatter, level: settings.log_level})
 end
 
 # Wires the route table and remem's logging and error shape into a
@@ -198,10 +229,14 @@ end
 # header, and the response carries the span's own `traceparent` so a
 # client can find its trace. Rejected requests render the same JSON
 # error body as routed failures, and every dispatched request logs
-# one access line with the trace id in front when tracing is on.
-# Successful health probes are the exception, since they arrive every
-# few seconds and would drown both the log and the trace store.
-priv fn server_config(router: Router, tracer: Tracer) -> TrailConfig
+# one access line with the trace id in front when tracing is on. The
+# line carries the method, path, status, and duration as attributes,
+# which the GCP format folds into `httpRequest`. Successful health
+# probes are the exception, since they arrive every few seconds and
+# would drown both the log and the trace store.
+priv fn server_config(router: Router, tracer: Tracer, log: Logger)
+  -> TrailConfig
+
   handler =
     fn (request: Request) -> Response
       if health_probe?(request)
@@ -223,19 +258,28 @@ priv fn server_config(router: Router, tracer: Tracer) -> TrailConfig
       end
 
       prefix = tracer.enabled?() ? trace_prefix(response) : ""
+      method = request.method.to_string()
+      code = response.status.code
 
-      Log.info(
-        "#{prefix}#{request.method.to_string()} #{request.path} " <>
-          "#{response.status.code} #{Log.elapsed(elapsed)}",
+      log.info(
+        "#{prefix}#{method} #{request.path} #{code} #{Log.elapsed(elapsed)}",
+        [
+          "http.request.method": LogAttribute.from(method),
+          "url.path": LogAttribute.from(request.path),
+          "http.response.status_code": LogAttribute.from(code),
+          "http.server.request.duration": LogAttribute.from(
+            elapsed.to_microseconds(),
+          )
+        ],
       )
     end
 
   on_reject =
     fn (status: Status)
       match status.code
-        400 -> Log.warn("unparseable request 400")
-        413 -> Log.warn("oversized request 413")
-        _ -> Log.warn("rejected request #{status.code}")
+        400 -> log.warn("unparseable request 400")
+        413 -> log.warn("oversized request 413")
+        _ -> log.warn("rejected request #{status.code}")
       end
     end
 

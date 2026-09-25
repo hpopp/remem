@@ -1,0 +1,14 @@
+[project]
+authors = ["Henry Popp <henry@hpopp.dev>"]
+description = "Leveled structured logging for Koja with text and Google Cloud Logging formats"
+koja = "0.19"
+license = "MIT"
+name = "log"
+namespace = "Log"
+version = "0.1.0"
+
+[index]
+categories = ["observability"]
+description = "Leveled structured logging with a text format for development and a Google Cloud Logging JSON format for production"
+keywords = ["logging", "structured", "gcp", "cloud-logging"]
+kind = "library"

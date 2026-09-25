@@ -6,6 +6,7 @@ version = "0.4.0"
 
 [dependencies]
 conn = { path = "lib/conn" }
+log = { path = "lib/log" }
 open_telemetry = { path = "lib/open_telemetry" }
 pooler = { path = "lib/pooler" }
 postgres = { github = "hpopp/postgres-koja", tag = "v0.4.0" }

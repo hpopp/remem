@@ -1,0 +1,136 @@
+alias Process.Step
+alias Process.StopReason
+
+# A fake stdout. `Store` records a line and `Lines` answers with
+# everything stored so far. Formatting runs in the caller, so by the
+# time a log call returns the line is already in the mailbox.
+enum SinkMsg
+  Lines
+  Store(String)
+end
+
+enum SinkReply
+  Stored(List<String>)
+end
+
+struct Sink: Process<Int, SinkMsg, SinkReply>
+  lines: List<String>
+
+  fn start(_config: Int) -> Self ! StopReason
+    lines: List<String> = List.new()
+    Sink{lines: lines}
+  end
+
+  fn handle(self, msg: SinkMsg, from: Option<ReplyTo<SinkReply>>) -> Step<Self>
+    match msg
+      SinkMsg.Store(line) ->
+        self.lines = self.lines.append(line)
+        Step.Continue(self)
+
+      SinkMsg.Lines ->
+        _ = ReplyTo.reply(from, SinkReply.Stored(self.lines))
+        Step.Continue(self)
+    end
+  end
+end
+
+struct LoggerTest
+  priv fn sink -> Ref<SinkMsg, SinkReply>
+    spawn Sink.start(0)
+  end
+
+  priv fn lines(collector: Ref<SinkMsg, SinkReply>)
+    -> List<String> ! Test.Failure
+
+    match collector.call(SinkMsg.Lines, 2000)
+      Result.Ok(SinkReply.Stored(list)) -> list
+      Result.Err(_) -> fail "sink did not answer"
+    end
+  end
+
+  # A logger whose lines are the message and the attributes, with no
+  # timestamp, so a test can compare them whole.
+  priv fn logger(collector: Ref<SinkMsg, SinkReply>, level: Level) -> Logger
+    capturing = fn (line: String) -> () collector.cast(SinkMsg.Store(line)) end
+
+    bare =
+      fn (record: Record) -> String
+        line = "#{record.level.to_string()} #{record.message}"
+
+        for (key, value) in record.attributes
+          line = line <> " #{key}=#{value.to_string()}"
+        end
+
+        line
+      end
+
+    Logger.new(
+      Config{formatter: bare, level: level, sink: Option.Some(capturing)},
+    )
+  end
+
+  test "records below the floor are dropped"
+    collector = sink()
+    log = logger(collector, Level.Warn)
+
+    log.debug("quiet")
+    log.info("quiet")
+    log.warn("loud")
+    log.error("louder")
+
+    assert try lines(collector) == ["WARN loud", "ERROR louder"]
+    collector.kill()
+  end
+
+  test "enabled? reports the floor"
+    log = logger(sink(), Level.Info)
+
+    assert not log.enabled?(Level.Debug)
+    assert log.enabled?(Level.Info)
+    assert log.enabled?(Level.Error)
+  end
+
+  test "the default level is Info"
+    collector = sink()
+
+    capturing = fn (line: String) -> () collector.cast(SinkMsg.Store(line)) end
+
+    log = Logger.new(
+      Config{formatter: Text.formatter(), sink: Option.Some(capturing)},
+    )
+
+    log.debug("quiet")
+    log.info("shown")
+
+    stored = try lines(collector)
+    assert stored.length() == 1
+    collector.kill()
+  end
+
+  test "with binds attributes onto every later record"
+    collector = sink()
+    log = logger(collector, Level.Info).with(["job": "cleaner"])
+
+    log.info("swept", ["deleted": 12])
+
+    assert try lines(collector) == ["INFO swept job=cleaner deleted=12"]
+    collector.kill()
+  end
+
+  test "a call attribute replaces a bound attribute with the same key"
+    collector = sink()
+    log = logger(collector, Level.Info).with(["job": "cleaner"])
+
+    log.info("renamed", ["job": "sweeper"])
+
+    assert try lines(collector) == ["INFO renamed job=sweeper"]
+    collector.kill()
+  end
+
+  test "the default logger writes text at Info"
+    log = Logger.default()
+
+    assert log.enabled?(Level.Info)
+    assert not log.enabled?(Level.Debug)
+  end
+end

@@ -1,0 +1,59 @@
+@doc """
+Why a level name did not parse. Carries the text that was given.
+"""
+enum Level.ParseError
+  Unknown(String)
+end
+
+@doc """
+How serious a record is, from `Debug` up to `Error`. A `Logger` keeps
+records at or above its floor and drops the rest.
+"""
+enum Level
+  Debug
+  Error
+  Info
+  Warn
+
+  @doc """
+  True when this level is as serious as `floor` or more so.
+  """
+  fn at_least?(self, floor: Level) -> Bool
+    self.rank() >= floor.rank()
+  end
+
+  @doc """
+  Reads a level name such as `info` or `WARN`. Surrounding whitespace
+  and letter case do not matter.
+  """
+  fn parse(text: String) -> Level ! Level.ParseError
+    match text.trim().downcase()
+      "debug" -> Level.Debug
+      "error" -> Level.Error
+      "info" -> Level.Info
+      "warn" -> Level.Warn
+      _ -> fail Level.ParseError.Unknown(text)
+    end
+  end
+
+  @doc """
+  The upper case name, as it appears in a text log line.
+  """
+  fn to_string(self) -> String
+    match self
+      Level.Debug -> "DEBUG"
+      Level.Error -> "ERROR"
+      Level.Info -> "INFO"
+      Level.Warn -> "WARN"
+    end
+  end
+
+  priv fn rank(self) -> Int
+    match self
+      Level.Debug -> 0
+      Level.Info -> 1
+      Level.Warn -> 2
+      Level.Error -> 3
+    end
+  end
+end

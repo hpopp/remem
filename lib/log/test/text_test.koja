@@ -1,0 +1,39 @@
+alias Duration.Unit as TimeUnit
+
+# 2026-09-23T20:00:00.123456Z
+priv const TEXT_AT: Int = 1_790_193_600_123_456
+
+struct TextTest
+  priv fn record(level: Level, attributes: Map<String, Attribute>) -> Record
+    Record{
+      attributes: attributes,
+      level: level,
+      message: "swept rows",
+      timestamp: Timestamp.new(TEXT_AT, TimeUnit.Microseconds),
+    }
+  end
+
+  test "render writes the time, the level, and the message"
+    line = Text.render(record(Level.Info, Map.new()))
+
+    assert line == "2026-09-23T20:00:00.123456Z INFO swept rows"
+  end
+
+  test "render appends attributes as key=value"
+    attributes: Map<String, Attribute> = ["deleted": 12]
+    line = Text.render(record(Level.Warn, attributes))
+
+    assert line == "2026-09-23T20:00:00.123456Z WARN swept rows deleted=12"
+  end
+
+  test "render shows every scalar kind"
+    attributes: Map<String, Attribute> = [
+      "name": "cleaner", "ok": true, "ratio": 0.5
+    ]
+    line = Text.render(record(Level.Error, attributes))
+
+    assert line.contains?(" name=cleaner")
+    assert line.contains?(" ok=true")
+    assert line.contains?(" ratio=0.5")
+  end
+end

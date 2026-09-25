@@ -1,3 +1,4 @@
+alias Log.Logger
 alias Pooler.Pool
 alias Postgres.Connection
 alias Process.Step
@@ -21,6 +22,7 @@ priv const SWEEP_CHECKOUT_MS: Int = 1000
 
 struct Cleaner.Config
   interval_ms: Int
+  log: Logger
   pool: Pool<Connection>
 end
 
@@ -33,19 +35,20 @@ sweep in lockstep with the interval.
 """
 struct Cleaner: Process<Cleaner.Config, (), ()>
   interval_ms: Int
+  log: Logger
   pool: Pool<Connection>
 
   fn start(config: Cleaner.Config) -> Self ! StopReason
     me: Ref<(), ()> = Ref.self_ref()
     me.send_after((), Random.int(0, config.interval_ms))
-    Cleaner{interval_ms: config.interval_ms, pool: config.pool}
+    Cleaner{interval_ms: config.interval_ms, log: config.log, pool: config.pool}
   end
 
   fn handle(self, msg: (), from: Option<ReplyTo<()>>) -> Step<Self>
     deleted = self.sweep()
 
     if deleted > 0
-      Log.info("swept #{deleted} search log rows past retention")
+      self.log.info("swept #{deleted} search log rows past retention")
     end
 
     # A full batch means a backlog remains, so come back after a
@@ -70,7 +73,7 @@ struct Cleaner: Process<Cleaner.Config, (), ()>
             count
 
           Result.Err(e) ->
-            Log.warn("search log sweep: " <> e.message())
+            self.log.warn("search log sweep: " <> e.message())
             0
         end
     end

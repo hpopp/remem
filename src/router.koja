@@ -5,6 +5,7 @@ alias HTTP.Method
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
+alias Log.Logger
 alias OpenTelemetry.Attribute
 alias OpenTelemetry.SpanKind
 alias OpenTelemetry.Tracer
@@ -32,13 +33,19 @@ fn build_router(
   embedder: Embedder,
   api_key: Option<String>,
   tracer: Tracer,
+  log: Logger = Logger.default(),
 ) -> Router
 
   trace = Trace{tracer: Option.Some(tracer)}
   entities = EntityController{embedder: embedder, pool: pool, trace: trace}
   relations = RelationController{pool: pool, trace: trace}
-  search = SearchController{embedder: embedder, pool: pool, trace: trace}
-  meta = MetaController{embedder: embedder, pool: pool, trace: trace}
+  search = SearchController{
+    embedder: embedder,
+    log: log,
+    pool: pool,
+    trace: trace,
+  }
+  meta = MetaController{embedder: embedder, log: log, pool: pool, trace: trace}
 
   auth =
     fn (c: Conn) -> Conn

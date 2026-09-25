@@ -26,22 +26,34 @@ port 8081. Schema migrations run at startup.
 
 Environment variables, with defaults that match the compose stack:
 
-| Variable                      | Default                 | Purpose                        |
-| ----------------------------- | ----------------------- | ------------------------------ |
-| `PORT`                        | `8080`                  | HTTP listen port               |
-| `DB_HOST`                     | `127.0.0.1`             | PostgreSQL host                |
-| `DB_PORT`                     | `5435`                  | PostgreSQL port                |
-| `DB_USER`                     | `postgres`              | PostgreSQL user                |
-| `DB_PASSWORD`                 | none                    | PostgreSQL password            |
-| `DB_NAME`                     | `remem`                 | Database name                  |
-| `DB_STATEMENT_CACHE`          | `256`                   | Driver statement cache size    |
-| `EMBEDDING_URL`               | `http://127.0.0.1:8081` | TEI embedding server           |
-| `API_KEY`                     | none                    | When set, require bearer auth  |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | none                    | When set, export traces (OTLP) |
-| `OTEL_SERVICE_NAME`           | `remem`                 | Service name on exported spans |
+| Variable                      | Default                 | Purpose                          |
+| ----------------------------- | ----------------------- | -------------------------------- |
+| `PORT`                        | `8080`                  | HTTP listen port                 |
+| `DB_HOST`                     | `127.0.0.1`             | PostgreSQL host                  |
+| `DB_PORT`                     | `5435`                  | PostgreSQL port                  |
+| `DB_USER`                     | `postgres`              | PostgreSQL user                  |
+| `DB_PASSWORD`                 | none                    | PostgreSQL password              |
+| `DB_NAME`                     | `remem`                 | Database name                    |
+| `DB_STATEMENT_CACHE`          | `256`                   | Driver statement cache size      |
+| `EMBEDDING_URL`               | `http://127.0.0.1:8081` | TEI embedding server             |
+| `API_KEY`                     | none                    | When set, require bearer auth    |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | none                    | When set, export traces (OTLP)   |
+| `OTEL_SERVICE_NAME`           | `remem`                 | Service name on exported spans   |
+| `GCP_PROJECT_ID`              | none                    | When set, log Cloud Logging JSON |
+| `GCP_SERVICE_NAME`            | `remem`                 | Service name on error log lines  |
+| `LOG_LEVEL`                   | `info`                  | Lowest level that is logged      |
 
 When `API_KEY` is set, every route except `GET /health` requires an
 `Authorization: Bearer <key>` header.
+
+When `GCP_PROJECT_ID` is set, every log line is one JSON object in
+the shape Google Cloud Logging reads: `severity`, `message`, and
+`time`, with any other fields under `jsonPayload`. Access lines put
+the method, path, status, and latency in `httpRequest`, and error
+lines carry the Error Reporting `@type` with a `serviceContext` of
+`GCP_SERVICE_NAME` and the running version. Without it, lines are
+text for a terminal. `LOG_LEVEL` accepts `debug`, `info`, `warn`, or
+`error`.
 
 When `OTEL_EXPORTER_OTLP_ENDPOINT` names an OTLP/HTTP collector,
 every request runs in a server span that continues the caller's

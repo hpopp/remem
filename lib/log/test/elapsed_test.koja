@@ -1,0 +1,12 @@
+alias Duration.Unit as TimeUnit
+
+struct ElapsedTest
+  test "elapsed picks the unit from the size"
+    assert elapsed(Duration.new(0, TimeUnit.Nanoseconds)) == "0µs"
+    assert elapsed(Duration.new(452, TimeUnit.Microseconds)) == "452µs"
+    assert elapsed(Duration.new(3_120, TimeUnit.Microseconds)) == "3ms"
+    assert elapsed(Duration.new(999, TimeUnit.Milliseconds)) == "999ms"
+    assert elapsed(Duration.new(1_234, TimeUnit.Milliseconds)) == "1.2s"
+    assert elapsed(Duration.new(75, TimeUnit.Seconds)) == "75.0s"
+  end
+end

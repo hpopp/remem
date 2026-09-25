@@ -1,5 +1,6 @@
 alias HTTP.Headers
 alias JSON.Value as Json
+alias Log.Logger
 alias OpenTelemetry.Attribute
 alias OpenTelemetry.Propagation
 alias OpenTelemetry.SpanContext
@@ -16,8 +17,10 @@ Client for a TEI-protocol embedding server (nomic-embed-text,
 Each request runs in a `Client` span under `trace` and carries the
 span as a `traceparent` header. The default `trace` records nothing.
 Handlers bind the request's trace with `with_trace` before the call.
+Best-effort embedding failures are logged through `log`.
 """
 struct Embedder
+  log: Logger
   trace: Trace = Trace{}
   url: String
 
@@ -187,7 +190,7 @@ fn embed_rows(
 
   match outcome
     Result.Err(e) ->
-      Log.warn("embedding #{entity.name} failed: " <> e.message())
+      embedder.log.warn("embedding #{entity.name} failed: " <> e.message())
       conn
 
     Result.Ok(_) ->

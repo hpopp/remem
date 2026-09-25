@@ -1,3 +1,4 @@
+alias Log.Logger
 alias Postgres.Config as DbConfig
 alias Postgres.Connection
 
@@ -41,7 +42,7 @@ struct McpTest
     conn = try cleanup(conn)
 
     # The embedder is never reached, since no observations are sent.
-    embedder = Embedder{url: "http://127.0.0.1:1"}
+    embedder = Embedder{log: Logger.default(), url: "http://127.0.0.1:1"}
 
     (response, conn) = Mcp.handle(
       create_call(1, "itest-mcp-guard", false),

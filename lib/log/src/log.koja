@@ -1,0 +1,20 @@
+@doc """
+Formats an elapsed time the way `koja test` does. The unit follows
+the size, so `452µs` below one millisecond, `3ms` below one second,
+and `1.2s` from there.
+"""
+fn elapsed(duration: Duration) -> String
+  microseconds = duration.to_microseconds()
+
+  cond
+    microseconds < 1_000 ->
+      "#{microseconds}µs"
+
+    microseconds < 1_000_000 ->
+      "#{duration.to_milliseconds()}ms"
+
+    else ->
+      tenths = duration.to_milliseconds() / 100
+      "#{tenths / 10}.#{tenths % 10}s"
+  end
+end

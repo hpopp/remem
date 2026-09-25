@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `assigned`, and `Router.dispatch_conn`.
 - `design/OBSERVABILITY.md`, the design for runtime-owned trace
   context, logging, and metrics in Koja.
+- Structured logging behind `GCP_PROJECT_ID`. When it is set, every
+  log line is one Cloud Logging JSON object with `severity`,
+  `message`, and `time`. Access lines carry the method, path,
+  status, and latency in `httpRequest`, and error lines carry the
+  Error Reporting `@type` and a `serviceContext` named by
+  `GCP_SERVICE_NAME`. Without it, lines stay text. `LOG_LEVEL` sets
+  the floor.
+- `lib/log`, the logging package behind the above, with a `Logger`
+  value, leveled calls, attribute maps, and text and GCP formatters.
+
+### Changed
+
+- Logging goes through a `Logger` value built at startup and passed
+  to the code that logs, in place of the static `Log` struct.
 
 ### Fixed
 

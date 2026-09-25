@@ -1,0 +1,74 @@
+alias JSON.Value
+
+@doc """
+The scalar types an attribute value can hold.
+"""
+type Scalar = String | Int | Bool | Float
+
+@doc """
+A structured field on a log record. Literals convert on their own
+wherever the compiler knows it wants an `Attribute`, so an attribute
+map reads as a plain map literal.
+
+```
+attrs: Map<String, Attribute> = ["pool": "primary", "size": 10]
+```
+
+A variable does not convert. Wrap it with `Attribute.from`.
+
+```
+["entity": Attribute.from(name)]
+```
+"""
+struct Attribute:
+  StringLiteral, IntLiteral, BoolLiteral, FloatLiteral, JSON.Encoding
+
+  value: Scalar
+
+  @doc """
+  Wraps a runtime value as an attribute.
+  """
+  fn from(value: Scalar) -> Attribute
+    Attribute{value: value}
+  end
+
+  fn from_bool(value: Bool) -> Attribute
+    Attribute{value: value}
+  end
+
+  fn from_float(value: Float) -> Attribute
+    Attribute{value: value}
+  end
+
+  fn from_int(value: Int) -> Attribute
+    Attribute{value: value}
+  end
+
+  fn from_string(value: String) -> Attribute
+    Attribute{value: value}
+  end
+
+  @doc """
+  Encodes the value as the matching JSON scalar.
+  """
+  fn to_json(self) -> Value
+    match self.value
+      s: String -> s.to_json()
+      i: Int -> i.to_json()
+      b: Bool -> b.to_json()
+      f: Float -> f.to_json()
+    end
+  end
+
+  @doc """
+  Renders the value as it appears after `key=` in a text log line.
+  """
+  fn to_string(self) -> String
+    match self.value
+      s: String -> s
+      i: Int -> "#{i}"
+      b: Bool -> b ? "true" : "false"
+      f: Float -> "#{f}"
+    end
+  end
+end

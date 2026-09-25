@@ -1,0 +1,174 @@
+alias JSON.Value
+
+# The `@type` that makes Error Reporting collect a log entry.
+priv const REPORTED_ERROR: String = "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
+
+# The attributes that fold into the `httpRequest` field. The names
+# follow the OpenTelemetry HTTP semantic conventions, except that the
+# duration is an `Int` of microseconds rather than a float of seconds.
+priv const HTTP_DURATION: String = "http.server.request.duration"
+priv const HTTP_METHOD: String = "http.request.method"
+priv const HTTP_STATUS: String = "http.response.status_code"
+priv const URL_PATH: String = "url.path"
+
+priv const MICROSECONDS_PER_SECOND: Int = 1_000_000
+
+@doc """
+What the GCP format needs to know about the service. `service_name`
+and `service_version` become the `serviceContext` on error lines,
+which Error Reporting groups by. `project_id` is kept for the trace
+field once records carry trace ids.
+"""
+struct GCP.Config
+  project_id: String
+  service_name: String
+  service_version: String
+end
+
+@doc """
+The production format for Google Cloud Logging. Each record is one
+JSON object that the GKE logging agent reads as a structured entry.
+
+- `severity`, `message`, and `time` are the fields the agent lifts
+  onto the `LogEntry`.
+- Every other attribute lands at the top level and shows up under
+  `jsonPayload`.
+- The four HTTP attributes named in this file fold into the
+  `httpRequest` field, so Logs Explorer renders access lines as
+  requests with a method, a URL, a status, and a latency.
+- `Error` records carry the Error Reporting `@type` and a
+  `serviceContext`, so they appear in Error Reporting without any
+  stack trace.
+"""
+struct GCP
+  @doc """
+  The GCP format as a `Config.format` closure.
+  """
+  fn formatter(config: GCP.Config) -> fn (Record) -> String
+    render = fn (record: Record) -> String GCP.render(config, record) end
+
+    render
+  end
+
+  @doc """
+  Renders one record as a single line of JSON.
+  """
+  fn render(config: GCP.Config, record: Record) -> String
+    fields: List<(String, Value)> = [
+      ("severity", severity(record.level).to_json()),
+      ("message", record.message.to_json()), ("time", record.time().to_json())
+    ]
+
+    match record.level
+      Level.Error -> fields = fields.concat(error_fields(config))
+      _ -> ()
+    end
+
+    (request, rest) = split_http(record.attributes)
+
+    match request
+      Option.Some(value) -> fields = fields.append(("httpRequest", value))
+      Option.None -> ()
+    end
+
+    for (key, value) in rest
+      fields = fields.append((key, value.to_json()))
+    end
+
+    JSON.encode(Value.Object(fields))
+  end
+
+  # Cloud Logging spells the levels differently from the text format.
+  priv fn severity(level: Level) -> String
+    match level
+      Level.Debug -> "DEBUG"
+      Level.Error -> "ERROR"
+      Level.Info -> "INFO"
+      Level.Warn -> "WARNING"
+    end
+  end
+
+  priv fn error_fields(config: GCP.Config) -> List<(String, Value)>
+    context: Value = [
+      "service": config.service_name.to_json(),
+      "version": config.service_version.to_json()
+    ]
+
+    [("@type", REPORTED_ERROR.to_json()), ("serviceContext", context)]
+  end
+
+  # Pulls the HTTP attributes out of `attributes` into an
+  # `httpRequest` object and returns what is left. `None` when the
+  # record has none of them.
+  priv fn split_http(attributes: Map<String, Attribute>)
+    -> (Option<Value>, Map<String, Attribute>)
+
+    request: List<(String, Value)> = List.new()
+    rest = attributes
+
+    match attributes.get(HTTP_METHOD)
+      Option.Some(method) ->
+        request = request.append(("requestMethod", method.to_json()))
+        rest = rest.remove(HTTP_METHOD)
+
+      Option.None ->
+        ()
+    end
+
+    match attributes.get(URL_PATH)
+      Option.Some(path) ->
+        request = request.append(("requestUrl", path.to_json()))
+        rest = rest.remove(URL_PATH)
+
+      Option.None ->
+        ()
+    end
+
+    match attributes.get(HTTP_STATUS)
+      Option.Some(status) ->
+        request = request.append(("status", status.to_json()))
+        rest = rest.remove(HTTP_STATUS)
+
+      Option.None ->
+        ()
+    end
+
+    match attributes.get(HTTP_DURATION)
+      Option.Some(duration) ->
+        request = request.append(("latency", latency(duration)))
+        rest = rest.remove(HTTP_DURATION)
+
+      Option.None ->
+        ()
+    end
+
+    request.empty?()
+      ? (Option.None, rest)
+      : (Option.Some(Value.Object(request)), rest)
+  end
+
+  # Cloud Logging wants a latency as a protobuf `Duration` string,
+  # decimal seconds with an `s` suffix. An attribute that is not an
+  # integer count of microseconds passes through as given.
+  priv fn latency(duration: Attribute) -> Value
+    match duration.value
+      micros: Int ->
+        seconds = micros / MICROSECONDS_PER_SECOND
+        fraction = pad_six(micros % MICROSECONDS_PER_SECOND)
+        "#{seconds}.#{fraction}s".to_json()
+
+      _ ->
+        duration.to_json()
+    end
+  end
+
+  priv fn pad_six(value: Int) -> String
+    digits = "#{value}"
+
+    while digits.length() < 6
+      digits = "0" <> digits
+    end
+
+    digits
+  end
+end

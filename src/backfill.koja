@@ -1,3 +1,4 @@
+alias Log.Logger
 alias Pooler.Pool
 alias Postgres.Connection
 alias Process.Step
@@ -18,6 +19,7 @@ priv const BACKFILL_CHECKOUT_MS: Int = 1000
 struct Backfill.Config
   embedder: Embedder
   interval_ms: Int
+  log: Logger
   pool: Pool<Connection>
 end
 
@@ -34,6 +36,7 @@ the whole interval.
 struct Backfill: Process<Backfill.Config, (), ()>
   embedder: Embedder
   interval_ms: Int
+  log: Logger
   pool: Pool<Connection>
 
   fn start(config: Backfill.Config) -> Self ! StopReason
@@ -42,6 +45,7 @@ struct Backfill: Process<Backfill.Config, (), ()>
     Backfill{
       embedder: config.embedder,
       interval_ms: config.interval_ms,
+      log: config.log,
       pool: config.pool,
     }
   end
@@ -50,7 +54,7 @@ struct Backfill: Process<Backfill.Config, (), ()>
     embedded = self.pass()
 
     if embedded > 0
-      Log.info("embedded #{embedded} observations")
+      self.log.info("embedded #{embedded} observations")
     end
 
     delay = embedded >= BACKFILL_BATCH ? BACKFILL_DRAIN_MS : self.interval_ms
@@ -67,20 +71,22 @@ struct Backfill: Process<Backfill.Config, (), ()>
         0
 
       Result.Ok(db) ->
-        (db, count) = embed_pending(db, self.embedder)
+        (db, count) = embed_pending(db, self.embedder, self.log)
         self.pool.checkin(db)
         count
     end
   end
 end
 
-priv fn embed_pending(db: Connection, embedder: Embedder) -> (Connection, Int)
+priv fn embed_pending(db: Connection, embedder: Embedder, log: Logger)
+  -> (Connection, Int)
+
   (db, pending) = EntityStore.unembedded(db, BACKFILL_BATCH)
 
   rows =
     match pending
       Result.Err(e) ->
-        Log.warn("embedding backfill: " <> e.message())
+        log.warn("embedding backfill: " <> e.message())
         return (db, 0)
 
       Result.Ok(list) ->
@@ -98,7 +104,7 @@ priv fn embed_pending(db: Connection, embedder: Embedder) -> (Connection, Int)
 
   match outcome
     Result.Err(e) ->
-      Log.warn("embedding backfill: " <> e.message())
+      log.warn("embedding backfill: " <> e.message())
       (db, 0)
 
     Result.Ok(count) ->

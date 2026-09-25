@@ -1,0 +1,130 @@
+@doc """
+Settings for a `Logger`. `formatter` turns each record into one
+line. `level` is the floor, and records below it are dropped before
+they are formatted. `sink` receives each formatted line. When it is
+`None`, lines go to stdout.
+
+The package reads no environment variables. The application decides
+the level and the format and passes them in.
+"""
+struct Config
+  formatter: fn (Record) -> String
+  level: Level = Level.Info
+  sink: Option<fn (String) -> ()> = Option.None
+end
+
+@doc """
+A value that writes log records. Build one at boot and pass it to
+the code that logs. `with` binds attributes that every later record
+carries, so a logger handed into a request or a job names it on
+every line without the callee knowing.
+
+```
+log = Logger.new(Config{formatter: GCP.formatter(gcp)})
+job = log.with(["job": "backfill"])
+job.info("embedded observations", ["count": Attribute.from(n)])
+```
+
+Formatting and the sink call run in the caller. A stdout write is
+one syscall and belongs on the request path.
+"""
+struct Logger
+  attributes: Map<String, Attribute>
+  formatter: fn (Record) -> String
+  level: Level
+  sink: fn (String) -> ()
+
+  @doc """
+  Builds a logger from `config` with no bound attributes.
+  """
+  fn new(config: Config) -> Logger
+    sink =
+      match config.sink
+        Option.Some(write) ->
+          write
+
+        Option.None ->
+          fn (line: String) -> () IO.puts(line) end
+      end
+
+    Logger{
+      attributes: Map.new(),
+      formatter: config.formatter,
+      level: config.level,
+      sink: sink,
+    }
+  end
+
+  @doc """
+  A logger that writes text lines at `Info` and above to stdout.
+  """
+  fn default -> Logger
+    Logger.new(Config{formatter: Text.formatter()})
+  end
+
+  @doc """
+  True when a record at `level` would be written.
+  """
+  fn enabled?(self, level: Level) -> Bool
+    level.at_least?(self.level)
+  end
+
+  @doc """
+  A copy of this logger whose records also carry `attributes`. A
+  key already bound is replaced.
+  """
+  fn with(self, attributes: Map<String, Attribute>) -> Logger
+    self.attributes = merge(self.attributes, attributes)
+    self
+  end
+
+  fn debug(self, message: String, attributes: Map<String, Attribute> = [:])
+    self.emit(Level.Debug, message, attributes)
+  end
+
+  fn error(self, message: String, attributes: Map<String, Attribute> = [:])
+    self.emit(Level.Error, message, attributes)
+  end
+
+  fn info(self, message: String, attributes: Map<String, Attribute> = [:])
+    self.emit(Level.Info, message, attributes)
+  end
+
+  fn warn(self, message: String, attributes: Map<String, Attribute> = [:])
+    self.emit(Level.Warn, message, attributes)
+  end
+
+  priv fn emit(
+    self,
+    level: Level,
+    message: String,
+    attributes: Map<String, Attribute>,
+  )
+
+    if not self.enabled?(level)
+      return
+    end
+
+    record = Record{
+      attributes: merge(self.attributes, attributes),
+      level: level,
+      message: message,
+      timestamp: Timestamp.now(),
+    }
+
+    self.sink(self.formatter(record))
+  end
+end
+
+# `over` wins where both maps hold a key.
+priv fn merge(base: Map<String, Attribute>, over: Map<String, Attribute>)
+  -> Map<String, Attribute>
+
+  merged = base
+
+  for (key, value) in over
+    merged = merged.put(key, value)
+  end
+
+  merged
+end

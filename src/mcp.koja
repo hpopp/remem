@@ -2,6 +2,7 @@ alias HTTP.Headers
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
+alias Log.Logger
 alias OpenTelemetry.Attribute
 alias OpenTelemetry.SpanKind
 alias Postgres.Connection
@@ -24,13 +25,15 @@ agents to search before writing and to keep the graph curated.
 struct Mcp
   @doc """
   Handles one JSON-RPC message. Notifications get 202 with no body.
-  A `tools/call` runs in its own span under `trace`.
+  A `tools/call` runs in its own span under `trace` and logs through
+  `log`, which defaults to text on stdout so tests need not build one.
   """
   fn handle(
     body: String,
     conn: Connection,
     embedder: Embedder,
     trace: Trace = Trace{},
+    log: Logger = Logger.default(),
   ) -> (Response, Connection)
 
     root =
@@ -54,7 +57,7 @@ struct Mcp
       "initialize" -> (rpc_result(id, initialize_result()), conn)
       "ping" -> (rpc_result(id, empty_object()), conn)
       "tools/list" -> (rpc_result(id, tools_result()), conn)
-      "tools/call" -> call_tool(root, id, conn, embedder, trace)
+      "tools/call" -> call_tool(root, id, conn, embedder, trace, log)
       _ -> (rpc_error(id, -32601, "no such method #{method}"), conn)
     end
   end
@@ -237,6 +240,7 @@ struct Mcp
     conn: Connection,
     embedder: Embedder,
     trace: Trace,
+    log: Logger,
   ) -> (Response, Connection)
 
     params = JsonUtil.get(root, "params").or(Json.Null)
@@ -244,7 +248,7 @@ struct Mcp
     arguments = JsonUtil.get(params, "arguments").or(Json.Null)
 
     # The access log only shows POST /mcp, so name the tool here.
-    Log.info("mcp tools/call #{name}")
+    log.info("mcp tools/call #{name}")
 
     attributes: Map<String, Attribute> = ["mcp.tool": Attribute.from(name)]
 
@@ -258,6 +262,7 @@ struct Mcp
         id,
         conn,
         embedder.with_trace(trace.under(ctx)),
+        log,
       ),
     )
   end
@@ -268,41 +273,42 @@ struct Mcp
     id: Json,
     conn: Connection,
     embedder: Embedder,
+    log: Logger,
   ) -> (Response, Connection)
 
     match name
       "search_memory" ->
-        tool_search(arguments, id, conn, embedder)
+        tool_search(arguments, id, conn, embedder, log)
 
       "get_entity" ->
-        tool_get_entity(arguments, id, conn)
+        tool_get_entity(arguments, id, conn, log)
 
       "create_entity" ->
-        tool_create_entity(arguments, id, conn, embedder)
+        tool_create_entity(arguments, id, conn, embedder, log)
 
       "rename_entity" ->
-        tool_rename_entity(arguments, id, conn)
+        tool_rename_entity(arguments, id, conn, log)
 
       "merge_entities" ->
-        tool_merge_entities(arguments, id, conn)
+        tool_merge_entities(arguments, id, conn, log)
 
       "list_entities" ->
-        tool_list_entities(arguments, id, conn)
+        tool_list_entities(arguments, id, conn, log)
 
       "delete_entity" ->
-        tool_delete_entity(arguments, id, conn)
+        tool_delete_entity(arguments, id, conn, log)
 
       "add_observations" ->
-        tool_add_observations(arguments, id, conn, embedder)
+        tool_add_observations(arguments, id, conn, embedder, log)
 
       "remove_observations" ->
-        tool_remove_observations(arguments, id, conn)
+        tool_remove_observations(arguments, id, conn, log)
 
       "create_relation" ->
-        tool_create_relation(arguments, id, conn)
+        tool_create_relation(arguments, id, conn, log)
 
       "delete_relation" ->
-        tool_delete_relation(arguments, id, conn)
+        tool_delete_relation(arguments, id, conn, log)
 
       _ ->
         (rpc_error(id, -32602, "no such tool #{name}"), conn)
@@ -314,19 +320,20 @@ struct Mcp
     id: Json,
     conn: Connection,
     embedder: Embedder,
+    log: Logger,
   ) -> (Response, Connection)
 
     query =
       match JsonUtil.get_string(arguments, "query")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "query is required"), conn)
+        _ -> return (tool_err(log, id, "query is required"), conn)
       end
 
     limit = JsonUtil.get_int(arguments, "limit").or(MCP_DEFAULT_SEARCH_LIMIT)
 
     if limit < 1 or limit > MCP_MAX_SEARCH_LIMIT
       return (
-        tool_err(id, "limit must be between 1 and #{MCP_MAX_SEARCH_LIMIT}"),
+        tool_err(log, id, "limit must be between 1 and #{MCP_MAX_SEARCH_LIMIT}"),
         conn
       )
     end
@@ -335,7 +342,7 @@ struct Mcp
     (conn, logged) = SearchLog.record(conn, query)
 
     match logged
-      Result.Err(e) -> Log.warn("search log: " <> e.message())
+      Result.Err(e) -> log.warn("search log: " <> e.message())
       Result.Ok(_) -> ()
     end
 
@@ -346,7 +353,7 @@ struct Mcp
           Option.Some(vector)
 
         Result.Err(e) ->
-          Log.warn("search falls back to fuzzy ranking only: " <> e.message())
+          log.warn("search falls back to fuzzy ranking only: " <> e.message())
           Option.None
       end
 
@@ -354,7 +361,7 @@ struct Mcp
 
     match found
       Result.Err(e) ->
-        (tool_err(id, e.message()), conn)
+        (tool_err(log, id, e.message()), conn)
 
       Result.Ok(results) ->
         payload: Json = [
@@ -365,26 +372,31 @@ struct Mcp
     end
   end
 
-  priv fn tool_get_entity(arguments: Json, id: Json, conn: Connection)
-    -> (Response, Connection)
+  priv fn tool_get_entity(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    log: Logger,
+  ) -> (Response, Connection)
 
     name =
       match JsonUtil.get_string(arguments, "name")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "name is required"), conn)
+        _ -> return (tool_err(log, id, "name is required"), conn)
       end
 
     (conn, found) = EntityStore.find(conn, name)
 
     maybe =
       match found
-        Result.Err(e) -> return (tool_err(id, e.message()), conn)
+        Result.Err(e) -> return (tool_err(log, id, e.message()), conn)
         Result.Ok(m) -> m
       end
 
     entity =
       match maybe
-        Option.None -> return (tool_err(id, "no entity named #{name}"), conn)
+        Option.None ->
+          return (tool_err(log, id, "no entity named #{name}"), conn)
         Option.Some(present) -> present
       end
 
@@ -392,7 +404,7 @@ struct Mcp
 
     match relations
       Result.Err(e) ->
-        (tool_err(id, e.message()), conn)
+        (tool_err(log, id, e.message()), conn)
 
       Result.Ok(relation_list) ->
         payload: Json = [
@@ -408,18 +420,19 @@ struct Mcp
     id: Json,
     conn: Connection,
     embedder: Embedder,
+    log: Logger,
   ) -> (Response, Connection)
 
     name =
       match JsonUtil.get_string(arguments, "name")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "name is required"), conn)
+        _ -> return (tool_err(log, id, "name is required"), conn)
       end
 
     kind =
       match JsonUtil.get_string(arguments, "type")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "type is required"), conn)
+        _ -> return (tool_err(log, id, "type is required"), conn)
       end
 
     observations = JsonUtil.distinct(
@@ -438,7 +451,7 @@ struct Mcp
 
     match created
       Result.Err(e) ->
-        (tool_err(id, e.message()), conn)
+        (tool_err(log, id, e.message()), conn)
 
       Result.Ok(pair) ->
         (entity, rows) = pair
@@ -447,79 +460,91 @@ struct Mcp
     end
   end
 
-  priv fn tool_rename_entity(arguments: Json, id: Json, conn: Connection)
-    -> (Response, Connection)
+  priv fn tool_rename_entity(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    log: Logger,
+  ) -> (Response, Connection)
 
     name =
       match JsonUtil.get_string(arguments, "name")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "name is required"), conn)
+        _ -> return (tool_err(log, id, "name is required"), conn)
       end
 
     new_name =
       match JsonUtil.get_string(arguments, "new_name")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "new_name is required"), conn)
+        _ -> return (tool_err(log, id, "new_name is required"), conn)
       end
 
     (conn, renamed) = EntityStore.rename(conn, name, new_name)
 
     match renamed
       Result.Err(e) ->
-        (tool_err(id, e.message()), conn)
+        (tool_err(log, id, e.message()), conn)
 
       Result.Ok(maybe) ->
         match maybe
-          Option.None -> (tool_err(id, "no entity named #{name}"), conn)
+          Option.None -> (tool_err(log, id, "no entity named #{name}"), conn)
           Option.Some(entity) -> (tool_ok(id, entity.to_json()), conn)
         end
     end
   end
 
-  priv fn tool_merge_entities(arguments: Json, id: Json, conn: Connection)
-    -> (Response, Connection)
+  priv fn tool_merge_entities(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    log: Logger,
+  ) -> (Response, Connection)
 
     source =
       match JsonUtil.get_string(arguments, "source")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "source is required"), conn)
+        _ -> return (tool_err(log, id, "source is required"), conn)
       end
 
     into =
       match JsonUtil.get_string(arguments, "into")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "into is required"), conn)
+        _ -> return (tool_err(log, id, "into is required"), conn)
       end
 
     (conn, merged) = EntityStore.merge(conn, source, into)
 
     match merged
-      Result.Err(e) -> (tool_err(id, e.message()), conn)
+      Result.Err(e) -> (tool_err(log, id, e.message()), conn)
       Result.Ok(entity) -> (tool_ok(id, entity.to_json()), conn)
     end
   end
 
-  priv fn tool_list_entities(arguments: Json, id: Json, conn: Connection)
-    -> (Response, Connection)
+  priv fn tool_list_entities(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    log: Logger,
+  ) -> (Response, Connection)
 
     limit = JsonUtil.get_int(arguments, "limit").or(DEFAULT_PAGE_LIMIT)
     offset = JsonUtil.get_int(arguments, "offset").or(0)
 
     if limit < 1 or limit > MAX_PAGE_LIMIT
       return (
-        tool_err(id, "limit must be between 1 and #{MAX_PAGE_LIMIT}"), conn
+        tool_err(log, id, "limit must be between 1 and #{MAX_PAGE_LIMIT}"), conn
       )
     end
 
     if offset < 0
-      return (tool_err(id, "offset must not be negative"), conn)
+      return (tool_err(log, id, "offset must not be negative"), conn)
     end
 
     (conn, listed) = EntityStore.summaries(conn, limit, offset)
 
     match listed
       Result.Err(e) ->
-        (tool_err(id, e.message()), conn)
+        (tool_err(log, id, e.message()), conn)
 
       Result.Ok(summaries) ->
         payload: Json = [
@@ -529,23 +554,27 @@ struct Mcp
     end
   end
 
-  priv fn tool_delete_entity(arguments: Json, id: Json, conn: Connection)
-    -> (Response, Connection)
+  priv fn tool_delete_entity(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    log: Logger,
+  ) -> (Response, Connection)
 
     name =
       match JsonUtil.get_string(arguments, "name")
         Option.Some(text) when not text.empty?() -> text
-        _ -> return (tool_err(id, "name is required"), conn)
+        _ -> return (tool_err(log, id, "name is required"), conn)
       end
 
     (conn, removed) = EntityStore.remove(conn, name)
 
     match removed
-      Result.Err(e) -> (tool_err(id, e.message()), conn)
+      Result.Err(e) -> (tool_err(log, id, e.message()), conn)
       Result.Ok(deleted) ->
         deleted
           ? (tool_text(id, "deleted #{name}"), conn)
-          : (tool_err(id, "no entity named #{name}"), conn)
+          : (tool_err(log, id, "no entity named #{name}"), conn)
     end
   end
 
@@ -554,25 +583,26 @@ struct Mcp
     id: Json,
     conn: Connection,
     embedder: Embedder,
+    log: Logger,
   ) -> (Response, Connection)
 
     (name, observations) =
       match observation_args(arguments)
         Result.Ok(parsed) -> parsed
-        Result.Err(message) -> return (tool_err(id, message), conn)
+        Result.Err(message) -> return (tool_err(log, id, message), conn)
       end
 
     (conn, updated) = EntityStore.add_observations(conn, name, observations)
 
     maybe =
       match updated
-        Result.Err(e) -> return (tool_err(id, e.message()), conn)
+        Result.Err(e) -> return (tool_err(log, id, e.message()), conn)
         Result.Ok(m) -> m
       end
 
     match maybe
       Option.None ->
-        (tool_err(id, "no entity named #{name}"), conn)
+        (tool_err(log, id, "no entity named #{name}"), conn)
 
       Option.Some(pair) ->
         (entity, rows) = pair
@@ -581,25 +611,29 @@ struct Mcp
     end
   end
 
-  priv fn tool_remove_observations(arguments: Json, id: Json, conn: Connection)
-    -> (Response, Connection)
+  priv fn tool_remove_observations(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    log: Logger,
+  ) -> (Response, Connection)
 
     (name, observations) =
       match observation_args(arguments)
         Result.Ok(parsed) -> parsed
-        Result.Err(message) -> return (tool_err(id, message), conn)
+        Result.Err(message) -> return (tool_err(log, id, message), conn)
       end
 
     (conn, updated) = EntityStore.remove_observations(conn, name, observations)
 
     maybe =
       match updated
-        Result.Err(e) -> return (tool_err(id, e.message()), conn)
+        Result.Err(e) -> return (tool_err(log, id, e.message()), conn)
         Result.Ok(m) -> m
       end
 
     match maybe
-      Option.None -> (tool_err(id, "no entity named #{name}"), conn)
+      Option.None -> (tool_err(log, id, "no entity named #{name}"), conn)
       Option.Some(entity) -> (tool_ok(id, entity.to_json()), conn)
     end
   end
@@ -622,40 +656,48 @@ struct Mcp
     Result.Ok((name, observations))
   end
 
-  priv fn tool_create_relation(arguments: Json, id: Json, conn: Connection)
-    -> (Response, Connection)
+  priv fn tool_create_relation(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    log: Logger,
+  ) -> (Response, Connection)
 
     (from, to, kind) =
       match relation_args(arguments)
         Result.Ok(parsed) -> parsed
-        Result.Err(message) -> return (tool_err(id, message), conn)
+        Result.Err(message) -> return (tool_err(log, id, message), conn)
       end
 
     (conn, created) = RelationStore.create(conn, from, to, kind)
 
     match created
-      Result.Err(e) -> (tool_err(id, e.message()), conn)
+      Result.Err(e) -> (tool_err(log, id, e.message()), conn)
       Result.Ok(relation) -> (tool_ok(id, relation.to_json()), conn)
     end
   end
 
-  priv fn tool_delete_relation(arguments: Json, id: Json, conn: Connection)
-    -> (Response, Connection)
+  priv fn tool_delete_relation(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    log: Logger,
+  ) -> (Response, Connection)
 
     (from, to, kind) =
       match relation_args(arguments)
         Result.Ok(parsed) -> parsed
-        Result.Err(message) -> return (tool_err(id, message), conn)
+        Result.Err(message) -> return (tool_err(log, id, message), conn)
       end
 
     (conn, removed) = RelationStore.remove(conn, from, to, kind)
 
     match removed
-      Result.Err(e) -> (tool_err(id, e.message()), conn)
+      Result.Err(e) -> (tool_err(log, id, e.message()), conn)
       Result.Ok(deleted) ->
         deleted
           ? (tool_text(id, "deleted #{from} -[#{kind}]-> #{to}"), conn)
-          : (tool_err(id, "no relation #{from} -[#{kind}]-> #{to}"), conn)
+          : (tool_err(log, id, "no relation #{from} -[#{kind}]-> #{to}"), conn)
     end
   end
 
@@ -710,8 +752,8 @@ struct Mcp
     rpc_result(id, tool_result(text, false))
   end
 
-  priv fn tool_err(id: Json, message: String) -> Response
-    Log.warn("mcp tool error: " <> message)
+  priv fn tool_err(log: Logger, id: Json, message: String) -> Response
+    log.warn("mcp tool error: " <> message)
     rpc_result(id, tool_result(message, true))
   end
 

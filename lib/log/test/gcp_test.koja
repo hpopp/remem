@@ -1,0 +1,115 @@
+alias Duration.Unit as TimeUnit
+alias JSON.Value
+alias Test.require
+
+# 2026-09-23T20:00:00.123456Z
+priv const GCP_AT: Int = 1_790_193_600_123_456
+
+struct GCPTest
+  priv fn config -> GCP.Config
+    GCP.Config{
+      project_id: "example-project",
+      service_name: "remem",
+      service_version: "0.5.0",
+    }
+  end
+
+  priv fn record(level: Level, attributes: Map<String, Attribute>) -> Record
+    Record{
+      attributes: attributes,
+      level: level,
+      message: "GET /entities 200 12ms",
+      timestamp: Timestamp.new(GCP_AT, TimeUnit.Microseconds),
+    }
+  end
+
+  priv fn field(object: Value, key: String) -> Option<Value>
+    match object
+      Value.Object(entries) ->
+        for (name, value) in entries
+          if name == key
+            return Option.Some(value)
+          end
+        end
+
+        Option.None
+
+      _ ->
+        Option.None
+    end
+  end
+
+  priv fn render(level: Level, attributes: Map<String, Attribute>)
+    -> Value ! String
+
+    try JSON.decode(GCP.render(config(), record(level, attributes)))
+  end
+
+  test "render writes the Cloud Logging special fields"
+    object = try require(render(Level.Info, Map.new()))
+
+    assert field(object, "severity") == Option.Some(Value.String("INFO"))
+    assert field(object, "message") ==
+      Option.Some(Value.String("GET /entities 200 12ms"))
+    assert field(object, "time") ==
+      Option.Some(Value.String("2026-09-23T20:00:00.123456Z"))
+    assert field(object, "httpRequest") == Option.None
+    assert field(object, "@type") == Option.None
+    assert field(object, "serviceContext") == Option.None
+  end
+
+  test "render spells warn as WARNING"
+    object = try require(render(Level.Warn, Map.new()))
+
+    assert field(object, "severity") == Option.Some(Value.String("WARNING"))
+  end
+
+  test "render places other attributes at the top level"
+    attributes: Map<String, Attribute> = ["mcp.tool": "search_memory", "n": 3]
+    object = try require(render(Level.Info, attributes))
+
+    assert field(object, "mcp.tool") ==
+      Option.Some(Value.String("search_memory"))
+    assert field(object, "n") == Option.Some(Value.Int(3))
+  end
+
+  test "render folds the HTTP attributes into httpRequest"
+    attributes: Map<String, Attribute> = [
+      "http.request.method": "GET", "url.path": "/entities",
+      "http.response.status_code": 200, "http.server.request.duration": 12_345
+    ]
+    object = try require(render(Level.Info, attributes))
+    request = field(object, "httpRequest").or(Value.Null)
+
+    assert field(request, "requestMethod") == Option.Some(Value.String("GET"))
+    assert field(request, "requestUrl") ==
+      Option.Some(Value.String("/entities"))
+    assert field(request, "status") == Option.Some(Value.Int(200))
+    assert field(request, "latency") == Option.Some(Value.String("0.012345s"))
+    assert field(object, "http.request.method") == Option.None
+    assert field(object, "url.path") == Option.None
+    assert field(object, "http.response.status_code") == Option.None
+    assert field(object, "http.server.request.duration") == Option.None
+  end
+
+  test "render writes a latency above one second"
+    attributes: Map<String, Attribute> = [
+      "http.server.request.duration": 2_500_000
+    ]
+    object = try require(render(Level.Info, attributes))
+    request = field(object, "httpRequest").or(Value.Null)
+
+    assert field(request, "latency") == Option.Some(Value.String("2.500000s"))
+  end
+
+  test "render marks an error for Error Reporting"
+    object = try require(render(Level.Error, Map.new()))
+    context = field(object, "serviceContext").or(Value.Null)
+
+    assert field(object, "severity") == Option.Some(Value.String("ERROR"))
+    assert field(object, "@type") ==
+      Option.Some(Value.String("type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"))
+    assert field(context, "service") == Option.Some(Value.String("remem"))
+    assert field(context, "version") == Option.Some(Value.String("0.5.0"))
+  end
+end

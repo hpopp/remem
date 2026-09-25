@@ -2,6 +2,7 @@ alias Conn.Conn
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
+alias Log.Logger
 alias Pooler.Pool
 alias Postgres.Connection
 
@@ -11,6 +12,7 @@ JSON-RPC endpoint.
 """
 struct MetaController
   embedder: Embedder
+  log: Logger
   pool: Pool<Connection>
   trace: Trace
 
@@ -59,10 +61,11 @@ struct MetaController
     trace = self.trace.at(c)
     embedder = self.embedder.with_trace(trace)
     body = c.body
+    log = self.log
     response = try with_db(
       self.pool,
       trace,
-      db -> mcp_db(db, embedder, body, trace),
+      db -> mcp_db(db, embedder, body, trace, log),
     )
     Render.http(c, response)
   end
@@ -100,9 +103,14 @@ end
 
 # Runs one MCP message. `Mcp.handle` renders JSON-RPC level errors
 # itself, so the outcome only fails when the pool does.
-priv fn mcp_db(db: Connection, embedder: Embedder, body: String, trace: Trace)
-  -> (Connection, Result<Response, Error>)
+priv fn mcp_db(
+  db: Connection,
+  embedder: Embedder,
+  body: String,
+  trace: Trace,
+  log: Logger,
+) -> (Connection, Result<Response, Error>)
 
-  (response, db) = Mcp.handle(body, db, embedder, trace)
+  (response, db) = Mcp.handle(body, db, embedder, trace, log)
   (db, Result.Ok(response))
 end

@@ -8,17 +8,18 @@ name. `kind` serializes as `type` in the API, since `type` is a Koja
 keyword.
 """
 struct Relation: JSON.Encoding
-  created_at: String
+  created_at: DateTime
   from: String
   kind: String
   to: String
-  updated_at: String
+  updated_at: DateTime
 
   fn to_json(self) -> JSON.Value
     [
       "from": self.from.to_json(), "to": self.to.to_json(),
-      "type": self.kind.to_json(), "created_at": self.created_at.to_json(),
-      "updated_at": self.updated_at.to_json()
+      "type": self.kind.to_json(),
+      "created_at": self.created_at.to_string().to_json(),
+      "updated_at": self.updated_at.to_string().to_json()
     ]
   end
 end
@@ -46,27 +47,17 @@ struct RelationStore
       RETURNING created_at::text, updated_at::text
       """, [Value.string(from), Value.string(to), Value.string(kind)])
 
-    match outcome
+    match inserted_relation(outcome, from, to, kind)
       Result.Err(e) ->
-        (conn, Result.Err(Error.Database(e.message())))
+        (conn, Result.Err(e))
 
-      Result.Ok(qr) ->
-        match qr.rows.get(0)
-          Option.Some(row) ->
-            relation = Relation{
-              created_at: row.get(0).map(v -> v.string_or("")).or(""),
-              from: from,
-              kind: kind,
-              to: to,
-              updated_at: row.get(1).map(v -> v.string_or("")).or(""),
-            }
-            (conn, Result.Ok(relation))
+      Result.Ok(Option.Some(relation)) ->
+        (conn, Result.Ok(relation))
 
-          Option.None ->
-            # No row: either an entity is missing (nothing selected)
-            # or the relation already exists (conflict skipped).
-            explain_conflict(conn, from, to, kind)
-        end
+      Result.Ok(Option.None) ->
+        # No row means either an entity is missing (nothing selected)
+        # or the relation already exists (conflict skipped).
+        explain_conflict(conn, from, to, kind)
     end
   end
 
@@ -83,10 +74,7 @@ struct RelationStore
         AND f.name = $1 AND t.name = $2 AND r.type = $3
       """, [Value.string(from), Value.string(to), Value.string(kind)])
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) -> (conn, Result.Ok(qr.tag != "DELETE 0"))
-    end
+    (conn, changed(outcome))
   end
 
   @doc """
@@ -94,7 +82,7 @@ struct RelationStore
   """
   fn all(conn: Connection) -> (Connection, Result<List<Relation>, Error>)
     (conn, outcome) = conn.query(select_sql() <> " ORDER BY r.id")
-    collect(conn, outcome)
+    (conn, relations_from(outcome))
   end
 
   @doc """
@@ -108,7 +96,7 @@ struct RelationStore
       [Value.string(name)],
     )
 
-    collect(conn, outcome)
+    (conn, relations_from(outcome))
   end
 
   # Distinguishes the two silent outcomes of `create`: a missing
@@ -125,56 +113,80 @@ struct RelationStore
       [Value.string(from), Value.string(to)],
     )
 
-    match outcome
-      Result.Err(e) ->
-        (conn, Result.Err(Error.Database(e.message())))
-
-      Result.Ok(qr) ->
-        found = qr.rows.get(0)
-          .map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
-          .or(0)
-
-        # Same-name self relations select one entity row, not two.
-        expected = from == to ? 1 : 2
-
-        if found < expected
-          (
-            conn,
-            Result.Err(Error.NotFound("both entities must exist: #{from}, #{to}"))
-          )
-        else
-          (
-            conn,
-            Result.Err(Error.Duplicate("relation #{from} -[#{kind}]-> #{to} already exists"))
-          )
-        end
-    end
+    (conn, conflict(outcome, from, to, kind))
   end
 
-  priv fn collect(
-    conn: Connection,
+  # Always fails. `NotFound` when fewer entities exist than the
+  # relation names, otherwise `Duplicate`.
+  priv fn conflict(
     outcome: Result<QueryResult, Postgres.Error>,
-  ) -> (Connection, Result<List<Relation>, Error>)
+    from: String,
+    to: String,
+    kind: String,
+  ) -> Relation ! Error
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) ->
-        (conn, Result.Ok(qr.rows.map(row -> row_to_relation(row))))
+    qr = try db_result(outcome)
+    found = qr.rows.get(0).map(row -> int_at(row, 0)).or(0)
+
+    # Same-name self relations select one entity row, not two.
+    expected = from == to ? 1 : 2
+
+    if found < expected
+      fail Error.NotFound("both entities must exist: #{from}, #{to}")
+    end
+
+    fail Error.Duplicate("relation #{from} -[#{kind}]-> #{to} already exists")
+  end
+
+  # Row mapping can fail on an unreadable timestamp, so this loops
+  # with `try` instead of mapping.
+  priv fn relations_from(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<Relation> ! Error
+
+    qr = try db_result(outcome)
+    relations: List<Relation> = List.new()
+
+    for row in qr.rows
+      relations = relations.append(try row_to_relation(row))
+    end
+
+    relations
+  end
+
+  # The relation `create` just inserted, from its RETURNING row of
+  # `created_at, updated_at`, or `None` when no row came back.
+  priv fn inserted_relation(
+    outcome: Result<QueryResult, Postgres.Error>,
+    from: String,
+    to: String,
+    kind: String,
+  ) -> Option<Relation> ! Error
+
+    qr = try db_result(outcome)
+
+    match qr.rows.get(0)
+      Option.None ->
+        Option.None
+
+      Option.Some(row) ->
+        Option.Some(Relation{
+          created_at: try db_time(text_at(row, 0)),
+          from: from,
+          kind: kind,
+          to: to,
+          updated_at: try db_time(text_at(row, 1)),
+        })
     end
   end
 
-  priv fn row_to_relation(row: List<Value>) -> Relation
+  priv fn row_to_relation(row: List<Value>) -> Relation ! Error
     Relation{
-      created_at: text_at(row, 3),
+      created_at: try db_time(text_at(row, 3)),
       from: text_at(row, 0),
       kind: text_at(row, 2),
       to: text_at(row, 1),
-      updated_at: text_at(row, 4),
+      updated_at: try db_time(text_at(row, 4)),
     }
-  end
-
-  priv fn text_at(row: List<Value>, index: Int) -> String
-    row.get(index).map(v -> v.string_or("")).or("")
   end
 
   priv fn select_sql -> String

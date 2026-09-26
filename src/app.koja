@@ -30,7 +30,7 @@ alias Process.StopReason
 alias Trail.Config as TrailConfig
 alias Trail.Worker
 
-const VERSION: String = "0.5.0"
+const VERSION: String = "0.6.0"
 
 const POOL_SIZE: Int = 10
 
@@ -290,8 +290,8 @@ priv fn server_config(router: Router, tracer: Tracer, log: Logger)
 end
 
 # Runs the router inside a server span. The span records the method,
-# path, and status code, and a 5xx marks it as an error. The conn
-# carries the span so handlers open their children under it.
+# path, and status code, and its status follows the response code.
+# The conn carries the span so handlers open their children under it.
 priv fn traced_dispatch(router: Router, tracer: Tracer, request: Request)
   -> Response
 
@@ -315,9 +315,7 @@ priv fn traced_dispatch(router: Router, tracer: Tracer, request: Request)
 
       outcome = Outcome{
         attributes: ["http.response.status_code": Attribute.from(code)],
-        status: code >= 500
-          ? SpanStatus.Error("HTTP #{code}")
-          : SpanStatus.Unset,
+        status: span_status(code),
       }
 
       (response, outcome)
@@ -330,6 +328,18 @@ priv fn traced_dispatch(router: Router, tracer: Tracer, request: Request)
     attributes,
     work,
   )
+end
+
+# The server span status for a response code. remem is the
+# application, so it makes the positive claim that a 2xx or 3xx
+# completed successfully. A 4xx is the client's mistake and gets no
+# opinion, and a 5xx is an error.
+priv fn span_status(code: Int) -> SpanStatus
+  cond
+    code >= 500 -> SpanStatus.Error("HTTP #{code}")
+    code >= 400 -> SpanStatus.Unset
+    else -> SpanStatus.Ok
+  end
 end
 
 # The trace id from the `traceparent` the server span put on the

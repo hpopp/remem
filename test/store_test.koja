@@ -447,6 +447,127 @@ struct StoreTest
     end
   end
 
+  test "events add, list, embed, move on merge, clear on rename, remove, and cascade"
+    conn = try connect()
+    conn = Migrator.run(conn) rescue e -> fail "migrate: #{e.message()}"
+    conn = try cleanup(conn)
+
+    conn = try seed(conn, "itest-event-a", ["a fact"])
+    conn = try seed(conn, "itest-event-b", List.new())
+
+    # An unknown entity gives None, not an error.
+    (conn, added) = EventStore.add(conn, "itest-ghost", "boo", Option.None)
+    ghost = added rescue e -> fail "add to ghost: #{e.message()}"
+    assert ghost.none?(), "adding an event to an unknown entity returned one"
+
+    # A supplied occurred_at round-trips to the same instant.
+    fixture_at = DateTime.parse("2026-09-01T15:00:00Z")
+      rescue _ -> fail "parse fixture"
+
+    (conn, added) = EventStore.add(
+      conn,
+      "itest-event-a",
+      "older",
+      Option.Some(fixture_at),
+    )
+    (older, _) = try required_event(added, "older")
+    assert older.id > 0, "event id should be assigned"
+    assert older.occurred_at == fixture_at, "occurred_at did not round-trip: #{older.occurred_at.to_string()}"
+    assert older.content == "older"
+
+    # Without occurred_at the database stamps now, which sorts later.
+    (conn, added) = EventStore.add(conn, "itest-event-a", "newer", Option.None)
+    (newer, entity) = try required_event(added, "newer")
+    assert entity.name == "itest-event-a", "add should return the owning entity"
+    assert newer.occurred_at.since(older.occurred_at).to_seconds() > 0, "a default occurred_at should be later than the fixture"
+
+    # recent lists newest first and honors the limit.
+    (conn, listed) = EventStore.recent(conn, "itest-event-a", 10)
+    events = try required_events(listed, "itest-event-a")
+    assert events.length() == 2, "expected two events, got #{events.length()}"
+    assert events.get(0).map(e -> e.content) == Option.Some("newer"), "newest event should come first"
+
+    (conn, listed) = EventStore.recent(conn, "itest-event-a", 1)
+    events = try required_events(listed, "itest-event-a")
+    assert events.length() == 1, "limit should cap the list"
+
+    (conn, listed) = EventStore.recent(conn, "itest-ghost", 10)
+    nobody = listed rescue e -> fail "recent ghost: #{e.message()}"
+    assert nobody.none?(), "recent on an unknown entity should be None"
+
+    # The backfill sees the new rows.
+    (conn, pending) = EventStore.unembedded(conn, 100000)
+    rows = pending rescue e -> fail "unembedded: #{e.message()}"
+    assert rows.any?(r -> r.id == older.id and r.name == "itest-event-a"), "new event should be pending an embedding"
+
+    # Embedding one takes it off the pending list.
+    (conn, stored) = EventStore.set_embeddings(
+      conn,
+      [older.id],
+      [axis_vector(2)],
+    )
+    count = stored rescue e -> fail "set_embeddings: #{e.message()}"
+    assert count == 1, "expected one embedding stored, got #{count}"
+
+    (conn, pending) = EventStore.unembedded(conn, 100000)
+    rows = pending rescue e -> fail "unembedded after embed: #{e.message()}"
+    assert rows.all?(r -> r.id != older.id), "embedded event should not be pending"
+
+    # Merge moves events to the target and clears their embeddings.
+    (conn, merged) = EntityStore.merge(conn, "itest-event-a", "itest-event-b")
+    merged_entity = merged rescue e -> fail "merge: #{e.message()}"
+    assert merged_entity.name == "itest-event-b"
+
+    (conn, listed) = EventStore.recent(conn, "itest-event-b", 10)
+    events = try required_events(listed, "itest-event-b")
+    assert events.length() == 2, "events should move on merge"
+
+    (conn, pending) = EventStore.unembedded(conn, 100000)
+    rows = pending rescue e -> fail "unembedded after merge: #{e.message()}"
+    assert rows.any?(r -> r.id == older.id and r.name == "itest-event-b"), "moved event should be pending an embedding again"
+
+    # Rename clears embeddings, since the name is part of the text.
+    (conn, stored) = EventStore.set_embeddings(
+      conn,
+      [older.id],
+      [axis_vector(2)],
+    )
+    count = stored rescue e -> fail "set_embeddings again: #{e.message()}"
+    assert count == 1, "expected one embedding stored again, got #{count}"
+
+    (conn, renamed) = EntityStore.rename(conn, "itest-event-b", "itest-event-z")
+    renamed_entity = renamed rescue e -> fail "rename: #{e.message()}"
+    assert renamed_entity.some?(), "rename should return the entity"
+
+    (conn, pending) = EventStore.unembedded(conn, 100000)
+    rows = pending rescue e -> fail "unembedded after rename: #{e.message()}"
+    assert rows.any?(r -> r.id == older.id and r.name == "itest-event-z"), "renamed entity's event should be pending an embedding"
+
+    # Remove by id works once.
+    (conn, removed) = EventStore.remove(conn, newer.id)
+    deleted = removed rescue e -> fail "remove: #{e.message()}"
+    assert deleted, "removing a live event should report true"
+
+    (conn, removed) = EventStore.remove(conn, newer.id)
+    deleted = removed rescue e -> fail "remove again: #{e.message()}"
+    assert not deleted, "removing a deleted event should report false"
+
+    # Deleting the entity cascades to its events.
+    (conn, gone) = EntityStore.remove(conn, "itest-event-z")
+    entity_deleted = gone rescue e -> fail "remove entity: #{e.message()}"
+    assert entity_deleted, "entity delete should report true"
+
+    (conn, pending) = EventStore.unembedded(conn, 100000)
+    rows = pending rescue e -> fail "unembedded after delete: #{e.message()}"
+    assert rows.all?(r -> r.id != older.id), "events should cascade on entity delete"
+
+    conn = try cleanup(conn)
+
+    match conn.close()
+      _ -> ()
+    end
+  end
+
   # Creates a `tool` entity, bypassing the near-duplicate guard since
   # the fixtures share a prefix.
   priv fn seed(conn: Connection, name: String, observations: List<String>)
@@ -492,6 +613,40 @@ struct StoreTest
         match maybe
           Option.None -> fail "#{name} is missing"
           Option.Some(entity) -> entity
+        end
+    end
+  end
+
+  priv fn required_event(
+    added: Result<Option<(Event, Entity)>, Error>,
+    label: String,
+  ) -> (Event, Entity) ! Test.Failure
+
+    match added
+      Result.Err(e) ->
+        fail "add #{label}: #{e.message()}"
+
+      Result.Ok(maybe) ->
+        match maybe
+          Option.None -> fail "add #{label}: entity is missing"
+          Option.Some(pair) -> pair
+        end
+    end
+  end
+
+  priv fn required_events(
+    listed: Result<Option<List<Event>>, Error>,
+    name: String,
+  ) -> List<Event> ! Test.Failure
+
+    match listed
+      Result.Err(e) ->
+        fail "recent #{name}: #{e.message()}"
+
+      Result.Ok(maybe) ->
+        match maybe
+          Option.None -> fail "recent #{name}: entity is missing"
+          Option.Some(events) -> events
         end
     end
   end

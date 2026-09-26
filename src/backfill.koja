@@ -24,9 +24,10 @@ struct Backfill.Config
 end
 
 @doc """
-The background observation embedder. Ticks on its own timer and
-embeds observations whose `embedding` is NULL, `BACKFILL_BATCH` rows at a
-time. Rows arrive there three ways: the migration that added the
+The background embedder. Ticks on its own timer and embeds
+observations and events whose `embedding` is NULL, `BACKFILL_BATCH`
+rows at a time, observations first and events with whatever budget
+remains. Rows arrive there three ways: the migration that added the
 column, a write whose embedding call failed, and a merge or rename
 that changed the entity name in the embedding text. The first tick
 is immediate so a fresh deploy catches up within a minute, and a
@@ -51,10 +52,20 @@ struct Backfill: Process<Backfill.Config, (), ()>
   end
 
   fn handle(self, msg: (), from: Option<ReplyTo<()>>) -> Step<Self>
-    embedded = self.pass()
+    (observations, events) = self.pass()
+    embedded = observations + events
 
-    if embedded > 0
-      self.log.info("embedded #{embedded} observations")
+    cond
+      events > 0 ->
+        self.log.info(
+          "embedded #{observations} observations and #{events} events",
+        )
+
+      observations > 0 ->
+        self.log.info("embedded #{observations} observations")
+
+      else ->
+        ()
     end
 
     delay = embedded >= BACKFILL_BATCH ? BACKFILL_DRAIN_MS : self.interval_ms
@@ -63,17 +74,22 @@ struct Backfill: Process<Backfill.Config, (), ()>
     Step.Continue(self)
   end
 
-  # Embeds one batch and returns how many rows were updated. Failures
-  # log and count as zero, so the next pass waits the full interval.
-  priv fn pass(self) -> Int
+  # Embeds one batch and returns how many observation and event rows
+  # were updated. Failures log and count as zero, so the next pass
+  # waits the full interval.
+  priv fn pass(self) -> (Int, Int)
     match self.pool.checkout(BACKFILL_CHECKOUT_MS)
       Result.Err(_) ->
-        0
+        (0, 0)
 
       Result.Ok(db) ->
-        (db, count) = embed_pending(db, self.embedder, self.log)
+        (db, observations) = embed_pending(db, self.embedder, self.log)
+        remaining = BACKFILL_BATCH - observations
+        (db, events) = remaining > 0
+          ? embed_pending_events(db, self.embedder, self.log, remaining)
+          : (db, 0)
         self.pool.checkin(db)
-        count
+        (observations, events)
     end
   end
 end
@@ -83,15 +99,9 @@ priv fn embed_pending(db: Connection, embedder: Embedder, log: Logger)
 
   (db, pending) = EntityStore.unembedded(db, BACKFILL_BATCH)
 
-  rows =
-    match pending
-      Result.Err(e) ->
-        log.warn("embedding backfill: " <> e.message())
-        return (db, 0)
-
-      Result.Ok(list) ->
-        list
-    end
+  # A failed read logs and reads as nothing pending.
+  rows = pending
+    rescue e -> warn_and(log, "embedding backfill: " <> e.message(), List.new())
 
   if rows.empty?()
     return (db, 0)
@@ -101,13 +111,45 @@ priv fn embed_pending(db: Connection, embedder: Embedder, log: Logger)
   texts = rows.map(row -> embedding_text(row.name, row.kind, row.content))
 
   (db, outcome) = embed_texts(db, embedder, ids, texts)
+  (
+    db,
+    outcome rescue e -> warn_and(log, "embedding backfill: " <> e.message(), 0)
+  )
+end
 
-  match outcome
-    Result.Err(e) ->
-      log.warn("embedding backfill: " <> e.message())
-      (db, 0)
+priv fn embed_pending_events(
+  db: Connection,
+  embedder: Embedder,
+  log: Logger,
+  limit: Int,
+) -> (Connection, Int)
 
-    Result.Ok(count) ->
-      (db, count)
+  (db, pending) = EventStore.unembedded(db, limit)
+
+  rows = pending
+    rescue e -> warn_and(
+      log,
+      "event embedding backfill: " <> e.message(),
+      List.new(),
+    )
+
+  if rows.empty?()
+    return (db, 0)
   end
+
+  ids = rows.map(row -> row.id)
+  texts = rows.map(row -> event_text(
+    row.name,
+    row.kind,
+    row.occurred_at,
+    row.content,
+  ))
+
+  (db, outcome) = embed_event_texts(db, embedder, ids, texts)
+
+  (
+    db,
+    outcome
+      rescue e -> warn_and(log, "event embedding backfill: " <> e.message(), 0)
+  )
 end

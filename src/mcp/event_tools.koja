@@ -1,0 +1,109 @@
+alias HTTP.Response
+alias JSON.Value as Json
+alias Log.Logger
+alias Postgres.Connection
+
+@doc """
+The `add_event`, `recent_events`, and `remove_event` tools. Events
+are addressed by integer id, so `remove_event` takes an id where the
+observation tools take content.
+"""
+struct EventTools
+  fn add(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+    log: Logger,
+  ) -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "name is required"), conn)
+      end
+
+    content =
+      match JsonUtil.get_string(arguments, "content")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "content is required"), conn)
+      end
+
+    occurred_at =
+      match JsonUtil.occurred_at(arguments)
+        Result.Err(e) -> return (ToolResult.err(log, id, e.message()), conn)
+        Result.Ok(maybe) -> maybe
+      end
+
+    (conn, added) = EventStore.add(conn, name, content, occurred_at)
+
+    match required(added, name)
+      Result.Err(e) ->
+        (ToolResult.err(log, id, e.message()), conn)
+
+      Result.Ok(pair) ->
+        (event, entity) = pair
+        conn = embed_event(conn, embedder, entity, event)
+        (ToolResult.ok(id, event.to_json()), conn)
+    end
+  end
+
+  fn recent(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "name is required"), conn)
+      end
+
+    limit = JsonUtil.get_int(arguments, "limit").or(RECENT_EVENTS)
+
+    if limit < 1 or limit > MCP_MAX_SEARCH_LIMIT
+      return (
+        ToolResult.err(
+          log,
+          id,
+          "limit must be between 1 and #{MCP_MAX_SEARCH_LIMIT}",
+        ), conn
+      )
+    end
+
+    (conn, found) = EventStore.recent(conn, name, limit)
+    (ToolResult.render(log, id, recent_payload(name, found)), conn)
+  end
+
+  fn remove(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    event_id =
+      match JsonUtil.get_int(arguments, "id")
+        Option.Some(number) -> number
+        Option.None -> return (ToolResult.err(log, id, "id is required"), conn)
+      end
+
+    (conn, removed) = EventStore.remove(conn, event_id)
+
+    (
+      ToolResult.deleted(
+        log,
+        id,
+        removed,
+        "deleted event #{event_id}",
+        "no event with id #{event_id}",
+      ), conn
+    )
+  end
+
+  priv fn recent_payload(
+    name: String,
+    found: Result<Option<List<Event>>, Error>,
+  ) -> Json ! Error
+
+    events = try required(found, name)
+    payload: Json = [
+      "name": name.to_json(), "events": Json.Array(events.map(e -> e.to_json()))
+    ]
+    payload
+  end
+end

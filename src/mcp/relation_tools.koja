@@ -1,0 +1,67 @@
+alias HTTP.Response
+alias JSON.Value as Json
+alias Log.Logger
+alias Postgres.Connection
+
+@doc """
+The `create_relation` and `delete_relation` tools. Both take the
+same `{from, to, type}` arguments.
+"""
+struct RelationTools
+  fn create(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    (from, to, kind) =
+      match args(arguments)
+        Result.Ok(parsed) -> parsed
+        Result.Err(message) -> return (ToolResult.err(log, id, message), conn)
+      end
+
+    (conn, created) = RelationStore.create(conn, from, to, kind)
+    (ToolResult.render(log, id, created), conn)
+  end
+
+  fn delete(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    (from, to, kind) =
+      match args(arguments)
+        Result.Ok(parsed) -> parsed
+        Result.Err(message) -> return (ToolResult.err(log, id, message), conn)
+      end
+
+    (conn, removed) = RelationStore.remove(conn, from, to, kind)
+
+    (
+      ToolResult.deleted(
+        log,
+        id,
+        removed,
+        "deleted #{from} -[#{kind}]-> #{to}",
+        "no relation #{from} -[#{kind}]-> #{to}",
+      ), conn
+    )
+  end
+
+  priv fn args(arguments: Json) -> (String, String, String) ! String
+    from =
+      match JsonUtil.get_string(arguments, "from")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> fail "from is required"
+      end
+
+    to =
+      match JsonUtil.get_string(arguments, "to")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> fail "to is required"
+      end
+
+    kind =
+      match JsonUtil.get_string(arguments, "type")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> fail "type is required"
+      end
+
+    (from, to, kind)
+  end
+end

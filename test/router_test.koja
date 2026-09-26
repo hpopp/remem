@@ -99,6 +99,39 @@ struct RouterTest
     assert response.body.contains?("ok"), "health body should report ok"
   end
 
+  test "DELETE /events/:id rejects a non-integer id before pool checkout"
+    router = build_router(
+      broken_pool(),
+      test_embedder(),
+      Option.Some("test-key"),
+      Tracer.noop(),
+    )
+
+    response = router.dispatch(
+      request_with_headers(Method.Delete, "/events/abc", "", bearer()),
+    )
+
+    assert response.status.code == 400
+    assert response.body.contains?("id must be an integer"), "400 body should name the id error"
+  end
+
+  test "POST /entities/:name/events rejects malformed occurred_at before pool checkout"
+    router = build_router(
+      broken_pool(),
+      test_embedder(),
+      Option.Some("test-key"),
+      Tracer.noop(),
+    )
+
+    body = "{\"content\": \"shipped\", \"occurred_at\": \"yesterday\"}"
+    response = router.dispatch(
+      request_with_headers(Method.Post, "/entities/x/events", body, bearer()),
+    )
+
+    assert response.status.code == 400
+    assert response.body.contains?("occurred_at must be RFC 3339"), "400 body should name the occurred_at error"
+  end
+
   test "path params percent-decode and reject malformed encoding"
     c = Conn.from_request(request(Method.Get, "/entities/x", ""))
     c.path_params = [("name", "Foo%20Bar")]

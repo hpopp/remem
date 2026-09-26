@@ -1,0 +1,97 @@
+alias Postgres.QueryResult
+alias Postgres.Value
+
+# Helpers every store shares at the driver boundary. A store fn
+# threads the `Connection` and so cannot use `try`. It runs the query
+# and hands the outcome to a `! Error` fn from here, which does.
+
+@doc """
+Unwraps a driver outcome, wrapping the driver error as
+`Error.Database`.
+"""
+fn db_result(outcome: Result<QueryResult, Postgres.Error>)
+  -> QueryResult ! Error
+
+  outcome rescue e -> fail Error.Database(e.message())
+end
+
+@doc """
+Whether a DELETE or UPDATE touched at least one row.
+"""
+fn changed(outcome: Result<QueryResult, Postgres.Error>) -> Bool ! Error
+  qr = try db_result(outcome)
+  affected(qr.tag) > 0
+end
+
+@doc """
+The row count out of an UPDATE or DELETE.
+"""
+fn affected_rows(outcome: Result<QueryResult, Postgres.Error>) -> Int ! Error
+  qr = try db_result(outcome)
+  affected(qr.tag)
+end
+
+@doc """
+A statement whose result does not matter, only its success.
+"""
+fn done(outcome: Result<QueryResult, Postgres.Error>) ! Error
+  _ = try db_result(outcome)
+end
+
+@doc """
+Unwraps a store outcome where `None` means the named entity is
+unknown, failing with `NotFound`.
+"""
+fn required<T>(outcome: Result<Option<T>, Error>, name: String) -> T ! Error
+  match try outcome
+    Option.Some(value) -> value
+    Option.None -> fail Error.NotFound("no entity named #{name}")
+  end
+end
+
+@doc """
+Reads a `timestamptz::text` column into a `DateTime` in UTC. Postgres
+writes `2026-09-26 01:04:40.964351+00`, which `DateTime.parse` accepts
+as is (space separator, fraction, bare `+HH` offset). Postgres always
+emits a readable value, so a parse failure is a bug and surfaces as
+`Error.Database` rather than as a blank field.
+"""
+fn db_time(text: String) -> DateTime ! Error
+  parsed = DateTime.parse(text)
+    rescue _ -> fail Error.Database("unreadable timestamp: #{text}")
+
+  parsed.to_utc()
+end
+
+@doc """
+Reads a text column, or an empty string for a null or missing one.
+"""
+fn text_at(row: List<Value>, index: Int) -> String
+  row.get(index).map(v -> v.string_or("")).or("")
+end
+
+@doc """
+Reads an integer column, or zero for a null or missing one.
+"""
+fn int_at(row: List<Value>, index: Int) -> Int
+  row.get(index).map(v -> v.int_or(0)).or(0)
+end
+
+@doc """
+Reads the row count out of an `UPDATE n` or `DELETE n` command tag.
+"""
+fn affected(tag: String) -> Int
+  match tag.split(" ").get(1)
+    Option.None -> 0
+    Option.Some(text) -> text.to_int() rescue _ -> 0
+  end
+end
+
+@doc """
+Logs a warning and yields `default`, for a `rescue` handler that
+must both report and fall back.
+"""
+fn warn_and<T>(log: Log.Logger, message: String, default: T) -> T
+  log.warn(message)
+  default
+end

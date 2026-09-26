@@ -4,12 +4,13 @@ alias Postgres.Connection
 
 struct McpTest
   test "tool catalog lists every tool with a schema"
-    encoded = JSON.encode(Mcp.tools())
+    encoded = JSON.encode(ToolCatalog.tools())
 
     names = [
       "search_memory", "get_entity", "create_entity", "rename_entity",
       "merge_entities", "list_entities", "delete_entity", "add_observations",
-      "remove_observations", "create_relation", "delete_relation"
+      "remove_observations", "add_event", "recent_events", "remove_event",
+      "create_relation", "delete_relation"
     ]
 
     for name in names
@@ -34,6 +35,28 @@ struct McpTest
     end
 
     assert not encoded.contains?("\"entity\""), "result should not nest a full entity: #{encoded}"
+  end
+
+  test "events serialize with an id and RFC 3339 UTC timestamps"
+    at = DateTime.parse("2026-09-01T15:00:00Z") rescue _ -> fail "parse fixture"
+
+    event = Event{
+      content: "deployed 0.6.0",
+      created_at: at,
+      id: 7,
+      occurred_at: at,
+      updated_at: at,
+    }
+    encoded = JSON.encode(event.to_json())
+
+    for key in [
+      "\"id\"", "\"content\"", "\"occurred_at\"", "\"created_at\"",
+      "\"updated_at\""
+    ]
+      assert encoded.contains?(key), "event is missing #{key}: #{encoded}"
+    end
+
+    assert encoded.contains?("2026-09-01T15:00:00Z"), "timestamps should be RFC 3339 in UTC: #{encoded}"
   end
 
   test "create_entity refuses a near-duplicate unless confirmed"

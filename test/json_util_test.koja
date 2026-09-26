@@ -71,6 +71,7 @@ struct JsonUtilTest
       "\"updated_at\": \"2026-09-01 15:30:00+00\"}]"
 
     decoded = JsonUtil.decode_observations(text)
+      rescue e -> fail "expected Ok, got: #{e.message()}"
     assert decoded.length() == 1
 
     observation =
@@ -80,12 +81,27 @@ struct JsonUtilTest
       end
 
     assert observation.content == "a \"quoted\" fact"
-    assert observation.created_at == "2026-09-01 15:00:00+00"
-    assert observation.updated_at == "2026-09-01 15:30:00+00"
+    assert observation.created_at.to_string() == "2026-09-01T15:00:00Z"
+    assert observation.updated_at.to_string() == "2026-09-01T15:30:00Z"
   end
 
-  test "decode_observations is lenient on malformed text"
-    assert JsonUtil.decode_observations("{not json").empty?()
+  test "decode_observations fails on malformed text"
+    match JsonUtil.decode_observations("{not json")
+      Result.Err(Error.Database(_)) -> ()
+      Result.Err(e) -> fail "wrong error: #{e.message()}"
+      Result.Ok(_) -> fail "expected an error"
+    end
+  end
+
+  test "decode_observations fails on an unreadable timestamp"
+    text = "[{\"content\": \"x\", \"created_at\": \"yesterday\", " <>
+      "\"updated_at\": \"2026-09-01 15:30:00+00\"}]"
+
+    match JsonUtil.decode_observations(text)
+      Result.Err(Error.Database(_)) -> ()
+      Result.Err(e) -> fail "wrong error: #{e.message()}"
+      Result.Ok(_) -> fail "expected an error"
+    end
   end
 
   test "distinct keeps first occurrences in order"

@@ -4,8 +4,8 @@
 [![GitHub Release](https://img.shields.io/github/v/release/hpopp/remem)](https://github.com/hpopp/remem/releases)
 
 A memory graph API in written in [Koja](https://kojalang.org). remem stores named entities,
-timestamped observations about them, and typed relations between them, backed by
-PostgreSQL with pgvector. Search combines semantic ranking
+timestamped observations about them, events that happened to them, and typed
+relations between them, backed by PostgreSQL with pgvector. Search combines semantic ranking
 (nomic-embed-text embeddings, cosine distance) with trigram fuzzy
 name matching, merged by Reciprocal Rank Fusion.
 
@@ -70,12 +70,15 @@ trace id. `GET /health` is not traced.
 | `GET /graph`                          | Every entity and relation                 |
 | `GET /entities?limit=&offset=`        | Entity summaries, most observations first |
 | `POST /entities`                      | Create from `{name, type, observations?}` |
-| `GET /entities/:name`                 | One entity with its relations             |
+| `GET /entities/:name`                 | One entity, its relations, recent events  |
 | `PATCH /entities/:name`               | Rename from `{name}`                      |
 | `DELETE /entities/:name`              | Delete an entity, relations cascade       |
 | `POST /entities/:name/merge`          | Fold into another entity from `{into}`    |
 | `POST /entities/:name/observations`   | Append observations                       |
 | `DELETE /entities/:name/observations` | Remove matching observations              |
+| `GET /entities/:name/events?limit=`   | Events, newest first                      |
+| `POST /entities/:name/events`         | Record from `{content, occurred_at?}`     |
+| `DELETE /events/:id`                  | Delete one event                          |
 | `POST /relations`                     | Create from `{from, to, type}`            |
 | `DELETE /relations`                   | Delete the same shape                     |
 | `GET /search?q=&limit=`               | Hybrid semantic and fuzzy search          |
@@ -88,13 +91,33 @@ as rows with their own timestamps:
 { "content": "...", "created_at": "...", "updated_at": "..." }
 ```
 
-Entities, observations, and relations all carry `created_at` and
-`updated_at`. An observation change also touches its entity's
-`updated_at`. Errors return `{"error", "message", "status"}`.
+Entities, observations, events, and relations all carry `created_at`
+and `updated_at`. Every timestamp is RFC 3339 in UTC, like
+`2026-09-26T01:04:40.964351Z`. An observation or event change also
+touches its entity's `updated_at`. Errors return `{"error", "message", "status"}`.
 
 `GET /entities` returns each entity without its observations and
 adds an `observation_count`, so the whole graph fits in one page.
 Fetch `GET /entities/:name` for the observations.
+
+### Events
+
+Observations are what is true about an entity. Events are what
+happened to it, such as a work session, a deploy, or a decision made
+on a given day. Together they give an agent semantic memory and
+episodic memory. Each event belongs to one entity and has an integer `id`,
+`content`, and `occurred_at`:
+
+```json
+{ "id": 42, "content": "...", "occurred_at": "...", "created_at": "...", "updated_at": "..." }
+```
+
+`POST /entities/:name/events` records one. `occurred_at` is optional
+and defaults to now. Send it as RFC 3339 when the event happened at
+another time. Events are never deduplicated, since the same thing
+can happen twice. `GET /entities/:name` includes the ten most recent
+events under `events`, and `GET /entities/:name/events` pages further
+back with `limit`. Events move with a merge and cascade on delete.
 
 ### Curation
 
@@ -134,6 +157,11 @@ boot, which covers the migration to per-observation embeddings, and
 after a merge or rename, which changes the entity name in the
 embedding text.
 
+Events embed the same way, under the text
+`name (type) on date: content`, and the backfill drains them after
+observations. Search does not rank events yet. The embeddings are
+stored so that a later release can add them without a backfill.
+
 Every search also appends its query to a `search_log` table. Nothing
 reads the log yet. It collects the retrieval history that later
 relevance ranking and graph upkeep (gap and prune analysis) need,
@@ -158,7 +186,8 @@ bearer auth applies when `API_KEY` is set. Cursor configuration:
 
 Tools: `search_memory`, `get_entity`, `list_entities`,
 `create_entity`, `rename_entity`, `merge_entities`, `delete_entity`,
-`add_observations`, `remove_observations`, `create_relation`,
+`add_observations`, `remove_observations`, `add_event`,
+`recent_events`, `remove_event`, `create_relation`,
 `delete_relation`.
 
 There is no read-the-whole-graph tool on purpose. Search is the way
@@ -167,6 +196,12 @@ full graph each session. `list_entities` returns names and counts
 only, for spotting entities that need a split or a merge. Tool
 descriptions steer agents to search before writing and to keep the
 graph curated.
+
+`get_entity` returns the entity's ten most recent events next to its
+relations, so an agent that loads a project sees what happened last
+time. `add_event` is where session details go, and the
+`create_entity` and `add_observations` descriptions point agents
+there instead of at observations.
 
 ## Development
 

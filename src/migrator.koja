@@ -94,30 +94,39 @@ struct Migrator
         USING hnsw (embedding vector_cosine_ops)
         WITH (m = 16, ef_construction = 64)
         """}, Migration{version: 11, sql: "DROP INDEX entities_embedding_idx"},
-      Migration{version: 12, sql: "ALTER TABLE entities DROP COLUMN embedding"}
+      Migration{version: 12, sql: "ALTER TABLE entities DROP COLUMN embedding"},
+      Migration{version: 13, sql: """
+        CREATE TABLE events (
+          id bigserial PRIMARY KEY,
+          entity_id bigint NOT NULL
+            REFERENCES entities(id) ON DELETE CASCADE,
+          content text NOT NULL,
+          occurred_at timestamptz NOT NULL DEFAULT now(),
+          embedding vector(768),
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+        """}, Migration{version: 14, sql: """
+        CREATE INDEX events_entity_occurred_idx ON events
+        (entity_id, occurred_at DESC)
+        """}, Migration{version: 15, sql: """
+        CREATE INDEX events_embedding_idx ON events
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 64)
+        """}
     ]
   end
 
   priv fn applied_versions(conn: Connection) -> (Connection, List<Int>) ! Error
     (conn, outcome) = conn.query("SELECT version FROM schema_migrations")
-
-    match outcome
-      Result.Err(e) ->
-        fail Error.Database(e.message())
-
-      Result.Ok(qr) ->
-        versions = qr.rows.map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
-        (conn, versions)
-    end
+    qr = try db_result(outcome)
+    (conn, qr.rows.map(row -> int_at(row, 0)))
   end
 
   priv fn exec(conn: Connection, sql: String) -> Connection ! Error
     (conn, outcome) = conn.query(sql)
-
-    match outcome
-      Result.Err(e) -> fail Error.Database(e.message())
-      Result.Ok(_) -> conn
-    end
+    try done(outcome)
+    conn
   end
 
   priv fn record(conn: Connection, version: Int) -> Connection ! Error
@@ -126,9 +135,7 @@ struct Migrator
       [Postgres.Value.int(version)],
     )
 
-    match outcome
-      Result.Err(e) -> fail Error.Database(e.message())
-      Result.Ok(_) -> conn
-    end
+    try done(outcome)
+    conn
   end
 end

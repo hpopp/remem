@@ -62,7 +62,7 @@ struct EntityController
 
   priv fn do_show(self, c: Conn) -> Conn ! Error
     name = try Params.name(c)
-    (entity, relations) = try with_db(
+    (entity, relations, events) = try with_db(
       self.pool,
       self.trace.at(c),
       db -> show_db(db, name),
@@ -70,7 +70,8 @@ struct EntityController
 
     body: Json = [
       "entity": entity.to_json(),
-      "relations": Json.Array(relations.map(r -> r.to_json()))
+      "relations": Json.Array(relations.map(r -> r.to_json())),
+      "events": Json.Array(events.map(e -> e.to_json()))
     ]
     Render.json(c, Status.ok(), body)
   end
@@ -154,31 +155,37 @@ struct EntityController
   end
 end
 
-# Reads one entity with its relations. A missing entity surfaces as
-# `NotFound` so the handler renders a 404.
+# Reads one entity with its relations and recent events. A missing
+# entity surfaces as `NotFound` so the handler renders a 404.
 priv fn show_db(db: Connection, name: String)
-  -> (Connection, Result<(Entity, List<Relation>), Error>)
+  -> (Connection, Result<(Entity, List<Relation>, List<Event>), Error>)
 
   (db, found) = EntityStore.find(db, name)
 
   entity =
-    match found
-      Result.Err(e) ->
-        return (db, Result.Err(e))
-
-      Result.Ok(maybe) ->
-        match maybe
-          Option.None ->
-            return (db, Result.Err(Error.NotFound("no entity named #{name}")))
-          Option.Some(present) -> present
-        end
+    match required(found, name)
+      Result.Err(e) -> return (db, Result.Err(e))
+      Result.Ok(present) -> present
     end
 
   (db, relations) = RelationStore.for_entity(db, name)
 
-  match relations
-    Result.Err(e) -> (db, Result.Err(e))
-    Result.Ok(list) -> (db, Result.Ok((entity, list)))
+  relation_list =
+    match relations
+      Result.Err(e) -> return (db, Result.Err(e))
+      Result.Ok(list) -> list
+    end
+
+  (db, events) = EventStore.recent(db, name, RECENT_EVENTS)
+
+  match events
+    Result.Err(e) ->
+      (db, Result.Err(e))
+
+    Result.Ok(maybe) ->
+      # The entity was found a moment ago, so `None` means it vanished
+      # mid-read. An empty list is the honest answer either way.
+      (db, Result.Ok((entity, relation_list, maybe.or(List.new()))))
   end
 end
 
@@ -210,18 +217,7 @@ priv fn rename_db(db: Connection, name: String, new_name: String)
   -> (Connection, Result<Entity, Error>)
 
   (db, renamed) = EntityStore.rename(db, name, new_name)
-
-  match renamed
-    Result.Err(e) ->
-      (db, Result.Err(e))
-
-    Result.Ok(maybe) ->
-      match maybe
-        Option.None ->
-          (db, Result.Err(Error.NotFound("no entity named #{name}")))
-        Option.Some(entity) -> (db, Result.Ok(entity))
-      end
-  end
+  (db, required(renamed, name))
 end
 
 # Adds observations, then embeds the new rows best-effort. A missing
@@ -235,20 +231,14 @@ priv fn add_db(
 
   (db, updated) = EntityStore.add_observations(db, name, observations)
 
-  match updated
+  match required(updated, name)
     Result.Err(e) ->
       (db, Result.Err(e))
 
-    Result.Ok(maybe) ->
-      match maybe
-        Option.None ->
-          (db, Result.Err(Error.NotFound("no entity named #{name}")))
-
-        Option.Some(pair) ->
-          (entity, rows) = pair
-          db = embed_rows(db, embedder, entity, rows)
-          (db, Result.Ok(entity))
-      end
+    Result.Ok(pair) ->
+      (entity, rows) = pair
+      db = embed_rows(db, embedder, entity, rows)
+      (db, Result.Ok(entity))
   end
 end
 
@@ -258,16 +248,5 @@ priv fn remove_db(db: Connection, name: String, observations: List<String>)
   -> (Connection, Result<Entity, Error>)
 
   (db, updated) = EntityStore.remove_observations(db, name, observations)
-
-  match updated
-    Result.Err(e) ->
-      (db, Result.Err(e))
-
-    Result.Ok(maybe) ->
-      match maybe
-        Option.None ->
-          (db, Result.Err(Error.NotFound("no entity named #{name}")))
-        Option.Some(entity) -> (db, Result.Ok(entity))
-      end
-  end
+  (db, required(updated, name))
 end

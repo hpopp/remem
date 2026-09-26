@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-25
+
+### Added
+
+- Events, the episodic memory next to observations. Each event
+  belongs to one entity and records something that happened to it at
+  a point in time, with an integer `id`, `content`, and `occurred_at`.
+  Events are never deduplicated. They move with a merge and cascade
+  on entity delete.
+- Routes `GET /entities/:name/events?limit=`,
+  `POST /entities/:name/events`, and `DELETE /events/:id`.
+- MCP tools `add_event`, `recent_events`, and `remove_event`.
+- `GET /entities/:name` and `get_entity` return the ten most recent
+  events under `events`, next to `relations`.
+- Events embed under the text `name (type) on date: content`, and
+  the backfill drains them after observations. Search does not rank
+  them yet.
+
+### Changed
+
+- The `create_entity` and `add_observations` tool descriptions point
+  session details at `add_event`, and `get_entity` says it returns
+  recent events.
+- Every timestamp in a response is RFC 3339 in UTC, like
+  `2026-09-26T01:04:40.964351Z`. Before, timestamps were the
+  Postgres text shape, `2026-09-26 01:04:40.964351+00`. Entities,
+  observations, and relations hold them as the stdlib `DateTime`,
+  and an unreadable database timestamp is a 500 instead of an empty
+  string.
+- The server span status is `Ok` for a 2xx or 3xx response. A 4xx
+  stays unset and a 5xx is still an error.
+
 ## [0.5.1] - 2026-09-24
 
 ### Changed

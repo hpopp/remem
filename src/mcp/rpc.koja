@@ -1,0 +1,112 @@
+alias HTTP.Headers
+alias HTTP.Response
+alias HTTP.Status
+alias JSON.Value as Json
+alias Log.Logger
+
+@doc """
+JSON-RPC 2.0 response builders for the MCP endpoint. Every reply is
+one HTTP 200 with a JSON body, except a notification, which is a
+bare 202.
+"""
+struct RPC
+  fn result(id: Json, result: Json) -> Response
+    body: Json = ["jsonrpc": "2.0".to_json(), "id": id, "result": result]
+    http_json(body)
+  end
+
+  fn error(id: Json, code: Int, message: String) -> Response
+    detail: Json = ["code": code.to_json(), "message": message.to_json()]
+    body: Json = ["jsonrpc": "2.0".to_json(), "id": id, "error": detail]
+    http_json(body)
+  end
+
+  fn accepted -> Response
+    headers = Headers.new().set("Content-Length", "0")
+    Response{
+      body: "",
+      headers: headers,
+      status: Status.new(202, "Accepted"),
+      version: "HTTP/1.1",
+    }
+  end
+
+  fn empty_object -> Json
+    entries: List<(String, Json)> = List.new()
+    Json.Object(entries)
+  end
+
+  priv fn http_json(body: Json) -> Response
+    text = JSON.encode(body)
+    headers = Headers.new()
+      .set("Content-Type", "application/json")
+      .set("Content-Length", "#{text.byte_length()}")
+    Response{
+      body: text,
+      headers: headers,
+      status: Status.ok(),
+      version: "HTTP/1.1",
+    }
+  end
+end
+
+@doc """
+Builders for a `tools/call` result. A tool answers with one text
+content item and an `isError` flag, so a failed tool call is still a
+successful JSON-RPC response.
+"""
+struct ToolResult
+  # The payload of a successful tool call rides as JSON text content.
+  fn ok(id: Json, payload: Json) -> Response
+    RPC.result(id, tool_result(JSON.encode(payload), false))
+  end
+
+  fn text(id: Json, text: String) -> Response
+    RPC.result(id, tool_result(text, false))
+  end
+
+  fn err(log: Logger, id: Json, message: String) -> Response
+    log.warn("mcp tool error: " <> message)
+    RPC.result(id, tool_result(message, true))
+  end
+
+  @doc """
+  Renders a store outcome, the value as JSON on success and the
+  error's message otherwise.
+  """
+  fn render<T: JSON.Encoding>(log: Logger, id: Json, outcome: Result<T, Error>)
+    -> Response
+
+    match outcome
+      Result.Ok(value) -> ok(id, value.to_json())
+      Result.Err(e) -> err(log, id, e.message())
+    end
+  end
+
+  @doc """
+  Renders a delete. `text` when a row went, `missing` as an error
+  when nothing matched.
+  """
+  fn deleted(
+    log: Logger,
+    id: Json,
+    removed: Result<Bool, Error>,
+    text: String,
+    missing: String,
+  ) -> Response
+
+    match removed
+      Result.Err(e) -> err(log, id, e.message())
+      Result.Ok(true) -> ToolResult.text(id, text)
+      Result.Ok(false) -> err(log, id, missing)
+    end
+  end
+
+  priv fn tool_result(text: String, is_error: Bool) -> Json
+    item: Json = ["type": "text".to_json(), "text": text.to_json()]
+    result: Json = [
+      "content": Json.Array([item]), "isError": is_error.to_json()
+    ]
+    result
+  end
+end

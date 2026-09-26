@@ -50,6 +50,37 @@ struct JsonUtil
   end
 
   @doc """
+  Parses an event body. `content` is a required non-empty string and
+  `occurred_at` an optional RFC 3339 timestamp.
+  """
+  fn parse_event(body: String) -> (String, Option<DateTime>) ! Error
+    root = try decode(body)
+    content = try required_string(root, "content")
+    occurred_at = try JsonUtil.occurred_at(root)
+    (content, occurred_at)
+  end
+
+  @doc """
+  Reads an optional `occurred_at` field as a `DateTime`. Absent reads
+  as `None`. Present but not RFC 3339 fails with `Validation`. Shared
+  by the REST body parser and the MCP tool.
+  """
+  fn occurred_at(root: Json) -> Option<DateTime> ! Error
+    match field(root, "occurred_at")
+      Option.None ->
+        Option.None
+
+      Option.Some(Json.String(text)) ->
+        parsed = DateTime.parse(text)
+          rescue _ -> fail Error.Validation("occurred_at must be RFC 3339, got '#{text}'")
+        Option.Some(parsed.to_utc())
+
+      Option.Some(_) ->
+        fail Error.Validation("occurred_at must be an RFC 3339 string")
+    end
+  end
+
+  @doc """
   Parses a relation body: `from`, `to`, and `type` are required
   non-empty strings.
   """
@@ -71,35 +102,33 @@ struct JsonUtil
 
   @doc """
   Decodes the `json_agg` observation column from a store query into
-  observation values. Members missing a field decode with that field
-  empty, and malformed text gives an empty list.
+  observation values. The column is built by the store's own SQL, so
+  malformed text, a non-array root, or an unreadable timestamp is a
+  bug and fails with `Error.Database`.
   """
-  fn decode_observations(text: String) -> List<Observation>
-    observations: List<Observation> = List.new()
+  fn decode_observations(text: String) -> List<Observation> ! Error
+    decoded = JSON.decode(text)
+      rescue e -> fail Error.Database("malformed observations column: " <> e)
 
-    decoded =
-      match JSON.decode(text)
-        Result.Err(_) -> return observations
-        Result.Ok(value) -> value
+    items =
+      match decoded
+        Json.Array(list) -> list
+        _ -> fail Error.Database("observations column is not an array")
       end
 
-    match decoded
-      Json.Array(items) ->
-        for item in items
-          observations = observations.append(
-            Observation{
-              content: field_string(item, "content"),
-              created_at: field_string(item, "created_at"),
-              updated_at: field_string(item, "updated_at"),
-            },
-          )
-        end
+    observations: List<Observation> = List.new()
 
-        observations
-
-      _ ->
-        observations
+    for item in items
+      observations = observations.append(
+        Observation{
+          content: field_string(item, "content"),
+          created_at: try db_time(field_string(item, "created_at")),
+          updated_at: try db_time(field_string(item, "updated_at")),
+        },
+      )
     end
+
+    observations
   end
 
   @doc """

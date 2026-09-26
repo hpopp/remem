@@ -1,0 +1,102 @@
+alias Conn.Conn
+alias HTTP.Status
+alias JSON.Value as Json
+alias Pooler.Pool
+alias Postgres.Connection
+
+@doc """
+Event endpoints, in the same shape as `EntityController`. Parse and
+validate before touching the pool, run the database phase through
+`with_db`, and render one response at the surface.
+"""
+struct EventController
+  embedder: Embedder
+  pool: Pool<Connection>
+  trace: Trace
+
+  fn list(self, c: Conn) -> Conn
+    self.do_list(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn create(self, c: Conn) -> Conn
+    self.do_create(c) rescue e -> Render.from_error(c, e)
+  end
+
+  fn delete(self, c: Conn) -> Conn
+    self.do_delete(c) rescue e -> Render.from_error(c, e)
+  end
+
+  priv fn do_list(self, c: Conn) -> Conn ! Error
+    name = try Params.name(c)
+    limit = try Params.limit(c, RECENT_EVENTS)
+
+    events = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> recent_db(db, name, limit),
+    )
+
+    body: Json = ["events": Json.Array(events.map(e -> e.to_json()))]
+    Render.json(c, Status.ok(), body)
+  end
+
+  priv fn do_create(self, c: Conn) -> Conn ! Error
+    name = try Params.name(c)
+    (content, occurred_at) = try JsonUtil.parse_event(c.body)
+    embedder = self.embedder.with_trace(self.trace.at(c))
+
+    event = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> add_db(db, embedder, name, content, occurred_at),
+    )
+    Render.json(c, Status.created(), event)
+  end
+
+  priv fn do_delete(self, c: Conn) -> Conn ! Error
+    id = try Params.id(c)
+    deleted = try with_db(
+      self.pool,
+      self.trace.at(c),
+      db -> EventStore.remove(db, id),
+    )
+
+    if not deleted
+      fail Error.NotFound("no event with id #{id}")
+    end
+
+    Render.no_content(c)
+  end
+end
+
+# Reads an entity's recent events. A missing entity surfaces as
+# `NotFound`.
+priv fn recent_db(db: Connection, name: String, limit: Int)
+  -> (Connection, Result<List<Event>, Error>)
+
+  (db, found) = EventStore.recent(db, name, limit)
+  (db, required(found, name))
+end
+
+# Records an event, then embeds it best-effort. A missing entity
+# surfaces as `NotFound`.
+priv fn add_db(
+  db: Connection,
+  embedder: Embedder,
+  name: String,
+  content: String,
+  occurred_at: Option<DateTime>,
+) -> (Connection, Result<Event, Error>)
+
+  (db, added) = EventStore.add(db, name, content, occurred_at)
+
+  match required(added, name)
+    Result.Err(e) ->
+      (db, Result.Err(e))
+
+    Result.Ok(pair) ->
+      (event, entity) = pair
+      db = embed_event(db, embedder, entity, event)
+      (db, Result.Ok(event))
+  end
+end

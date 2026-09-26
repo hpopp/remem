@@ -66,11 +66,7 @@ priv fn search_db(
 ) -> (Connection, Result<List<SearchResult>, Error>)
 
   (db, logged) = SearchLog.record(db, q)
-
-  match logged
-    Result.Err(e) -> log.warn("search log: " <> e.message())
-    Result.Ok(_) -> ()
-  end
+  logged rescue e -> warn_and(log, "search log: " <> e.message(), ())
 
   embedding =
     match embedder.embed(q)

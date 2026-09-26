@@ -161,6 +161,45 @@ fn embedding_text(name: String, kind: String, content: String) -> String
 end
 
 @doc """
+Composes the text one event embeds under. The date joins the cue so
+a query about a period can find the events in it.
+"""
+fn event_text(
+  name: String,
+  kind: String,
+  occurred_at: DateTime,
+  content: String,
+) -> String
+
+  "#{name} (#{kind}) on #{occurred_at.date().to_string()}: #{content}"
+end
+
+@doc """
+Embeds an event an entity just gained and stores the vector. Failure
+is logged, never surfaced, the same as `embed_rows`. Shared by the
+REST handler and the MCP tool.
+"""
+fn embed_event(
+  conn: Postgres.Connection,
+  embedder: Embedder,
+  entity: Entity,
+  event: Event,
+) -> Postgres.Connection
+
+  text = event_text(entity.name, entity.kind, event.occurred_at, event.content)
+  (conn, outcome) = embed_event_texts(conn, embedder, [event.id], [text])
+
+  _ = outcome
+    rescue e -> warn_and(
+      embedder.log,
+      "embedding event on #{entity.name} failed: " <> e.message(),
+      0,
+    )
+
+  conn
+end
+
+@doc """
 Embeds observation rows an entity just gained and stores the vectors.
 Failure is logged, never surfaced. The write already succeeded, and
 the backfill picks the rows up later. Shared by the REST handlers
@@ -188,14 +227,14 @@ fn embed_rows(
 
   (conn, outcome) = embed_texts(conn, embedder, ids, texts)
 
-  match outcome
-    Result.Err(e) ->
-      embedder.log.warn("embedding #{entity.name} failed: " <> e.message())
-      conn
+  _ = outcome
+    rescue e -> warn_and(
+      embedder.log,
+      "embedding #{entity.name} failed: " <> e.message(),
+      0,
+    )
 
-    Result.Ok(_) ->
-      conn
-  end
+  conn
 end
 
 @doc """
@@ -216,4 +255,24 @@ fn embed_texts(
     end
 
   EntityStore.set_observation_embeddings(conn, ids, vectors)
+end
+
+@doc """
+Embeds `texts` and stores each vector on the event with the matching
+id. Returns how many rows were updated.
+"""
+fn embed_event_texts(
+  conn: Postgres.Connection,
+  embedder: Embedder,
+  ids: List<Int>,
+  texts: List<String>,
+) -> (Postgres.Connection, Result<Int, Error>)
+
+  vectors =
+    match embedder.embed_many(texts)
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(list) -> list
+    end
+
+  EventStore.set_embeddings(conn, ids, vectors)
 end

@@ -19,10 +19,7 @@ struct SearchLog
       [Value.string(query)],
     )
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(_) -> (conn, Result.Ok(()))
-    end
+    (conn, done(outcome))
   end
 
   @doc """
@@ -41,17 +38,6 @@ struct SearchLog
       )
       """, [Value.int(days), Value.int(limit)])
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) -> (conn, Result.Ok(deleted_count(qr.tag)))
-    end
-  end
-end
-
-# Reads the row count out of a `DELETE n` command tag.
-priv fn deleted_count(tag: String) -> Int
-  match tag.split(" ").get(1)
-    Option.None -> 0
-    Option.Some(text) -> text.to_int() rescue _ -> 0
+    (conn, affected_rows(outcome))
   end
 end

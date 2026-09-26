@@ -38,6 +38,7 @@ fn build_router(
 
   trace = Trace{tracer: Option.Some(tracer)}
   entities = EntityController{embedder: embedder, pool: pool, trace: trace}
+  events = EventController{embedder: embedder, pool: pool, trace: trace}
   relations = RelationController{pool: pool, trace: trace}
   search = SearchController{
     embedder: embedder,
@@ -95,6 +96,9 @@ fn build_router(
       "/entities/:name/observations",
       c -> entities.remove_observations(c),
     )
+    .get("/entities/:name/events", c -> events.list(c))
+    .post("/entities/:name/events", c -> events.create(c))
+    .delete("/events/:id", c -> events.delete(c))
     .post("/relations", c -> relations.create(c))
     .delete("/relations", c -> relations.delete(c))
     .get("/search", c -> search.search(c))
@@ -228,21 +232,41 @@ struct Params
   end
 
   @doc """
+  Reads the `:id` path parameter as an integer.
+  """
+  fn id(c: Conn) -> Int ! Error
+    text = c.param("id").or("")
+
+    text.to_int()
+      rescue _ -> fail Error.Validation("id must be an integer, got '#{text}'")
+  end
+
+  @doc """
   Reads and bounds the `limit` and `offset` pagination parameters.
   """
   fn page(c: Conn) -> (Int, Int) ! Error
-    limit = try Params.int(c, "limit", DEFAULT_PAGE_LIMIT)
+    limit = try Params.limit(c, DEFAULT_PAGE_LIMIT)
     offset = try Params.int(c, "offset", 0)
-
-    if limit < 1 or limit > MAX_PAGE_LIMIT
-      fail Error.Validation("limit must be between 1 and #{MAX_PAGE_LIMIT}")
-    end
 
     if offset < 0
       fail Error.Validation("offset must not be negative")
     end
 
     (limit, offset)
+  end
+
+  @doc """
+  Reads the `limit` query parameter, `default` when absent, and
+  bounds it to the page rules.
+  """
+  fn limit(c: Conn, default: Int) -> Int ! Error
+    limit = try Params.int(c, "limit", default)
+
+    if limit < 1 or limit > MAX_PAGE_LIMIT
+      fail Error.Validation("limit must be between 1 and #{MAX_PAGE_LIMIT}")
+    end
+
+    limit
   end
 
   fn int(c: Conn, name: String, default: Int) -> Int ! Error

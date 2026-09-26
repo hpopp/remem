@@ -8,14 +8,14 @@ One timestamped fact about an entity.
 """
 struct Observation: JSON.Encoding
   content: String
-  created_at: String
-  updated_at: String
+  created_at: DateTime
+  updated_at: DateTime
 
   fn to_json(self) -> JSON.Value
     [
       "content": self.content.to_json(),
-      "created_at": self.created_at.to_json(),
-      "updated_at": self.updated_at.to_json()
+      "created_at": self.created_at.to_string().to_json(),
+      "updated_at": self.updated_at.to_string().to_json()
     ]
   end
 end
@@ -26,19 +26,19 @@ observation rows. `kind` serializes as `type` in the API, since
 `type` is a Koja keyword.
 """
 struct Entity: JSON.Encoding
-  created_at: String
+  created_at: DateTime
   id: Int
   kind: String
   name: String
   observations: List<Observation>
-  updated_at: String
+  updated_at: DateTime
 
   fn to_json(self) -> JSON.Value
     [
       "name": self.name.to_json(), "type": self.kind.to_json(),
       "observations": JSON.Value.Array(self.observations.map(o -> o.to_json())),
-      "created_at": self.created_at.to_json(),
-      "updated_at": self.updated_at.to_json()
+      "created_at": self.created_at.to_string().to_json(),
+      "updated_at": self.updated_at.to_string().to_json()
     ]
   end
 end
@@ -48,18 +48,18 @@ An entity without its observations, plus how many it holds. The
 shape `GET /entities` and `list_entities` return.
 """
 struct EntitySummary: JSON.Encoding
-  created_at: String
+  created_at: DateTime
   kind: String
   name: String
   observation_count: Int
-  updated_at: String
+  updated_at: DateTime
 
   fn to_json(self) -> JSON.Value
     [
       "name": self.name.to_json(), "type": self.kind.to_json(),
       "observation_count": self.observation_count.to_json(),
-      "created_at": self.created_at.to_json(),
-      "updated_at": self.updated_at.to_json()
+      "created_at": self.created_at.to_string().to_json(),
+      "updated_at": self.updated_at.to_string().to_json()
     ]
   end
 end
@@ -162,21 +162,9 @@ struct EntityStore
     )
 
     entity_id =
-      match outcome
-        Result.Err(e) ->
-          return (
-            conn,
-            Result.Err(Error.from_postgres(e, "entity #{name} already exists"))
-          )
-
-        Result.Ok(qr) ->
-          match qr.rows.get(0)
-            Option.Some(row) -> row.get(0).map(v -> v.int_or(0)).or(0)
-            Option.None ->
-              return (
-                conn, Result.Err(Error.Database("insert returned no row"))
-              )
-          end
+      match inserted_id(outcome, "entity #{name} already exists")
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(id) -> id
       end
 
     # An empty observations list inserts zero rows, so no branch.
@@ -202,11 +190,12 @@ struct EntityStore
   fn find(conn: Connection, name: String)
     -> (Connection, Result<Option<Entity>, Error>)
 
-    query_one(
-      conn,
+    (conn, outcome) = conn.execute(
       "#{select_sql()} WHERE e.name = $1 GROUP BY e.id",
       [Value.string(name)],
     )
+
+    (conn, first_entity(outcome))
   end
 
   @doc """
@@ -227,11 +216,7 @@ struct EntityStore
     LIMIT #{limit} OFFSET #{offset}
     """)
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) ->
-        (conn, Result.Ok(qr.rows.map(row -> row_to_summary(row))))
-    end
+    (conn, summaries_from(outcome))
   end
 
   @doc """
@@ -239,12 +224,12 @@ struct EntityStore
   """
   fn all(conn: Connection) -> (Connection, Result<List<Entity>, Error>)
     (conn, outcome) = conn.query("#{select_sql()} GROUP BY e.id ORDER BY e.id")
-    collect(conn, outcome)
+    (conn, entities_from(outcome))
   end
 
   @doc """
   Deletes an entity by name, returning `true` when a row was removed.
-  Observations and relations cascade in the database.
+  Observations, events, and relations cascade in the database.
   """
   fn remove(conn: Connection, name: String) -> (Connection, Result<Bool, Error>)
     (conn, outcome) = conn.execute(
@@ -252,18 +237,15 @@ struct EntityStore
       [Value.string(name)],
     )
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) -> (conn, Result.Ok(qr.tag != "DELETE 0"))
-    end
+    (conn, changed(outcome))
   end
 
   @doc """
-  Renames an entity and touches its `updated_at`. Relations reference
-  ids, so they follow. Observation embeddings carry the old name in
-  their text, so they clear and the backfill recomputes them. Returns
-  the entity, or `None` for an unknown name. A taken name fails with
-  `Duplicate`.
+  Renames an entity and touches its `updated_at`. Relations and
+  events reference ids, so they follow. Observation and event
+  embeddings carry the old name in their text, so they clear and the
+  backfill recomputes them. Returns the entity, or `None` for an
+  unknown name. A taken name fails with `Duplicate`.
   """
   fn rename(conn: Connection, name: String, new_name: String)
     -> (Connection, Result<Option<Entity>, Error>)
@@ -273,31 +255,27 @@ struct EntityStore
       [Value.string(name), Value.string(new_name)],
     )
 
-    maybe_id =
-      match outcome
-        Result.Err(e) ->
-          return (
-            conn,
-            Result.Err(Error.from_postgres(
-              e,
-              "entity #{new_name} already exists",
-            ))
-          )
-        Result.Ok(qr) ->
-          qr.rows.get(0).map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
-      end
-
     entity_id =
-      match maybe_id
-        Option.Some(id) ->
-          id
+      match returned_id(outcome, "entity #{new_name} already exists")
+        Result.Err(e) ->
+          return (conn, Result.Err(e))
 
-        Option.None ->
+        Result.Ok(Option.None) ->
           missing: Option<Entity> = Option.None
           return (conn, Result.Ok(missing))
+
+        Result.Ok(Option.Some(id)) ->
+          id
       end
 
     (conn, cleared) = clear_embeddings(conn, entity_id)
+
+    match cleared
+      Result.Err(e) -> return (conn, Result.Err(e))
+      Result.Ok(_) -> ()
+    end
+
+    (conn, cleared) = EventStore.clear_embeddings(conn, entity_id)
 
     match cleared
       Result.Err(e) -> return (conn, Result.Err(e))
@@ -309,12 +287,13 @@ struct EntityStore
 
   @doc """
   Folds `source` into `into` and deletes `source`, in one transaction.
-  Observations move with their timestamps, except ones `into` already
-  holds word for word. Relations rewire to `into`, except ones that
-  would become self-loops or duplicate an existing relation. Moved
-  observations clear their embeddings, since the text carries the
-  entity name. Fails with `Validation` when the names match and
-  `NotFound` when either is unknown. Returns the target entity.
+  Events move as they are. Observations move with their timestamps,
+  except ones `into` already holds word for word. Relations rewire to
+  `into`, except ones that would become self-loops or duplicate an
+  existing relation. Moved events and observations clear their
+  embeddings, since the text carries the entity name. Fails with
+  `Validation` when the names match and `NotFound` when either is
+  unknown. Returns the target entity.
   """
   fn merge(conn: Connection, source: String, into: String)
     -> (Connection, Result<Entity, Error>)
@@ -362,11 +341,9 @@ struct EntityStore
     (conn, committed) = exec(conn, "COMMIT", List.new())
 
     match committed
-      Result.Err(e) -> return (conn, Result.Err(e))
-      Result.Ok(_) -> ()
+      Result.Err(e) -> (conn, Result.Err(e))
+      Result.Ok(_) -> require_entity(conn, into)
     end
-
-    require_entity(conn, into)
   end
 
   @doc """
@@ -383,20 +360,17 @@ struct EntityStore
 
     (conn, touched) = touch(conn, name)
 
-    maybe_id =
-      match touched
-        Result.Err(e) -> return (conn, Result.Err(e))
-        Result.Ok(m) -> m
-      end
-
     entity_id =
-      match maybe_id
-        Option.Some(id) ->
-          id
+      match touched
+        Result.Err(e) ->
+          return (conn, Result.Err(e))
 
-        Option.None ->
+        Result.Ok(Option.None) ->
           missing: Option<(Entity, List<(Int, String)>)> = Option.None
           return (conn, Result.Ok(missing))
+
+        Result.Ok(Option.Some(id)) ->
+          id
       end
 
     (conn, inserted) = insert_observations(conn, entity_id, observations)
@@ -428,23 +402,20 @@ struct EntityStore
 
     (conn, touched) = touch(conn, name)
 
-    maybe_id =
-      match touched
-        Result.Err(e) -> return (conn, Result.Err(e))
-        Result.Ok(m) -> m
-      end
-
     entity_id =
-      match maybe_id
-        Option.Some(id) ->
-          id
+      match touched
+        Result.Err(e) ->
+          return (conn, Result.Err(e))
 
-        Option.None ->
+        Result.Ok(Option.None) ->
           missing: Option<Entity> = Option.None
           return (conn, Result.Ok(missing))
+
+        Result.Ok(Option.Some(id)) ->
+          id
       end
 
-    (conn, outcome) = conn.execute("""
+    (conn, deleted) = exec(conn, """
       DELETE FROM observations
       WHERE entity_id = $1
         AND content IN (SELECT jsonb_array_elements_text($2::jsonb))
@@ -453,12 +424,10 @@ struct EntityStore
         Value.string(JsonUtil.encode_string_list(observations))
       ])
 
-    match outcome
-      Result.Err(e) -> return (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(_) -> ()
+    match deleted
+      Result.Err(e) -> (conn, Result.Err(e))
+      Result.Ok(_) -> find(conn, name)
     end
-
-    find(conn, name)
   end
 
   @doc """
@@ -488,10 +457,7 @@ struct EntityStore
       WHERE o.id = v.id
       """, [Value.string(JSON.encode(Json.Array(pairs)))])
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) -> (conn, Result.Ok(affected(qr.tag)))
-    end
+    (conn, affected_rows(outcome))
   end
 
   @doc """
@@ -510,19 +476,7 @@ struct EntityStore
       LIMIT $1
       """, [Value.int(limit)])
 
-    match outcome
-      Result.Err(e) ->
-        (conn, Result.Err(Error.Database(e.message())))
-
-      Result.Ok(qr) ->
-        rows = qr.rows.map(row -> PendingObservation{
-          content: text_at(row, 3),
-          id: row.get(0).map(v -> v.int_or(0)).or(0),
-          kind: text_at(row, 2),
-          name: text_at(row, 1),
-        })
-        (conn, Result.Ok(rows))
-    end
+    (conn, pending_from(outcome))
   end
 
   @doc """
@@ -539,10 +493,7 @@ struct EntityStore
       LIMIT #{SIMILAR_LIMIT}
       """, [Value.string(name)])
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) -> (conn, Result.Ok(qr.rows.map(row -> text_at(row, 0))))
-    end
+    (conn, names_from(outcome))
   end
 
   @doc """
@@ -573,19 +524,7 @@ struct EntityStore
           conn.execute(fuzzy_sql(), [Value.string(query), Value.int(limit)])
       end
 
-    match outcome
-      Result.Err(e) ->
-        (conn, Result.Err(Error.Database(e.message())))
-
-      Result.Ok(qr) ->
-        results = qr.rows.map(row -> SearchResult{
-          kind: text_at(row, 1),
-          name: text_at(row, 0),
-          observations: JsonUtil.decode_hits(text_at(row, 2)),
-          score: row.get(3).map(v -> v.float_or(0.0)).or(0.0),
-        })
-        (conn, Result.Ok(results))
-    end
+    (conn, results_from(outcome))
   end
 
   # Result columns: name, type, matching observations JSON, score.
@@ -660,6 +599,10 @@ struct EntityStore
     both = [Value.int(source_id), Value.int(target_id)]
 
     steps = [("""
+        UPDATE events
+        SET entity_id = $2, embedding = NULL
+        WHERE entity_id = $1
+        """, both), ("""
         UPDATE observations
         SET entity_id = $2, embedding = NULL
         WHERE entity_id = $1
@@ -691,7 +634,7 @@ struct EntityStore
 
     for step in steps
       (sql, params) = step
-      (conn, outcome) = exec_unit(conn, sql, params)
+      (conn, outcome) = exec(conn, sql, params)
 
       match outcome
         Result.Err(e) -> return (conn, Result.Err(e))
@@ -720,16 +663,7 @@ struct EntityStore
         Value.string(JsonUtil.encode_string_list(observations))
       ])
 
-    match outcome
-      Result.Err(e) ->
-        (conn, Result.Err(Error.Database(e.message())))
-
-      Result.Ok(qr) ->
-        rows = qr.rows.map(row -> (
-          row.get(0).map(v -> v.int_or(0)).or(0), text_at(row, 1)
-        ))
-        (conn, Result.Ok(rows))
-    end
+    (conn, inserted_rows(outcome))
   end
 
   # The near-duplicate guard for `create`. Passes when `confirm` is
@@ -742,22 +676,16 @@ struct EntityStore
     end
 
     (conn, similar) = similar_names(conn, name)
+    (conn, no_similar(similar))
+  end
 
-    match similar
-      Result.Err(e) ->
-        (conn, Result.Err(e))
+  # Fails with `Duplicate` when the guard found close names.
+  priv fn no_similar(similar: Result<List<String>, Error>) ! Error
+    names = try similar
 
-      Result.Ok(names) ->
-        if names.empty?()
-          (conn, Result.Ok(()))
-        else
-          (
-            conn,
-            Result.Err(Error.Duplicate("similar entities exist: " <>
-              String.join(names, ", ") <>
-              ". Pass confirm true to create anyway."))
-          )
-        end
+    if not names.empty?()
+      fail Error.Duplicate("similar entities exist: " <>
+        String.join(names, ", ") <> ". Pass confirm true to create anyway.")
     end
   end
 
@@ -766,16 +694,19 @@ struct EntityStore
   priv fn clear_embeddings(conn: Connection, entity_id: Int)
     -> (Connection, Result<(), Error>)
 
-    exec_unit(
+    exec(
       conn,
       "UPDATE observations SET embedding = NULL WHERE entity_id = $1",
       [Value.int(entity_id)],
     )
   end
 
-  # Bumps an entity's `updated_at`, returning its id or `None` for an
-  # unknown name. Doubles as the existence check for mutations.
-  priv fn touch(conn: Connection, name: String)
+  @doc """
+  Bumps an entity's `updated_at`, returning its id or `None` for an
+  unknown name. Doubles as the existence check for mutations, here
+  and in `EventStore`.
+  """
+  fn touch(conn: Connection, name: String)
     -> (Connection, Result<Option<Int>, Error>)
 
     (conn, outcome) = conn.execute(
@@ -783,14 +714,7 @@ struct EntityStore
       [Value.string(name)],
     )
 
-    match outcome
-      Result.Err(e) ->
-        (conn, Result.Err(Error.Database(e.message())))
-
-      Result.Ok(qr) ->
-        id = qr.rows.get(0).map(row -> row.get(0).map(v -> v.int_or(0)).or(0))
-        (conn, Result.Ok(id))
-    end
+    (conn, first_id(outcome))
   end
 
   # Resolves a name to its id, or `NotFound` for an unknown name.
@@ -802,18 +726,7 @@ struct EntityStore
       [Value.string(name)],
     )
 
-    match outcome
-      Result.Err(e) ->
-        (conn, Result.Err(Error.Database(e.message())))
-
-      Result.Ok(qr) ->
-        match qr.rows.get(0)
-          Option.Some(row) ->
-            (conn, Result.Ok(row.get(0).map(v -> v.int_or(0)).or(0)))
-          Option.None ->
-            (conn, Result.Err(Error.NotFound("no entity named #{name}")))
-        end
-    end
+    (conn, required_id(outcome, name))
   end
 
   # Re-reads an entity that is known to exist, converting the
@@ -822,99 +735,172 @@ struct EntityStore
     -> (Connection, Result<Entity, Error>)
 
     (conn, found) = find(conn, name)
-
-    maybe =
-      match found
-        Result.Err(e) -> return (conn, Result.Err(e))
-        Result.Ok(m) -> m
-      end
-
-    match maybe
-      Option.Some(entity) -> (conn, Result.Ok(entity))
-      Option.None ->
-        (conn, Result.Err(Error.Database("entity #{name} vanished mid-write")))
-    end
-  end
-
-  priv fn query_one(conn: Connection, sql: String, params: List<Value>)
-    -> (Connection, Result<Option<Entity>, Error>)
-
-    (conn, outcome) = conn.execute(sql, params)
-
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) -> (conn, Result.Ok(first_entity(qr)))
-    end
+    (conn, present(found, name))
   end
 
   priv fn exec(conn: Connection, sql: String, params: List<Value>)
-    -> (Connection, Result<QueryResult, Error>)
-
-    (conn, outcome) = conn.execute(sql, params)
-
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) -> (conn, Result.Ok(qr))
-    end
-  end
-
-  priv fn exec_unit(conn: Connection, sql: String, params: List<Value>)
     -> (Connection, Result<(), Error>)
 
-    (conn, outcome) = exec(conn, sql, params)
-
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(e))
-      Result.Ok(_) -> (conn, Result.Ok(()))
-    end
+    (conn, outcome) = conn.execute(sql, params)
+    (conn, done(outcome))
   end
 
-  priv fn collect(
-    conn: Connection,
+  # The id an INSERT ... RETURNING id produced. A unique violation
+  # reads as `Duplicate` with the given description.
+  priv fn inserted_id(
     outcome: Result<QueryResult, Postgres.Error>,
-  ) -> (Connection, Result<List<Entity>, Error>)
+    duplicate: String,
+  ) -> Int ! Error
 
-    match outcome
-      Result.Err(e) -> (conn, Result.Err(Error.Database(e.message())))
-      Result.Ok(qr) -> (conn, Result.Ok(qr.rows.map(row -> row_to_entity(row))))
+    qr = outcome rescue e -> fail Error.from_postgres(e, duplicate)
+
+    match qr.rows.get(0)
+      Option.Some(row) -> int_at(row, 0)
+      Option.None -> fail Error.Database("insert returned no row")
     end
   end
 
-  priv fn first_entity(qr: QueryResult) -> Option<Entity>
-    qr.rows.get(0).map(row -> row_to_entity(row))
+  # The id an UPDATE ... RETURNING id produced, or `None` when no row
+  # matched. A unique violation reads as `Duplicate`.
+  priv fn returned_id(
+    outcome: Result<QueryResult, Postgres.Error>,
+    duplicate: String,
+  ) -> Option<Int> ! Error
+
+    qr = outcome rescue e -> fail Error.from_postgres(e, duplicate)
+    qr.rows.get(0).map(row -> int_at(row, 0))
   end
 
-  priv fn row_to_entity(row: List<Value>) -> Entity
-    Entity{
-      created_at: text_at(row, 4),
-      id: row.get(0).map(v -> v.int_or(0)).or(0),
+  # The id in the first row, or `None` when there is no row.
+  priv fn first_id(outcome: Result<QueryResult, Postgres.Error>)
+    -> Option<Int> ! Error
+
+    qr = try db_result(outcome)
+    qr.rows.get(0).map(row -> int_at(row, 0))
+  end
+
+  # The id in the first row, or `NotFound` when there is no row.
+  priv fn required_id(
+    outcome: Result<QueryResult, Postgres.Error>,
+    name: String,
+  ) -> Int ! Error
+
+    qr = try db_result(outcome)
+
+    match qr.rows.get(0)
+      Option.Some(row) -> int_at(row, 0)
+      Option.None -> fail Error.NotFound("no entity named #{name}")
+    end
+  end
+
+  # An entity that a prior step proved exists.
+  priv fn present(found: Result<Option<Entity>, Error>, name: String)
+    -> Entity ! Error
+
+    match try found
+      Option.Some(entity) -> entity
+      Option.None -> fail Error.Database("entity #{name} vanished mid-write")
+    end
+  end
+
+  priv fn inserted_rows(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<(Int, String)> ! Error
+
+    qr = try db_result(outcome)
+    qr.rows.map(row -> (int_at(row, 0), text_at(row, 1)))
+  end
+
+  priv fn names_from(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<String> ! Error
+
+    qr = try db_result(outcome)
+    qr.rows.map(row -> text_at(row, 0))
+  end
+
+  priv fn pending_from(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<PendingObservation> ! Error
+
+    qr = try db_result(outcome)
+
+    qr.rows.map(row -> PendingObservation{
+      content: text_at(row, 3),
+      id: int_at(row, 0),
       kind: text_at(row, 2),
       name: text_at(row, 1),
-      observations: JsonUtil.decode_observations(text_at(row, 3)),
-      updated_at: text_at(row, 5),
-    }
+    })
   end
 
-  priv fn row_to_summary(row: List<Value>) -> EntitySummary
-    EntitySummary{
-      created_at: text_at(row, 3),
+  priv fn results_from(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<SearchResult> ! Error
+
+    qr = try db_result(outcome)
+
+    qr.rows.map(row -> SearchResult{
       kind: text_at(row, 1),
       name: text_at(row, 0),
-      observation_count: row.get(2).map(v -> v.int_or(0)).or(0),
-      updated_at: text_at(row, 4),
+      observations: JsonUtil.decode_hits(text_at(row, 2)),
+      score: row.get(3).map(v -> v.float_or(0.0)).or(0.0),
+    })
+  end
+
+  priv fn first_entity(outcome: Result<QueryResult, Postgres.Error>)
+    -> Option<Entity> ! Error
+
+    qr = try db_result(outcome)
+
+    match qr.rows.get(0)
+      Option.None -> Option.None
+      Option.Some(row) -> Option.Some(try row_to_entity(row))
+    end
+  end
+
+  # Row mapping can fail on an unreadable timestamp, so these loop
+  # with `try` instead of mapping.
+  priv fn entities_from(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<Entity> ! Error
+
+    qr = try db_result(outcome)
+    entities: List<Entity> = List.new()
+
+    for row in qr.rows
+      entities = entities.append(try row_to_entity(row))
+    end
+
+    entities
+  end
+
+  priv fn summaries_from(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<EntitySummary> ! Error
+
+    qr = try db_result(outcome)
+    summaries: List<EntitySummary> = List.new()
+
+    for row in qr.rows
+      summaries = summaries.append(try row_to_summary(row))
+    end
+
+    summaries
+  end
+
+  priv fn row_to_entity(row: List<Value>) -> Entity ! Error
+    Entity{
+      created_at: try db_time(text_at(row, 4)),
+      id: int_at(row, 0),
+      kind: text_at(row, 2),
+      name: text_at(row, 1),
+      observations: try JsonUtil.decode_observations(text_at(row, 3)),
+      updated_at: try db_time(text_at(row, 5)),
     }
   end
 
-  priv fn text_at(row: List<Value>, index: Int) -> String
-    row.get(index).map(v -> v.string_or("")).or("")
-  end
-
-  # Reads the row count out of an `UPDATE n` or `DELETE n` tag.
-  priv fn affected(tag: String) -> Int
-    match tag.split(" ").get(1)
-      Option.None -> 0
-      Option.Some(text) -> text.to_int() rescue _ -> 0
-    end
+  priv fn row_to_summary(row: List<Value>) -> EntitySummary ! Error
+    EntitySummary{
+      created_at: try db_time(text_at(row, 3)),
+      kind: text_at(row, 1),
+      name: text_at(row, 0),
+      observation_count: int_at(row, 2),
+      updated_at: try db_time(text_at(row, 4)),
+    }
   end
 
   # Column order every entity read shares:

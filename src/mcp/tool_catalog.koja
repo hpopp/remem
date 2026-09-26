@@ -1,0 +1,268 @@
+alias JSON.Value as Json
+
+@doc """
+The MCP tool catalog, with every tool's name, description, and input
+schema. Exposed for `tools/list` and tests. Descriptions steer agents
+to search before writing, to keep durable facts in observations and
+session details in events, and to keep the graph curated.
+"""
+struct ToolCatalog
+  fn tools -> Json
+    search_description = "Search the memory graph with a natural " <>
+      "language query. Ranking is hybrid: semantic similarity over " <>
+      "individual observations plus fuzzy entity name matching. Each " <>
+      "result is an entity with only the observations that matched. " <>
+      "Use get_entity for the rest. This is the way to recall stored " <>
+      "knowledge. Always search before writing, to build on what is " <>
+      "already known."
+
+    create_description = "Create a new entity. The memory graph is " <>
+      "curated: only save durable facts worth recalling in future " <>
+      "conversations. Session details belong in add_event. Search " <>
+      "first and prefer add_observations on an existing entity over " <>
+      "creating a near-duplicate. When a similar name already exists " <>
+      "the call is refused and names the matches. Pass confirm true " <>
+      "to create anyway."
+
+    get_description = "Fetch one entity by exact name, with its " <>
+      "relations and its most recent events."
+
+    add_event_description = "Record something that happened to an " <>
+      "entity at a point in time, such as a work session, a deploy, " <>
+      "or a decision made today. Events are the session log, kept in " <>
+      "order and never deduplicated. Durable facts still go in " <>
+      "add_observations. Set occurred_at (RFC 3339) when the event " <>
+      "happened at another time, otherwise it is now."
+
+    recent_events_description = "List an entity's events, newest " <>
+      "first. Use this at the start of work on an entity to see " <>
+      "what happened last time."
+
+    merge_description = "Fold one entity into another and delete the " <>
+      "source. Observations move with their timestamps, relations " <>
+      "rewire to the target, and exact duplicates drop. Use this to " <>
+      "collapse near-duplicate entities."
+
+    rename_description = "Rename an entity. Relations follow the " <>
+      "entity. The new name must not be taken."
+
+    list_description = "List every entity with its type and " <>
+      "observation count, most observations first, without the " <>
+      "observations themselves. Use this to survey the graph and " <>
+      "spot entities that need splitting or merging."
+
+    delete_description = "Delete an entity by name. Its observations " <>
+      "and relations go with it."
+
+    add_description = "Add facts to an existing entity. Duplicates " <>
+      "are ignored. Keep observations short, factual, and durable. " <>
+      "What happened in this session is an event, not an observation."
+
+    relation_description = "Create a directed, typed relation between " <>
+      "two entities. Use an active verb phrase for the type, like " <>
+      "wrote or depends_on."
+
+    Json.Array([
+      tool(
+        "search_memory",
+        search_description,
+        object_schema(
+          [
+            ("query", string_prop("Natural language search query")),
+            ("limit", int_prop("Max results, 1-100, default 10"))
+          ],
+          ["query"],
+        ),
+      ),
+      tool(
+        "get_entity",
+        get_description,
+        object_schema([("name", string_prop("Entity name"))], ["name"]),
+      ),
+      tool(
+        "create_entity",
+        create_description,
+        object_schema(
+          [
+            ("name", string_prop("Unique entity name")),
+            ("type", string_prop("Entity type, like person or project")),
+            (
+              "observations",
+              string_array_prop("Initial facts about the entity")
+            ),
+            (
+              "confirm",
+              bool_prop("Create even when similar entity names exist")
+            )
+          ],
+          ["name", "type"],
+        ),
+      ),
+      tool(
+        "rename_entity",
+        rename_description,
+        object_schema(
+          [
+            ("name", string_prop("Current entity name")),
+            ("new_name", string_prop("New entity name"))
+          ],
+          ["name", "new_name"],
+        ),
+      ),
+      tool(
+        "merge_entities",
+        merge_description,
+        object_schema(
+          [
+            ("source", string_prop("Entity to fold in and delete")),
+            ("into", string_prop("Entity that receives the source"))
+          ],
+          ["source", "into"],
+        ),
+      ),
+      tool(
+        "list_entities",
+        list_description,
+        object_schema(
+          [
+            ("limit", int_prop("Max entities, 1-1000, default 100")),
+            ("offset", int_prop("Entities to skip, default 0"))
+          ],
+          List.new(),
+        ),
+      ),
+      tool(
+        "delete_entity",
+        delete_description,
+        object_schema([("name", string_prop("Entity name"))], ["name"]),
+      ),
+      tool(
+        "add_observations",
+        add_description,
+        object_schema(
+          [
+            ("name", string_prop("Entity name")),
+            ("observations", string_array_prop("Facts to add"))
+          ],
+          ["name", "observations"],
+        ),
+      ),
+      tool(
+        "remove_observations",
+        "Remove exact-match facts from an entity.",
+        object_schema(
+          [
+            ("name", string_prop("Entity name")),
+            ("observations", string_array_prop("Facts to remove"))
+          ],
+          ["name", "observations"],
+        ),
+      ),
+      tool(
+        "add_event",
+        add_event_description,
+        object_schema(
+          [
+            ("name", string_prop("Entity name")),
+            ("content", string_prop("What happened, in a sentence or two")),
+            (
+              "occurred_at",
+              string_prop("When it happened, RFC 3339. Defaults to now.")
+            )
+          ],
+          ["name", "content"],
+        ),
+      ),
+      tool(
+        "recent_events",
+        recent_events_description,
+        object_schema(
+          [
+            ("name", string_prop("Entity name")),
+            ("limit", int_prop("Max events, 1-100, default 10"))
+          ],
+          ["name"],
+        ),
+      ),
+      tool(
+        "remove_event",
+        "Delete one event by its id.",
+        object_schema([("id", int_prop("Event id"))], ["id"]),
+      ),
+      tool(
+        "create_relation",
+        relation_description,
+        object_schema(
+          [
+            ("from", string_prop("Source entity name")),
+            ("to", string_prop("Target entity name")),
+            ("type", string_prop("Relation type, an active verb phrase"))
+          ],
+          ["from", "to", "type"],
+        ),
+      ),
+      tool(
+        "delete_relation",
+        "Delete a relation by its exact from, to, and type.",
+        object_schema(
+          [
+            ("from", string_prop("Source entity name")),
+            ("to", string_prop("Target entity name")),
+            ("type", string_prop("Relation type"))
+          ],
+          ["from", "to", "type"],
+        ),
+      )
+    ])
+  end
+
+  priv fn tool(name: String, description: String, schema: Json) -> Json
+    entry: Json = [
+      "name": name.to_json(), "description": description.to_json(),
+      "inputSchema": schema
+    ]
+    entry
+  end
+
+  priv fn object_schema(
+    properties: List<(String, Json)>,
+    required: List<String>,
+  ) -> Json
+
+    schema: Json = [
+      "type": "object".to_json(), "properties": Json.Object(properties),
+      "required": Json.Array(required.map(r -> r.to_json()))
+    ]
+    schema
+  end
+
+  priv fn string_prop(description: String) -> Json
+    prop: Json = [
+      "type": "string".to_json(), "description": description.to_json()
+    ]
+    prop
+  end
+
+  priv fn int_prop(description: String) -> Json
+    prop: Json = [
+      "type": "integer".to_json(), "description": description.to_json()
+    ]
+    prop
+  end
+
+  priv fn bool_prop(description: String) -> Json
+    prop: Json = [
+      "type": "boolean".to_json(), "description": description.to_json()
+    ]
+    prop
+  end
+
+  priv fn string_array_prop(description: String) -> Json
+    items: Json = ["type": "string".to_json()]
+    prop: Json = [
+      "type": "array".to_json(), "items": items,
+      "description": description.to_json()
+    ]
+    prop
+  end
+end

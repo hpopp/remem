@@ -1,0 +1,253 @@
+alias HTTP.Response
+alias JSON.Value as Json
+alias Log.Logger
+alias Postgres.Connection
+
+@doc """
+The tools that read and write entities. `search_memory`,
+`get_entity`, `create_entity`, `rename_entity`, `merge_entities`,
+`list_entities`, and `delete_entity`. Each fn validates its
+arguments, runs the store, and answers with a `ToolResult`.
+"""
+struct EntityTools
+  fn search(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+    log: Logger,
+  ) -> (Response, Connection)
+
+    query =
+      match JsonUtil.get_string(arguments, "query")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "query is required"), conn)
+      end
+
+    limit = JsonUtil.get_int(arguments, "limit").or(MCP_DEFAULT_SEARCH_LIMIT)
+
+    if limit < 1 or limit > MCP_MAX_SEARCH_LIMIT
+      return (
+        ToolResult.err(
+          log,
+          id,
+          "limit must be between 1 and #{MCP_MAX_SEARCH_LIMIT}",
+        ), conn
+      )
+    end
+
+    # The log is bookkeeping, so a failed insert never fails the search.
+    (conn, logged) = SearchLog.record(conn, query)
+    logged rescue e -> warn_and(log, "search log: " <> e.message(), ())
+
+    # Embedder down means fuzzy-only ranking, not a failed search.
+    embedding =
+      match embedder.embed(query)
+        Result.Ok(vector) ->
+          Option.Some(vector)
+
+        Result.Err(e) ->
+          log.warn("search falls back to fuzzy ranking only: " <> e.message())
+          Option.None
+      end
+
+    (conn, found) = EntityStore.search(conn, query, embedding, limit)
+    (ToolResult.render(log, id, search_payload(query, found)), conn)
+  end
+
+  fn get(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "name is required"), conn)
+      end
+
+    (conn, found) = EntityStore.find(conn, name)
+
+    entity =
+      match required(found, name)
+        Result.Err(e) -> return (ToolResult.err(log, id, e.message()), conn)
+        Result.Ok(present) -> present
+      end
+
+    (conn, relations) = RelationStore.for_entity(conn, name)
+
+    relation_list =
+      match relations
+        Result.Err(e) -> return (ToolResult.err(log, id, e.message()), conn)
+        Result.Ok(list) -> list
+      end
+
+    (conn, events) = EventStore.recent(conn, name, RECENT_EVENTS)
+    (
+      ToolResult.render(log, id, entity_payload(entity, relation_list, events)),
+      conn
+    )
+  end
+
+  fn create(
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+    log: Logger,
+  ) -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "name is required"), conn)
+      end
+
+    kind =
+      match JsonUtil.get_string(arguments, "type")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "type is required"), conn)
+      end
+
+    observations = JsonUtil.distinct(
+      JsonUtil.get_string_list(arguments, "observations").or(List.new()),
+    )
+
+    confirm = JsonUtil.get_bool(arguments, "confirm").or(false)
+
+    (conn, created) = EntityStore.create(
+      conn,
+      name,
+      kind,
+      observations,
+      confirm,
+    )
+
+    match created
+      Result.Err(e) ->
+        (ToolResult.err(log, id, e.message()), conn)
+
+      Result.Ok(pair) ->
+        (entity, rows) = pair
+        conn = embed_rows(conn, embedder, entity, rows)
+        (ToolResult.ok(id, entity.to_json()), conn)
+    end
+  end
+
+  fn rename(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "name is required"), conn)
+      end
+
+    new_name =
+      match JsonUtil.get_string(arguments, "new_name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "new_name is required"), conn)
+      end
+
+    (conn, renamed) = EntityStore.rename(conn, name, new_name)
+    (ToolResult.render(log, id, required(renamed, name)), conn)
+  end
+
+  fn merge(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    source =
+      match JsonUtil.get_string(arguments, "source")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "source is required"), conn)
+      end
+
+    into =
+      match JsonUtil.get_string(arguments, "into")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "into is required"), conn)
+      end
+
+    (conn, merged) = EntityStore.merge(conn, source, into)
+    (ToolResult.render(log, id, merged), conn)
+  end
+
+  fn list(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    limit = JsonUtil.get_int(arguments, "limit").or(DEFAULT_PAGE_LIMIT)
+    offset = JsonUtil.get_int(arguments, "offset").or(0)
+
+    if limit < 1 or limit > MAX_PAGE_LIMIT
+      return (
+        ToolResult.err(log, id, "limit must be between 1 and #{MAX_PAGE_LIMIT}"),
+        conn
+      )
+    end
+
+    if offset < 0
+      return (ToolResult.err(log, id, "offset must not be negative"), conn)
+    end
+
+    (conn, listed) = EntityStore.summaries(conn, limit, offset)
+    (ToolResult.render(log, id, list_payload(listed)), conn)
+  end
+
+  fn delete(arguments: Json, id: Json, conn: Connection, log: Logger)
+    -> (Response, Connection)
+
+    name =
+      match JsonUtil.get_string(arguments, "name")
+        Option.Some(text) when not text.empty?() -> text
+        _ -> return (ToolResult.err(log, id, "name is required"), conn)
+      end
+
+    (conn, removed) = EntityStore.remove(conn, name)
+
+    (
+      ToolResult.deleted(
+        log,
+        id,
+        removed,
+        "deleted #{name}",
+        "no entity named #{name}",
+      ), conn
+    )
+  end
+
+  priv fn search_payload(
+    query: String,
+    found: Result<List<SearchResult>, Error>,
+  ) -> Json ! Error
+
+    results = try found
+    payload: Json = [
+      "query": query.to_json(),
+      "results": Json.Array(results.map(r -> r.to_json()))
+    ]
+    payload
+  end
+
+  priv fn entity_payload(
+    entity: Entity,
+    relations: List<Relation>,
+    events: Result<Option<List<Event>>, Error>,
+  ) -> Json ! Error
+
+    # The entity was found a moment ago, so `None` means it vanished
+    # mid-read. An empty list is the honest answer.
+    recent = try events
+    payload: Json = [
+      "entity": entity.to_json(),
+      "relations": Json.Array(relations.map(r -> r.to_json())),
+      "events": Json.Array(recent.or(List.new()).map(e -> e.to_json()))
+    ]
+    payload
+  end
+
+  priv fn list_payload(listed: Result<List<EntitySummary>, Error>)
+    -> Json ! Error
+
+    summaries = try listed
+    payload: Json = ["entities": Json.Array(summaries.map(s -> s.to_json()))]
+    payload
+  end
+end

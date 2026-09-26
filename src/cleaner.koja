@@ -67,15 +67,8 @@ struct Cleaner: Process<Cleaner.Config, (), ()>
       Result.Ok(db) ->
         (db, outcome) = SearchLog.prune(db, RETENTION_DAYS, SWEEP_LIMIT)
         self.pool.checkin(db)
-
-        match outcome
-          Result.Ok(count) ->
-            count
-
-          Result.Err(e) ->
-            self.log.warn("search log sweep: " <> e.message())
-            0
-        end
+        outcome
+          rescue e -> warn_and(self.log, "search log sweep: " <> e.message(), 0)
     end
   end
 end

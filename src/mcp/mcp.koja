@@ -1,0 +1,173 @@
+alias HTTP.Response
+alias JSON.Value as Json
+alias Log.Logger
+alias OpenTelemetry.Attribute
+alias OpenTelemetry.SpanKind
+alias Postgres.Connection
+
+const MCP_PROTOCOL_VERSION: String = "2025-06-18"
+const MCP_DEFAULT_SEARCH_LIMIT: Int = 10
+const MCP_MAX_SEARCH_LIMIT: Int = 100
+
+@doc """
+MCP server endpoint (streamable HTTP transport) at `POST /mcp`. The
+server is stateless and never streams, so each JSON-RPC message gets
+one JSON response and `GET /mcp` is a 405.
+
+This file is the framing and the dispatch table. The tool catalog is
+`ToolCatalog`, response builders are `RPC` and `ToolResult`, and the
+tools themselves live in `EntityTools`, `ObservationTools`,
+`EventTools`, and `RelationTools`.
+
+Tools mirror the REST API, with one deliberate omission. There is no
+read-the-whole-graph tool. Search is the way in, so agent clients
+retrieve by relevance instead of loading everything. `list_entities`
+returns names and counts only, for curation. Tool descriptions steer
+agents to search before writing and to keep the graph curated.
+"""
+struct Mcp
+  @doc """
+  Handles one JSON-RPC message. Notifications get 202 with no body.
+  A `tools/call` runs in its own span under `trace` and logs through
+  `log`, which defaults to text on stdout so tests need not build one.
+  """
+  fn handle(
+    body: String,
+    conn: Connection,
+    embedder: Embedder,
+    trace: Trace = Trace{},
+    log: Logger = Logger.default(),
+  ) -> (Response, Connection)
+
+    root =
+      match JSON.decode(body)
+        Result.Ok(value) -> value
+        Result.Err(_) ->
+          return (
+            RPC.error(Json.Null, -32700, "malformed JSON-RPC message"), conn
+          )
+      end
+
+    method = JsonUtil.get_string(root, "method").or("")
+
+    id =
+      match JsonUtil.get(root, "id")
+        Option.Some(value) -> value
+        Option.None -> return (RPC.accepted(), conn)
+      end
+
+    match method
+      "initialize" -> (RPC.result(id, initialize_result()), conn)
+      "ping" -> (RPC.result(id, RPC.empty_object()), conn)
+      "tools/list" -> (RPC.result(id, tools_result()), conn)
+      "tools/call" -> call_tool(root, id, conn, embedder, trace, log)
+      _ -> (RPC.error(id, -32601, "no such method #{method}"), conn)
+    end
+  end
+
+  # Names the tool in the log and the trace, then dispatches it. The
+  # embedder rebinds under the tool span so its request nests there.
+  priv fn call_tool(
+    root: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+    trace: Trace,
+    log: Logger,
+  ) -> (Response, Connection)
+
+    params = JsonUtil.get(root, "params").or(Json.Null)
+    name = JsonUtil.get_string(params, "name").or("")
+    arguments = JsonUtil.get(params, "arguments").or(Json.Null)
+
+    # The access log only shows POST /mcp, so name the tool here.
+    log.info("mcp tools/call #{name}")
+
+    attributes: Map<String, Attribute> = ["mcp.tool": Attribute.from(name)]
+
+    trace.span(
+      "tools/call",
+      SpanKind.Internal,
+      attributes,
+      ctx -> dispatch_tool(
+        name,
+        arguments,
+        id,
+        conn,
+        embedder.with_trace(trace.under(ctx)),
+        log,
+      ),
+    )
+  end
+
+  priv fn dispatch_tool(
+    name: String,
+    arguments: Json,
+    id: Json,
+    conn: Connection,
+    embedder: Embedder,
+    log: Logger,
+  ) -> (Response, Connection)
+
+    match name
+      "search_memory" ->
+        EntityTools.search(arguments, id, conn, embedder, log)
+
+      "get_entity" ->
+        EntityTools.get(arguments, id, conn, log)
+
+      "create_entity" ->
+        EntityTools.create(arguments, id, conn, embedder, log)
+
+      "rename_entity" ->
+        EntityTools.rename(arguments, id, conn, log)
+
+      "merge_entities" ->
+        EntityTools.merge(arguments, id, conn, log)
+
+      "list_entities" ->
+        EntityTools.list(arguments, id, conn, log)
+
+      "delete_entity" ->
+        EntityTools.delete(arguments, id, conn, log)
+
+      "add_observations" ->
+        ObservationTools.add(arguments, id, conn, embedder, log)
+
+      "remove_observations" ->
+        ObservationTools.remove(arguments, id, conn, log)
+
+      "add_event" ->
+        EventTools.add(arguments, id, conn, embedder, log)
+
+      "recent_events" ->
+        EventTools.recent(arguments, id, conn, log)
+
+      "remove_event" ->
+        EventTools.remove(arguments, id, conn, log)
+
+      "create_relation" ->
+        RelationTools.create(arguments, id, conn, log)
+
+      "delete_relation" ->
+        RelationTools.delete(arguments, id, conn, log)
+
+      _ ->
+        (RPC.error(id, -32602, "no such tool #{name}"), conn)
+    end
+  end
+
+  priv fn initialize_result -> Json
+    result: Json = [
+      "protocolVersion": MCP_PROTOCOL_VERSION.to_json(),
+      "capabilities": ["tools": RPC.empty_object()],
+      "serverInfo": ["name": "remem".to_json(), "version": VERSION.to_json()]
+    ]
+    result
+  end
+
+  priv fn tools_result -> Json
+    result: Json = ["tools": ToolCatalog.tools()]
+    result
+  end
+end

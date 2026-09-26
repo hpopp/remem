@@ -1,0 +1,307 @@
+alias JSON.Value as Json
+alias Postgres.Connection
+alias Postgres.QueryResult
+alias Postgres.Value
+
+# Events an entity read carries, and the default page for a list.
+const RECENT_EVENTS: Int = 10
+
+@doc """
+One thing that happened to an entity at a point in time, such as a
+work session, a deploy, or a decision. Events are the session log, where
+observations are the durable facts. An event is addressed by `id`,
+since two events on one entity may read the same.
+"""
+struct Event: JSON.Encoding
+  content: String
+  created_at: DateTime
+  id: Int
+  occurred_at: DateTime
+  updated_at: DateTime
+
+  fn to_json(self) -> JSON.Value
+    [
+      "id": self.id.to_json(), "content": self.content.to_json(),
+      "occurred_at": self.occurred_at.to_string().to_json(),
+      "created_at": self.created_at.to_string().to_json(),
+      "updated_at": self.updated_at.to_string().to_json()
+    ]
+  end
+end
+
+@doc """
+An event still waiting for its embedding, with the entity fields the
+embedding text needs.
+"""
+struct PendingEvent
+  content: String
+  id: Int
+  kind: String
+  name: String
+  occurred_at: DateTime
+end
+
+@doc """
+Data-access layer over the `events` table. Follows `EntityStore`:
+every operation threads the Postgres `Connection` through and returns
+it alongside the outcome. Event mutations touch the owning entity's
+`updated_at`. Embeddings bind as pgvector text literals through
+`$n::vector`.
+"""
+struct EventStore
+  @doc """
+  Records an event on the named entity and touches the entity. When
+  `occurred_at` is `None` the database stamps now. Returns the event
+  with its entity, which the caller embeds, or `None` for an unknown
+  name.
+  """
+  fn add(
+    conn: Connection,
+    name: String,
+    content: String,
+    occurred_at: Option<DateTime>,
+  ) -> (Connection, Result<Option<(Event, Entity)>, Error>)
+
+    (conn, touched) = EntityStore.touch(conn, name)
+
+    entity_id =
+      match touched
+        Result.Err(e) ->
+          return (conn, Result.Err(e))
+
+        Result.Ok(Option.None) ->
+          missing: Option<(Event, Entity)> = Option.None
+          return (conn, Result.Ok(missing))
+
+        Result.Ok(Option.Some(id)) ->
+          id
+      end
+
+    (conn, outcome) = conn.execute("""
+      INSERT INTO events (entity_id, content, occurred_at)
+      VALUES ($1, $2, COALESCE($3::timestamptz, now()))
+      RETURNING id, content, occurred_at::text,
+        created_at::text, updated_at::text
+      """, [
+        Value.int(entity_id), Value.string(content),
+        Value.opt_string(occurred_at.map(at -> at.to_string()))
+      ])
+
+    event =
+      match inserted_event(outcome)
+        Result.Err(e) -> return (conn, Result.Err(e))
+        Result.Ok(present) -> present
+      end
+
+    (conn, found) = EntityStore.find(conn, name)
+
+    match owner(found, name)
+      Result.Err(e) -> (conn, Result.Err(e))
+      Result.Ok(entity) -> (conn, Result.Ok(Option.Some((event, entity))))
+    end
+  end
+
+  @doc """
+  Returns up to `limit` of the named entity's events, newest
+  `occurred_at` first, or `None` for an unknown name. `limit` is
+  validated by the caller.
+  """
+  fn recent(conn: Connection, name: String, limit: Int)
+    -> (Connection, Result<Option<List<Event>>, Error>)
+
+    (conn, found) = entity_id(conn, name)
+
+    match found
+      Result.Err(e) ->
+        return (conn, Result.Err(e))
+
+      Result.Ok(Option.None) ->
+        missing: Option<List<Event>> = Option.None
+        return (conn, Result.Ok(missing))
+
+      Result.Ok(Option.Some(_)) ->
+        ()
+    end
+
+    (conn, outcome) = conn.execute("""
+      SELECT v.id, v.content, v.occurred_at::text,
+        v.created_at::text, v.updated_at::text
+      FROM events v
+      JOIN entities e ON e.id = v.entity_id
+      WHERE e.name = $1
+      ORDER BY v.occurred_at DESC, v.id DESC
+      LIMIT $2
+      """, [Value.string(name), Value.int(limit)])
+
+    match events_from(outcome)
+      Result.Err(e) -> (conn, Result.Err(e))
+      Result.Ok(events) -> (conn, Result.Ok(Option.Some(events)))
+    end
+  end
+
+  @doc """
+  Deletes an event by id and touches its entity, returning `true`
+  when a row was removed.
+  """
+  fn remove(conn: Connection, id: Int) -> (Connection, Result<Bool, Error>)
+    (conn, outcome) = conn.execute("""
+      WITH removed AS (
+        DELETE FROM events WHERE id = $1 RETURNING entity_id
+      )
+      UPDATE entities SET updated_at = now()
+      WHERE id IN (SELECT entity_id FROM removed)
+      """, [Value.int(id)])
+
+    (conn, changed(outcome))
+  end
+
+  @doc """
+  Stores freshly computed embeddings on event rows by id, in one
+  statement. `ids` and `vectors` pair up by position. Rows deleted
+  mid-flight are skipped. Returns how many rows updated.
+  """
+  fn set_embeddings(conn: Connection, ids: List<Int>, vectors: List<String>)
+    -> (Connection, Result<Int, Error>)
+
+    pairs: List<Json> = List.new()
+
+    for i in Range{start: 0, stop: ids.length() - 1}
+      id = ids.get(i).or(0)
+      vector = vectors.get(i).or("")
+      pair: Json = ["id": id.to_json(), "embedding": vector.to_json()]
+      pairs = pairs.append(pair)
+    end
+
+    (conn, outcome) = conn.execute("""
+      UPDATE events v
+      SET embedding = p.embedding::vector
+      FROM jsonb_to_recordset($1::jsonb) AS p(id bigint, embedding text)
+      WHERE v.id = p.id
+      """, [Value.string(JSON.encode(Json.Array(pairs)))])
+
+    (conn, affected_rows(outcome))
+  end
+
+  @doc """
+  Returns up to `limit` events with no embedding yet, oldest first,
+  with their entity's name and type. The backfill drains this.
+  """
+  fn unembedded(conn: Connection, limit: Int)
+    -> (Connection, Result<List<PendingEvent>, Error>)
+
+    (conn, outcome) = conn.execute("""
+      SELECT v.id, e.name, e.type, v.content, v.occurred_at::text
+      FROM events v
+      JOIN entities e ON e.id = v.entity_id
+      WHERE v.embedding IS NULL
+      ORDER BY v.id
+      LIMIT $1
+      """, [Value.int(limit)])
+
+    (conn, pending_from(outcome))
+  end
+
+  @doc """
+  Clears every event embedding an entity holds, so the backfill
+  recomputes them under a new name.
+  """
+  fn clear_embeddings(conn: Connection, entity_id: Int)
+    -> (Connection, Result<(), Error>)
+
+    (conn, outcome) = conn.execute(
+      "UPDATE events SET embedding = NULL WHERE entity_id = $1",
+      [Value.int(entity_id)],
+    )
+
+    (conn, done(outcome))
+  end
+
+  # Resolves a name to its id without touching the entity, for reads.
+  priv fn entity_id(conn: Connection, name: String)
+    -> (Connection, Result<Option<Int>, Error>)
+
+    (conn, outcome) = conn.execute(
+      "SELECT id FROM entities WHERE name = $1",
+      [Value.string(name)],
+    )
+
+    (conn, first_id(outcome))
+  end
+
+  # The id in the first row, or `None` when there is no row.
+  priv fn first_id(outcome: Result<QueryResult, Postgres.Error>)
+    -> Option<Int> ! Error
+
+    qr = try db_result(outcome)
+    qr.rows.get(0).map(row -> int_at(row, 0))
+  end
+
+  # The event an INSERT ... RETURNING produced.
+  priv fn inserted_event(outcome: Result<QueryResult, Postgres.Error>)
+    -> Event ! Error
+
+    qr = try db_result(outcome)
+
+    match qr.rows.get(0)
+      Option.Some(row) -> try row_to_event(row)
+      Option.None -> fail Error.Database("insert returned no row")
+    end
+  end
+
+  # The entity `add` just touched, so a miss is a database error.
+  priv fn owner(found: Result<Option<Entity>, Error>, name: String)
+    -> Entity ! Error
+
+    match try found
+      Option.Some(entity) -> entity
+      Option.None -> fail Error.Database("entity #{name} vanished mid-write")
+    end
+  end
+
+  # Row mapping can fail on an unreadable timestamp, so these loop
+  # with `try` instead of mapping.
+  priv fn events_from(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<Event> ! Error
+
+    qr = try db_result(outcome)
+    events: List<Event> = List.new()
+
+    for row in qr.rows
+      events = events.append(try row_to_event(row))
+    end
+
+    events
+  end
+
+  priv fn pending_from(outcome: Result<QueryResult, Postgres.Error>)
+    -> List<PendingEvent> ! Error
+
+    qr = try db_result(outcome)
+    pending: List<PendingEvent> = List.new()
+
+    for row in qr.rows
+      pending = pending.append(
+        PendingEvent{
+          content: text_at(row, 3),
+          id: int_at(row, 0),
+          kind: text_at(row, 2),
+          name: text_at(row, 1),
+          occurred_at: try db_time(text_at(row, 4)),
+        },
+      )
+    end
+
+    pending
+  end
+
+  # Column order: id, content, occurred_at, created_at, updated_at.
+  priv fn row_to_event(row: List<Value>) -> Event ! Error
+    Event{
+      content: text_at(row, 1),
+      created_at: try db_time(text_at(row, 3)),
+      id: int_at(row, 0),
+      occurred_at: try db_time(text_at(row, 2)),
+      updated_at: try db_time(text_at(row, 4)),
+    }
+  end
+end

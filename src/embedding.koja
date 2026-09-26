@@ -87,7 +87,8 @@ struct Embedder
     -> List<String> ! Error
 
     payload: Json = ["inputs": Json.Array(texts.map(t -> t.to_json()))]
-    headers = Headers.new()
+    headers =
+      Headers.new()
       .set("Content-Type", "application/json")
       .set(Propagation.HEADER, Propagation.header(context))
 

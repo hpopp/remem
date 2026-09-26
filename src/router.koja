@@ -155,7 +155,8 @@ struct Render
   """
   fn raw(status: Status, message: String) -> Response
     text = JSON.encode(error_body(status, message), pretty())
-    headers = Headers.new()
+    headers =
+      Headers.new()
       .set("Content-Type", "application/json")
       .set("Content-Length", "#{text.byte_length()}")
     Response{body: text, headers: headers, status: status, version: "HTTP/1.1"}

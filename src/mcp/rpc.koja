@@ -38,7 +38,8 @@ struct RPC
 
   priv fn http_json(body: Json) -> Response
     text = JSON.encode(body)
-    headers = Headers.new()
+    headers =
+      Headers.new()
       .set("Content-Type", "application/json")
       .set("Content-Length", "#{text.byte_length()}")
     Response{

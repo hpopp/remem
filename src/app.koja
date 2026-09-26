@@ -63,12 +63,8 @@ struct App: Process<List<String>, TCPEvent, String>
     settings = Config.load()
     log = build_logger(settings)
     database = settings.database
-    db_config = DbConfig.new(
-      database.host,
-      database.port,
-      database.user,
-      database.name,
-    )
+    db_config =
+      DbConfig.new(database.host, database.port, database.user, database.name)
       .with_password(database.password)
       .with_statement_cache_size(database.statement_cache)
 

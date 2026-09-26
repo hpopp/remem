@@ -109,7 +109,13 @@ episodic memory. Each event belongs to one entity and has an integer `id`,
 `content`, and `occurred_at`:
 
 ```json
-{ "id": 42, "content": "...", "occurred_at": "...", "created_at": "...", "updated_at": "..." }
+{
+  "id": 42,
+  "content": "...",
+  "occurred_at": "...",
+  "created_at": "...",
+  "updated_at": "..."
+}
 ```
 
 `POST /entities/:name/events` records one. `occurred_at` is optional

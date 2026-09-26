@@ -80,7 +80,8 @@ end
 
 # The default error body, a plain text line.
 priv fn plain_error(status: Status, message: String) -> Response
-  headers = Headers.new()
+  headers =
+    Headers.new()
     .set("Content-Type", "text/plain; charset=utf-8")
     .set("Content-Length", "#{message.byte_length()}")
 

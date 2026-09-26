@@ -26,7 +26,8 @@ struct RouterTest
   end
 
   test "routes by method and static path"
-    router = Router.new()
+    router =
+      Router.new()
       .get(
         "/health",
         fn (conn: Conn) -> Conn conn.text(Status.ok(), "healthy") end,
@@ -53,11 +54,11 @@ struct RouterTest
   test "binds path parameters"
     router =
       Router.new()
-        .get("/sessions/:id", RouterTest.echo_param("id"))
-        .get("/a/:x/b/:y", fn (conn: Conn) -> Conn
-            text = "#{conn.param("x").or("?")}-#{conn.param("y").or("?")}"
-            conn.text(Status.ok(), text)
-          end)
+      .get("/sessions/:id", RouterTest.echo_param("id"))
+      .get("/a/:x/b/:y", fn (conn: Conn) -> Conn
+          text = "#{conn.param("x").or("?")}-#{conn.param("y").or("?")}"
+          conn.text(Status.ok(), text)
+        end)
 
     response = router.dispatch(request(Method.Get, "/sessions/abc-123"))
     assert response.body == "abc-123", "single param binds"
@@ -76,7 +77,8 @@ struct RouterTest
   end
 
   test "first matching route wins"
-    router = Router.new()
+    router =
+      Router.new()
       .get(
         "/things/special",
         fn (conn: Conn) -> Conn conn.text(Status.ok(), "special") end,
@@ -93,18 +95,18 @@ struct RouterTest
   test "middleware runs in order and halt stops the pipeline"
     router =
       Router.new()
-        .use(fn (conn: Conn) -> Conn conn.put_resp_header("X-First", "1") end)
-        .use(fn (conn: Conn) -> Conn
-          match conn.get_header("Authorization")
-            Option.Some(_) -> conn
-            Option.None ->
-              conn.text(Status.unauthorized(), "no credentials").halt()
-          end
-        end)
-        .get(
-          "/secret",
-          fn (conn: Conn) -> Conn conn.text(Status.ok(), "the secret") end,
-        )
+      .use(fn (conn: Conn) -> Conn conn.put_resp_header("X-First", "1") end)
+      .use(fn (conn: Conn) -> Conn
+        match conn.get_header("Authorization")
+          Option.Some(_) -> conn
+          Option.None ->
+            conn.text(Status.unauthorized(), "no credentials").halt()
+        end
+      end)
+      .get(
+        "/secret",
+        fn (conn: Conn) -> Conn conn.text(Status.ok(), "the secret") end,
+      )
 
     response = router.dispatch(request(Method.Get, "/secret"))
     assert response.status.code == 401, "halted by middleware"
@@ -152,7 +154,8 @@ struct RouterTest
   end
 
   test "custom fallback and unresponded conns"
-    router = Router.new()
+    router =
+      Router.new()
       .not_found(fn (conn: Conn) -> Conn
         conn.json(Status.not_found(), Value.string("no route for #{conn.path}"))
       end)
@@ -167,7 +170,8 @@ struct RouterTest
   end
 
   test "assigns seeded on the conn reach middleware and handlers"
-    router = Router.new()
+    router =
+      Router.new()
       .use(fn (conn: Conn) -> Conn
         conn.assign("seen", conn.assigned("trace").or("none"))
       end)

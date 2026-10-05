@@ -7,33 +7,52 @@ exercise `frame_request` directly.
 """
 struct WorkerTest
   test "framing completes, waits, and splits pipelined bytes"
-    small = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n"
+    small = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n".to_binary()
 
     match frame_request(small, HEADER_CAP, BODY_CAP)
       Frame.Complete(framed) ->
         (req, leftover) = framed
         assert req == small
-        assert leftover.empty?(), "small request should leave no leftover"
+        assert leftover.byte_size() == 0, "small request should leave no leftover"
 
       _ ->
         fail "small request should frame complete"
     end
 
-    match frame_request("GET /health HTTP/1.1\r\nHost", HEADER_CAP, BODY_CAP)
+    partial = "GET /health HTTP/1.1\r\nHost".to_binary()
+
+    match frame_request(partial, HEADER_CAP, BODY_CAP)
       Frame.Incomplete -> ()
       _ -> fail "partial headers should be incomplete"
     end
 
-    pipelined = small <> "GET /graph"
+    pipelined = small <> "GET /graph".to_binary()
 
     match frame_request(pipelined, HEADER_CAP, BODY_CAP)
       Frame.Complete(framed) ->
         (req, leftover) = framed
         assert req == small
-        assert leftover == "GET /graph", "pipelined bytes should stay in the leftover"
+        assert leftover == "GET /graph".to_binary(), "pipelined bytes should stay in the leftover"
 
       _ ->
         fail "pipelined request should frame complete"
+    end
+  end
+
+  test "framing splits on bytes when the body ends in a multibyte character"
+    body = "héllo"
+    request = "POST /x HTTP/1.1\r\nContent-Length: #{body.byte_length()}\r\n\r\n" <>
+      body
+    pipelined = request.to_binary() <> "GET /y".to_binary()
+
+    match frame_request(pipelined, HEADER_CAP, BODY_CAP)
+      Frame.Complete(framed) ->
+        (req, leftover) = framed
+        assert req == request.to_binary()
+        assert leftover == "GET /y".to_binary(), "the split should land after the body"
+
+      _ ->
+        fail "a complete body should frame complete"
     end
   end
 
@@ -41,7 +60,7 @@ struct WorkerTest
     huge_body = "POST /entities HTTP/1.1\r\n" <>
       "Content-Length: #{BODY_CAP + 1}\r\n\r\n"
 
-    match frame_request(huge_body, HEADER_CAP, BODY_CAP)
+    match frame_request(huge_body.to_binary(), HEADER_CAP, BODY_CAP)
       Frame.TooLarge -> ()
       _ -> fail "a body past the cap should be too large"
     end
@@ -53,7 +72,7 @@ struct WorkerTest
       headers = headers <> filler
     end
 
-    match frame_request(headers, HEADER_CAP, BODY_CAP)
+    match frame_request(headers.to_binary(), HEADER_CAP, BODY_CAP)
       Frame.TooLarge -> ()
       _ -> fail "unterminated oversized headers should be too large"
     end

@@ -40,7 +40,7 @@ struct Worker: Process<Worker, (), ()>
   # Serves requests iteratively. Keep-alive connections are
   # long-lived, so this must not grow the stack per request.
   fn run(self) -> StopReason
-    buffered = ""
+    buffered: Binary = <<>>
     budget = self.config.max_requests_per_connection
 
     while budget > 0
@@ -85,18 +85,22 @@ struct Worker: Process<Worker, (), ()>
     StopReason.Normal
   end
 
-  # Parses and dispatches one raw request. Returns the response
-  # paired with whether the client wants the connection kept open.
-  priv fn respond(self, raw: String) -> (Response, Bool)
+  # Decodes, parses, and dispatches one framed request. Returns the
+  # response paired with whether the client wants the connection kept
+  # open. Bytes that are not UTF-8 are malformed the same way an
+  # unparseable request is.
+  priv fn respond(self, raw: Binary) -> (Response, Bool)
     started = Instant.now()
 
-    match Parser.parse_request(raw)
-      Result.Err(_) ->
-        reject = self.config.on_reject
-        reject(Status.bad_request())
+    text =
+      match raw.to_string()
+        Result.Ok(decoded) -> decoded
+        Result.Err(_) -> return self.reject_malformed()
+      end
 
-        build = self.config.error_response
-        (build(Status.bad_request(), "malformed request"), false)
+    match Parser.parse_request(text)
+      Result.Err(_) ->
+        self.reject_malformed()
 
       Result.Ok(req) ->
         keep = wants_keep_alive?(req)
@@ -110,13 +114,21 @@ struct Worker: Process<Worker, (), ()>
     end
   end
 
+  priv fn reject_malformed(self) -> (Response, Bool)
+    reject = self.config.on_reject
+    reject(Status.bad_request())
+
+    build = self.config.error_response
+    (build(Status.bad_request(), "malformed request"), false)
+  end
+
   # Reads from the client until `buffered` holds one complete HTTP
   # request (headers plus `Content-Length` bytes of body). Returns
   # the framed request paired with any bytes that arrived after it
   # (pipelining). `Incomplete` here means the client closed or the
   # read failed. Iterative because large bodies span many reads and
   # must not grow the stack.
-  priv fn read_request(self, buffered: String) -> Frame
+  priv fn read_request(self, buffered: Binary) -> Frame
     buffer = buffered
 
     loop
@@ -133,7 +145,8 @@ struct Worker: Process<Worker, (), ()>
 
         Frame.Incomplete ->
           match self.client.read(READ_CHUNK)
-            Result.Ok(chunk) when not chunk.empty?() -> buffer = buffer <> chunk
+            Result.Ok(chunk) when chunk.byte_size() > 0 ->
+              buffer = buffer <> chunk
             _ -> return Frame.Incomplete
           end
       end
@@ -150,10 +163,12 @@ end
 @doc """
 The outcome of framing bytes into one HTTP request. Either a
 complete request paired with any pipelined leftover, not enough
-bytes yet, or a request over the size caps.
+bytes yet, or a request over the size caps. The request stays as
+bytes until the worker decodes it, so a body that is not UTF-8
+reaches the worker instead of failing a read.
 """
 enum Frame
-  Complete((String, String))
+  Complete((Binary, Binary))
   Incomplete
   TooLarge
 end
@@ -162,77 +177,57 @@ end
 Splits `buffer` into one complete request and the leftover bytes.
 `Incomplete` asks the caller to read more, `TooLarge` means the
 headers overran `max_header_bytes` or the declared body overran
-`max_body_bytes`. Framing counts bytes, not characters, because
-Content-Length is a byte count while string `length()` counts
-codepoints, and the two drift apart on any non-ASCII body byte.
+`max_body_bytes`. Content-Length is a byte count, so framing works
+on bytes and the split lands exactly where the body ends.
 """
-fn frame_request(buffer: String, max_header_bytes: Int, max_body_bytes: Int)
+fn frame_request(buffer: Binary, max_header_bytes: Int, max_body_bytes: Int)
   -> Frame
 
-  parts = buffer.split("\r\n\r\n")
+  header_end =
+    match buffer.find(<<13, 10, 13, 10>>, 0)
+      Option.Some(index) ->
+        index
 
-  if parts.length() < 2
-    # Headers still incomplete. A buffer already past the header cap
-    # can never complete them.
-    return buffer.byte_length() > max_header_bytes
-      ? Frame.TooLarge
-      : Frame.Incomplete
-  end
-
-  header_text =
-    match parts.get(0)
-      Option.Some(text) -> text
-      Option.None -> ""
+      Option.None ->
+        # Headers still incomplete. A buffer already past the header
+        # cap can never complete them.
+        return buffer.byte_size() > max_header_bytes
+          ? Frame.TooLarge
+          : Frame.Incomplete
     end
 
-  length = content_length(header_text)
+  length = content_length(buffer.slice(Range{start: 0, stop: header_end - 1}))
 
-  if header_text.byte_length() > max_header_bytes or length > max_body_bytes
+  if header_end > max_header_bytes or length > max_body_bytes
     return Frame.TooLarge
   end
 
-  total = header_text.byte_length() + 4 + length
+  total = header_end + 4 + length
+  size = buffer.byte_size()
 
-  if buffer.byte_length() < total
+  if size < total
     return Frame.Incomplete
   end
 
-  if buffer.byte_length() == total
-    return Frame.Complete((buffer, ""))
+  if size == total
+    return Frame.Complete((buffer, <<>>))
   end
 
-  # Pipelined bytes follow this request. Split at the character
-  # whose prefix reaches `total` bytes (always a char boundary,
-  # since the body is complete UTF-8).
-  split_at = byte_boundary(buffer, total)
-  request = buffer.slice(Range{start: 0, stop: split_at - 1})
-  leftover = buffer.slice(Range{start: split_at, stop: buffer.length() - 1})
+  request = buffer.slice(Range{start: 0, stop: total - 1})
+  leftover = buffer.slice(Range{start: total, stop: size - 1})
   Frame.Complete((request, leftover))
 end
 
-# Binary search for the smallest character count whose prefix holds
-# `target` bytes. 32 iterations cover any request we would buffer.
-priv fn byte_boundary(buffer: String, target: Int) -> Int
-  low = 1
-  high = buffer.length()
-
-  for step in Range{start: 0, stop: 31}
-    if low < high
-      mid = (low + high) / 2
-      prefix = buffer.slice(Range{start: 0, stop: mid - 1})
-
-      if prefix.byte_length() < target
-        low = mid + 1
-      else
-        high = mid
-      end
+# Reads the Content-Length header out of the header bytes. Headers
+# that do not decode, or carry no usable value, count as zero, and
+# the decode in `respond` then reports the request as malformed.
+priv fn content_length(header_bytes: Binary) -> Int
+  header_text =
+    match header_bytes.to_string()
+      Result.Ok(text) -> text
+      Result.Err(_) -> return 0
     end
-  end
 
-  low
-end
-
-priv fn content_length(header_text: String) -> Int
   lines = header_text.split("\r\n")
   found = lines.filter(line -> line.downcase().starts_with?("content-length:"))
 

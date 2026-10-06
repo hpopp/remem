@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Tracing runs on the Koja stdlib `Trace`. The runtime carries the
+  trace context on every message, so handlers, the embedder, and the
+  MCP tools open child spans with `Trace.span` and no longer pass a
+  trace value through the conn. The `open_telemetry` package is now
+  the wire side only: it parses and writes `traceparent` headers and
+  drains the runtime's finished spans to the collector on a timer.
+- With no `OTEL_EXPORTER_OTLP_ENDPOINT` set, requests dispatch bare.
+  No span opens and the response carries no `traceparent` header.
+  Before, an unexported span still ran and the header was still set.
+- `db.query` spans record the error message in the span status when
+  the database phase fails, as before, and the embedder's
+  `POST /embed` span does the same.
+
 ## [0.6.0] - 2026-09-25
 
 ### Added

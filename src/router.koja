@@ -6,9 +6,6 @@ alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
 alias Log.Logger
-alias OpenTelemetry.Attribute
-alias OpenTelemetry.SpanKind
-alias OpenTelemetry.Tracer
 alias Pooler.Pool
 alias Postgres.Connection
 
@@ -32,21 +29,14 @@ fn build_router(
   pool: Pool<Connection>,
   embedder: Embedder,
   api_key: Option<String>,
-  tracer: Tracer,
   log: Logger = Logger.default(),
 ) -> Router
 
-  trace = Trace{tracer: Option.Some(tracer)}
-  entities = EntityController{embedder: embedder, pool: pool, trace: trace}
-  events = EventController{embedder: embedder, pool: pool, trace: trace}
-  relations = RelationController{pool: pool, trace: trace}
-  search = SearchController{
-    embedder: embedder,
-    log: log,
-    pool: pool,
-    trace: trace,
-  }
-  meta = MetaController{embedder: embedder, log: log, pool: pool, trace: trace}
+  entities = EntityController{embedder: embedder, pool: pool}
+  events = EventController{embedder: embedder, pool: pool}
+  relations = RelationController{pool: pool}
+  search = SearchController{embedder: embedder, log: log, pool: pool}
+  meta = MetaController{embedder: embedder, log: log, pool: pool}
 
   auth =
     fn (c: Conn) -> Conn
@@ -114,21 +104,33 @@ need to discard. Checkout failure surfaces as `Unavailable`, which
 renders 503.
 
 The whole phase, checkout wait included, runs inside a `db.query`
-span under `trace`, and an `Err` outcome marks the span as failed.
+span under the calling process's context, and an `Err` outcome marks
+the span as failed. Outside a sampled trace the span records nothing.
 """
 fn with_db<T>(
   pool: Pool<Connection>,
-  trace: Trace,
   work: fn (Connection) -> (Connection, Result<T, Error>),
 ) -> T ! Error
 
-  attributes: Map<String, Attribute> = ["db.system": "postgresql"]
-  try trace.span_result(
-    "db.query",
-    SpanKind.Internal,
-    attributes,
-    _ -> run_db(pool, work),
-  )
+  try Trace.span("db.query", fn (span: Trace.Span)
+      span.attribute("db.system", "postgresql")
+      mark_error(span, run_db(pool, work))
+    end)
+end
+
+@doc """
+Sets the span status to `Error` with the error's message when
+`outcome` is an `Err`, and passes `outcome` through either way.
+"""
+fn mark_error<T>(span: Trace.Span, outcome: Result<T, Error>)
+  -> Result<T, Error>
+
+  match outcome
+    Result.Err(e) -> span.status(Trace.Status.Error(e.message()))
+    Result.Ok(_) -> ()
+  end
+
+  outcome
 end
 
 priv fn run_db<T>(

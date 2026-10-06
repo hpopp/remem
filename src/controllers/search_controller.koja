@@ -18,7 +18,6 @@ struct SearchController
   embedder: Embedder
   log: Logger
   pool: Pool<Connection>
-  trace: Trace
 
   fn search(self, c: Conn) -> Conn
     self.do_search(c) rescue e -> Render.from_error(c, e)
@@ -39,11 +38,10 @@ struct SearchController
       fail Error.Validation("limit must be between 1 and #{MAX_SEARCH_LIMIT}")
     end
 
-    embedder = self.embedder.with_trace(self.trace.at(c))
+    embedder = self.embedder
     log = self.log
     results = try with_db(
       self.pool,
-      self.trace.at(c),
       db -> search_db(db, embedder, q, limit, log),
     )
 

@@ -1,4 +1,3 @@
-alias Conn.Conn
 alias Conn.Router
 alias HTTP.Method
 alias HTTP.Request
@@ -12,14 +11,9 @@ alias Log.Text
 alias Net.TCPServer
 alias Net.TCPServer.Config as TCPServerConfig
 alias Net.TCPServer.Event as TCPEvent
-alias OpenTelemetry.Attribute
-alias OpenTelemetry.Config as TracerConfig
-alias OpenTelemetry.Outcome
+alias OpenTelemetry.Config as ExporterConfig
+alias OpenTelemetry.Exporter
 alias OpenTelemetry.Propagation
-alias OpenTelemetry.SpanContext
-alias OpenTelemetry.SpanKind
-alias OpenTelemetry.Status as SpanStatus
-alias OpenTelemetry.Tracer
 alias Pooler.Config as PoolConfig
 alias Pooler.Pool
 alias Postgres.Config as DbConfig
@@ -27,10 +21,11 @@ alias Postgres.Connection
 alias Process.Lifecycle
 alias Process.Step
 alias Process.StopReason
+alias Trace.Attribute
 alias Trail.Config as TrailConfig
 alias Trail.Worker
 
-const VERSION: String = "0.6.0"
+const VERSION: String = "0.7.0"
 
 const POOL_SIZE: Int = 10
 
@@ -49,7 +44,7 @@ priv const BACKFILL_INTERVAL_MS: Int = 60000
 The remem entry process. `start` loads config from the environment,
 builds the logger, runs schema migrations on a dedicated connection,
 spawns a pool of `POOL_SIZE` Postgres connections, builds the route
-table once, starts the tracer, the search log sweeper, and the
+table once, starts the trace exporter, the search log sweeper, and the
 embedding backfill, and spawns a `Net.TCPServer` acceptor that
 delivers connected sockets as `TCPEvent.Connected` messages. Each
 connection is handed to a one-shot `Trail.Worker`, so requests are
@@ -104,8 +99,8 @@ struct App: Process<List<String>, TCPEvent, String>
         fail StopReason.Shutdown
     end
 
-    tracer = Tracer.start(
-      TracerConfig{
+    exporter = Exporter.start(
+      ExporterConfig{
         endpoint: settings.tracing.endpoint,
         service_name: settings.tracing.service_name,
         service_version: Option.Some(VERSION),
@@ -113,7 +108,7 @@ struct App: Process<List<String>, TCPEvent, String>
     )
 
     embedder = Embedder{log: log, url: settings.embedding_url}
-    router = build_router(pool, embedder, settings.api_key, tracer, log)
+    router = build_router(pool, embedder, settings.api_key, log)
 
     _cleaner = spawn Cleaner.start(
       Cleaner.Config{interval_ms: SWEEP_INTERVAL_MS, log: log, pool: pool},
@@ -140,7 +135,7 @@ struct App: Process<List<String>, TCPEvent, String>
     log.info("api key auth: #{auth}, #{POOL_SIZE} pooled db connections")
     log.info("trace export: #{tracing}")
 
-    App{log: log, server: server_config(router, tracer, log)}
+    App{log: log, server: server_config(router, exporter, log)}
   end
 
   fn handle(self, msg: TCPEvent, from: Option<ReplyTo<String>>) -> Step<Self>
@@ -217,26 +212,28 @@ priv fn build_logger(settings: Config) -> Logger
 end
 
 # Wires the route table and remem's logging and error shape into a
-# trail worker config. Every dispatched request runs inside a server
-# span that continues the caller's trace when it sent a `traceparent`
-# header, and the response carries the span's own `traceparent` so a
-# client can find its trace. Rejected requests render the same JSON
-# error body as routed failures, and every dispatched request logs
-# one access line with the trace id in front when tracing is on. The
-# line carries the method, path, status, and duration as attributes,
-# which the GCP format folds into `httpRequest`. Successful health
-# probes are the exception, since they arrive every few seconds and
-# would drown both the log and the trace store.
-priv fn server_config(router: Router, tracer: Tracer, log: Logger)
+# trail worker config. When an exporter is configured, every
+# dispatched request runs inside a server span that continues the
+# caller's trace when it sent a `traceparent` header, and the response
+# carries the span's own `traceparent` so a client can find its trace.
+# Without an exporter the router runs bare and no span is opened.
+# Rejected requests render the same JSON error body as routed
+# failures, and every dispatched request logs one access line with the
+# trace id in front when tracing is on. The line carries the method,
+# path, status, and duration as attributes, which the GCP format folds
+# into `httpRequest`. Successful health probes are the exception,
+# since they arrive every few seconds and would drown both the log and
+# the trace store.
+priv fn server_config(router: Router, exporter: Exporter, log: Logger)
   -> TrailConfig
 
   handler =
     fn (request: Request) -> Response
-      if health_probe?(request)
+      if health_probe?(request) or not exporter.enabled?()
         return router.dispatch(request)
       end
 
-      traced_dispatch(router, tracer, request)
+      traced_dispatch(router, request)
     end
 
   error_response =
@@ -250,7 +247,7 @@ priv fn server_config(router: Router, tracer: Tracer, log: Logger)
         return
       end
 
-      prefix = tracer.enabled?() ? trace_prefix(response) : ""
+      prefix = exporter.enabled?() ? trace_prefix(response) : ""
       method = request.method.to_string()
       code = response.status.code
 
@@ -282,44 +279,35 @@ priv fn server_config(router: Router, tracer: Tracer, log: Logger)
     .with_on_reject(on_reject)
 end
 
-# Runs the router inside a server span. The span records the method,
+# Runs the router inside a server span. A `traceparent` on the request
+# becomes the root's parent, so the root continues the caller's trace.
+# Without one the root starts a fresh trace. The root ignores whatever
+# context this worker carries, so a keep-alive connection never
+# continues the previous request's trace. The span records the method,
 # path, and status code, and its status follows the response code.
-# The conn carries the span so handlers open their children under it.
-priv fn traced_dispatch(router: Router, tracer: Tracer, request: Request)
-  -> Response
-
+# Handlers below open children through `Trace.span` and read nothing
+# off the conn.
+priv fn traced_dispatch(router: Router, request: Request) -> Response
   method = request.method.to_string()
   parent = request.headers.get(Propagation.HEADER)
     .then(header -> Propagation.parse(header).ok())
-  attributes: Map<String, Attribute> = [
-    "http.request.method": Attribute.from(method),
-    "url.path": Attribute.from(request.path)
-  ]
 
-  work =
-    fn (ctx: SpanContext) -> (Response, Outcome)
-      conn = Trace.put(Conn.from_request(request), ctx)
-      response = router.dispatch_conn(conn)
+  Trace.root(
+    "#{method} #{request.path}",
+    Trace.RootOptions{kind: Trace.SpanKind.Server, parent: parent},
+    fn (span: Trace.Span) -> Response
+      span.attribute("http.request.method", Attribute.from(method))
+      span.attribute("url.path", Attribute.from(request.path))
+      response = router.dispatch(request)
       code = response.status.code
+      span.attribute("http.response.status_code", Attribute.from(code))
+      span.status(span_status(code))
       response.headers = response.headers.set(
         Propagation.HEADER,
-        Propagation.header(ctx),
+        Propagation.header(Trace.current()),
       )
-
-      outcome = Outcome{
-        attributes: ["http.response.status_code": Attribute.from(code)],
-        status: span_status(code),
-      }
-
-      (response, outcome)
-    end
-
-  tracer.span_with(
-    "#{method} #{request.path}",
-    SpanKind.Server,
-    parent,
-    attributes,
-    work,
+      response
+    end,
   )
 end
 
@@ -327,11 +315,11 @@ end
 # application, so it makes the positive claim that a 2xx or 3xx
 # completed successfully. A 4xx is the client's mistake and gets no
 # opinion, and a 5xx is an error.
-priv fn span_status(code: Int) -> SpanStatus
+priv fn span_status(code: Int) -> Trace.Status
   cond
-    code >= 500 -> SpanStatus.Error("HTTP #{code}")
-    code >= 400 -> SpanStatus.Unset
-    else -> SpanStatus.Ok
+    code >= 500 -> Trace.Status.Error("HTTP #{code}")
+    code >= 400 -> Trace.Status.Unset
+    else -> Trace.Status.Ok
   end
 end
 
@@ -340,7 +328,7 @@ end
 priv fn trace_prefix(response: Response) -> String
   response.headers.get(Propagation.HEADER)
     .then(header -> Propagation.parse(header).ok())
-    .map(ctx -> "#{ctx.trace_id} ")
+    .map(parent -> "#{Base.encode16(parent.trace_id())} ")
     .or("")
 end
 

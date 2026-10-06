@@ -3,7 +3,6 @@ alias HTTP.Headers
 alias HTTP.Method
 alias HTTP.Request
 alias Log.Logger
-alias OpenTelemetry.Tracer
 alias Pooler.Config as PoolConfig
 alias Pooler.Pool
 alias Postgres.Config as DbConfig
@@ -21,7 +20,6 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
-      Tracer.noop(),
     )
 
     response = router.dispatch(request(Method.Post, "/entities", ""))
@@ -42,7 +40,6 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
-      Tracer.noop(),
     )
 
     response = router.dispatch(
@@ -58,7 +55,6 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
-      Tracer.noop(),
     )
 
     response = router.dispatch(
@@ -73,7 +69,6 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
-      Tracer.noop(),
     )
 
     response = router.dispatch(
@@ -89,7 +84,6 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
-      Tracer.noop(),
     )
 
     # No Authorization header at all.
@@ -104,7 +98,6 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
-      Tracer.noop(),
     )
 
     response = router.dispatch(
@@ -120,7 +113,6 @@ struct RouterTest
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
-      Tracer.noop(),
     )
 
     body = "{\"content\": \"shipped\", \"occurred_at\": \"yesterday\"}"

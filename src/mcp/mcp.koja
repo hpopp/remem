@@ -1,9 +1,8 @@
 alias HTTP.Response
 alias JSON.Value as Json
 alias Log.Logger
-alias OpenTelemetry.Attribute
-alias OpenTelemetry.SpanKind
 alias Postgres.Connection
+alias Trace.Attribute
 
 const MCP_PROTOCOL_VERSION: String = "2025-06-18"
 const MCP_DEFAULT_SEARCH_LIMIT: Int = 10
@@ -28,14 +27,14 @@ agents to search before writing and to keep the graph curated.
 struct Mcp
   @doc """
   Handles one JSON-RPC message. Notifications get 202 with no body.
-  A `tools/call` runs in its own span under `trace` and logs through
-  `log`, which defaults to text on stdout so tests need not build one.
+  A `tools/call` runs in its own span under the calling process's
+  context and logs through `log`, which defaults to text on stdout so
+  tests need not build one.
   """
   fn handle(
     body: String,
     conn: Connection,
     embedder: Embedder,
-    trace: Trace = Trace{},
     log: Logger = Logger.default(),
   ) -> (Response, Connection)
 
@@ -60,19 +59,19 @@ struct Mcp
       "initialize" -> (RPC.result(id, initialize_result()), conn)
       "ping" -> (RPC.result(id, RPC.empty_object()), conn)
       "tools/list" -> (RPC.result(id, tools_result()), conn)
-      "tools/call" -> call_tool(root, id, conn, embedder, trace, log)
+      "tools/call" -> call_tool(root, id, conn, embedder, log)
       _ -> (RPC.error(id, -32601, "no such method #{method}"), conn)
     end
   end
 
   # Names the tool in the log and the trace, then dispatches it. The
-  # embedder rebinds under the tool span so its request nests there.
+  # embedder's request nests under the tool span through the process
+  # context.
   priv fn call_tool(
     root: Json,
     id: Json,
     conn: Connection,
     embedder: Embedder,
-    trace: Trace,
     log: Logger,
   ) -> (Response, Connection)
 
@@ -83,21 +82,10 @@ struct Mcp
     # The access log only shows POST /mcp, so name the tool here.
     log.info("mcp tools/call #{name}")
 
-    attributes: Map<String, Attribute> = ["mcp.tool": Attribute.from(name)]
-
-    trace.span(
-      "tools/call",
-      SpanKind.Internal,
-      attributes,
-      ctx -> dispatch_tool(
-        name,
-        arguments,
-        id,
-        conn,
-        embedder.with_trace(trace.under(ctx)),
-        log,
-      ),
-    )
+    Trace.span("tools/call", fn (span: Trace.Span) -> (Response, Connection)
+        span.attribute("mcp.tool", Attribute.from(name))
+        dispatch_tool(name, arguments, id, conn, embedder, log)
+      end)
   end
 
   priv fn dispatch_tool(

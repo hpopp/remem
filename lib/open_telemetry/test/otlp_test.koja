@@ -1,0 +1,162 @@
+alias JSON.Value
+
+struct OTLPTest
+  # A finished record whose context the stdlib minted, so the ids are
+  # well formed. The queued record is popped so it does not leak into
+  # another test.
+  priv fn record(
+    name: String,
+    kind: Trace.SpanKind,
+    attributes: Map<String, Trace.Attribute>,
+    status: Trace.Status,
+    parent_span_id: Option<Binary>,
+  ) -> Trace.SpanRecord
+
+    context = Trace.root(
+      "seed",
+      Trace.RootOptions{kind: kind},
+      span -> Process.context(),
+    )
+    _ = Trace.Export.pop()
+
+    Trace.SpanRecord{
+      attributes: attributes,
+      context: context,
+      ended_at: Timestamp.new(1_700_000_000_000_500, Duration.Unit.Microseconds),
+      kind: kind,
+      name: name,
+      parent_span_id: parent_span_id,
+      started_at: Timestamp.new(
+        1_700_000_000_000_000,
+        Duration.Unit.Microseconds,
+      ),
+      status: status,
+    }
+  end
+
+  priv fn no_attributes -> Map<String, Trace.Attribute>
+    Map.new()
+  end
+
+  test "span encodes the ids, name, kind, and times"
+    record = record(
+      "GET /entities",
+      Trace.SpanKind.Server,
+      no_attributes(),
+      Trace.Status.Unset,
+      Option.None,
+    )
+    text = JSON.encode(OTLP.span(record))
+
+    assert text.contains?(
+      "\"traceId\":\"#{Base.encode16(record.context.trace_id())}\"",
+    )
+    assert text.contains?(
+      "\"spanId\":\"#{Base.encode16(record.context.span_id())}\"",
+    )
+    assert text.contains?("\"name\":\"GET /entities\",\"kind\":2,")
+    assert text.contains?("\"startTimeUnixNano\":\"1700000000000000000\"")
+    assert text.contains?("\"endTimeUnixNano\":\"1700000000000500000\"")
+    assert text.contains?("\"attributes\":[]")
+    assert not text.contains?("parentSpanId")
+    assert not text.contains?("status")
+  end
+
+  test "span names its parent"
+    parent: Binary = <<0x00f067aa0ba902b7::64>>
+    record = record(
+      "db.query",
+      Trace.SpanKind.Internal,
+      no_attributes(),
+      Trace.Status.Unset,
+      Option.Some(parent),
+    )
+    text = JSON.encode(OTLP.span(record))
+
+    assert text.contains?("\"parentSpanId\":\"00f067aa0ba902b7\"")
+    assert text.contains?("\"kind\":1,")
+  end
+
+  test "span encodes each status shape"
+    ok = record(
+      "ok",
+      Trace.SpanKind.Client,
+      no_attributes(),
+      Trace.Status.Ok,
+      Option.None,
+    )
+    error = record(
+      "error",
+      Trace.SpanKind.Client,
+      no_attributes(),
+      Trace.Status.Error("HTTP 500"),
+      Option.None,
+    )
+
+    assert JSON.encode(OTLP.span(ok)).contains?("\"status\":{\"code\":1}")
+    assert JSON.encode(OTLP.span(error))
+      .contains?("\"status\":{\"code\":2,\"message\":\"HTTP 500\"}")
+    assert JSON.encode(OTLP.span(ok)).contains?("\"kind\":3,")
+  end
+
+  test "kind_code follows the OTLP numbering"
+    assert OTLP.kind_code(Trace.SpanKind.Internal) == 1
+    assert OTLP.kind_code(Trace.SpanKind.Server) == 2
+    assert OTLP.kind_code(Trace.SpanKind.Client) == 3
+  end
+
+  test "status leaves Unset out"
+    assert OTLP.status(Trace.Status.Unset) == Option.None
+    assert OTLP.status(Trace.Status.Ok) != Option.None
+  end
+
+  test "attribute encodes each scalar as its AnyValue"
+    assert JSON.encode(OTLP.attribute(Trace.Attribute{value: "text"})) ==
+      "{\"stringValue\":\"text\"}"
+    assert JSON.encode(OTLP.attribute(Trace.Attribute{value: 200})) ==
+      "{\"intValue\":\"200\"}"
+    assert JSON.encode(OTLP.attribute(Trace.Attribute{value: true})) ==
+      "{\"boolValue\":true}"
+    assert JSON.encode(OTLP.attribute(Trace.Attribute{value: 1.5})) ==
+      "{\"doubleValue\":1.5}"
+  end
+
+  test "attributes encodes a map as a KeyValue list"
+    attributes: Map<String, Trace.Attribute> = [
+      "http.route": "/entities", "status": 200
+    ]
+    text = JSON.encode(OTLP.attributes(attributes))
+
+    assert text.starts_with?("[")
+    assert text.contains?(
+      "{\"key\":\"http.route\",\"value\":{\"stringValue\":\"/entities\"}}",
+    )
+    assert text.contains?(
+      "{\"key\":\"status\",\"value\":{\"intValue\":\"200\"}}",
+    )
+  end
+
+  test "traces wraps spans in one resource and one scope"
+    record = record(
+      "root",
+      Trace.SpanKind.Server,
+      no_attributes(),
+      Trace.Status.Unset,
+      Option.None,
+    )
+    resource: Map<String, Trace.Attribute> = ["service.name": "remem"]
+    text = OTLP.traces(resource, [record])
+
+    assert text.starts_with?(
+      "{\"resourceSpans\":[{\"resource\":{\"attributes\":[",
+    )
+    assert text.contains?(
+      "{\"key\":\"service.name\",\"value\":{\"stringValue\":\"remem\"}}",
+    )
+    assert text.contains?(
+      "\"scope\":{\"name\":\"open_telemetry\",\"version\":\"0.2.0\"}",
+    )
+    assert text.contains?("\"spans\":[{\"traceId\":")
+    assert text.contains?("\"name\":\"root\"")
+  end
+end

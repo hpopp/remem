@@ -2,29 +2,122 @@ alias JSON.Value
 
 # The instrumentation scope this package reports under.
 priv const SCOPE_NAME: String = "open_telemetry"
-priv const SCOPE_VERSION: String = "0.1.0"
+priv const SCOPE_VERSION: String = "0.2.0"
 
 @doc """
-OTLP/JSON encoding for the traces signal. The output is one
+OTLP/JSON encoding for the traces signal. The input is the stdlib
+`Trace.SpanRecord` that `Trace.Export.pop` returns. The output is one
 `ExportTraceServiceRequest` body, ready to POST to `/v1/traces`.
 """
 struct OTLP
   @doc """
+  Encodes one attribute as an OTLP `AnyValue`. Integers travel as
+  decimal strings, which is how OTLP/JSON carries 64-bit values.
+  """
+  fn attribute(attr: Trace.Attribute) -> Value
+    match attr.value
+      b: Bool -> ["boolValue": b.to_json()]
+      f: Float -> ["doubleValue": f.to_json()]
+      i: Int -> ["intValue": "#{i}"]
+      s: String -> ["stringValue": s.to_json()]
+    end
+  end
+
+  @doc """
+  Encodes an attribute map as an OTLP `KeyValue` list.
+  """
+  fn attributes(map: Map<String, Trace.Attribute>) -> Value
+    items: List<Value> = List.new()
+
+    for (key, value) in map
+      items = items.append(["key": key.to_json(), "value": attribute(value)])
+    end
+
+    Value.Array(items)
+  end
+
+  @doc """
+  The OTLP wire code for a span kind.
+  """
+  fn kind_code(kind: Trace.SpanKind) -> Int
+    match kind
+      Trace.SpanKind.Client -> 3
+      Trace.SpanKind.Internal -> 1
+      Trace.SpanKind.Server -> 2
+    end
+  end
+
+  @doc """
+  Encodes a finished span as an OTLP `Span` object. Ids are lowercase
+  hex and times are nanoseconds since the epoch as decimal strings.
+  """
+  fn span(record: Trace.SpanRecord) -> Value
+    fields: List<(String, Value)> = [
+      ("traceId", Base.encode16(record.context.trace_id()).to_json()),
+      ("spanId", Base.encode16(record.context.span_id()).to_json()),
+      ("name", record.name.to_json()),
+      ("kind", kind_code(record.kind).to_json()),
+      ("startTimeUnixNano", nanos(record.started_at)),
+      ("endTimeUnixNano", nanos(record.ended_at)),
+      ("attributes", attributes(record.attributes))
+    ]
+
+    match record.parent_span_id
+      Option.Some(id) ->
+        fields = fields.append(("parentSpanId", Base.encode16(id).to_json()))
+      Option.None -> ()
+    end
+
+    match status(record.status)
+      Option.Some(value) -> fields = fields.append(("status", value))
+      Option.None -> ()
+    end
+
+    Value.Object(fields)
+  end
+
+  @doc """
+  Encodes a status for OTLP. `Unset` produces no status object.
+  """
+  fn status(status: Trace.Status) -> Option<Value>
+    match status
+      Trace.Status.Error(message) ->
+        error: Value = ["code": 2, "message": message.to_json()]
+        Option.Some(error)
+
+      Trace.Status.Ok ->
+        ok: Value = ["code": 1]
+        Option.Some(ok)
+
+      Trace.Status.Unset ->
+        Option.None
+    end
+  end
+
+  @doc """
   Encodes a batch of spans under one resource and one scope.
   """
-  fn traces(resource: Map<String, Attribute>, spans: List<Span>) -> String
+  fn traces(
+    resource: Map<String, Trace.Attribute>,
+    spans: List<Trace.SpanRecord>,
+  ) -> String
+
     scope: Value = [
       "name": SCOPE_NAME.to_json(), "version": SCOPE_VERSION.to_json()
     ]
     scope_spans: Value = [
-      "scope": scope, "spans": Value.Array(spans.map(span -> span.to_json()))
+      "scope": scope, "spans": Value.Array(spans.map(record -> span(record)))
     ]
     resource_spans: Value = [
-      "resource": ["attributes": Span.attributes_json(resource)],
+      "resource": ["attributes": attributes(resource)],
       "scopeSpans": Value.Array([scope_spans])
     ]
     request: Value = ["resourceSpans": Value.Array([resource_spans])]
 
     JSON.encode(request)
+  end
+
+  priv fn nanos(at: Timestamp) -> Value
+    "#{at.since_epoch.to_nanoseconds()}".to_json()
   end
 end

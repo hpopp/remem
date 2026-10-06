@@ -12,7 +12,6 @@ validate before touching the pool, run the database phase through
 struct EventController
   embedder: Embedder
   pool: Pool<Connection>
-  trace: Trace
 
   fn list(self, c: Conn) -> Conn
     self.do_list(c) rescue e -> Render.from_error(c, e)
@@ -30,11 +29,7 @@ struct EventController
     name = try Params.name(c)
     limit = try Params.limit(c, RECENT_EVENTS)
 
-    events = try with_db(
-      self.pool,
-      self.trace.at(c),
-      db -> recent_db(db, name, limit),
-    )
+    events = try with_db(self.pool, db -> recent_db(db, name, limit))
 
     body: Json = ["events": Json.Array(events.map(e -> e.to_json()))]
     Render.json(c, Status.ok(), body)
@@ -43,11 +38,10 @@ struct EventController
   priv fn do_create(self, c: Conn) -> Conn ! Error
     name = try Params.name(c)
     (content, occurred_at) = try JsonUtil.parse_event(c.body)
-    embedder = self.embedder.with_trace(self.trace.at(c))
+    embedder = self.embedder
 
     event = try with_db(
       self.pool,
-      self.trace.at(c),
       db -> add_db(db, embedder, name, content, occurred_at),
     )
     Render.json(c, Status.created(), event)
@@ -55,11 +49,7 @@ struct EventController
 
   priv fn do_delete(self, c: Conn) -> Conn ! Error
     id = try Params.id(c)
-    deleted = try with_db(
-      self.pool,
-      self.trace.at(c),
-      db -> EventStore.remove(db, id),
-    )
+    deleted = try with_db(self.pool, db -> EventStore.remove(db, id))
 
     if not deleted
       fail Error.NotFound("no event with id #{id}")

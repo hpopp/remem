@@ -1,0 +1,279 @@
+alias Process.CallError
+alias Process.Step
+alias Process.StopReason
+
+@doc """
+Settings for an `Exporter`. `service_name` becomes the `service.name`
+resource attribute, `service_version` becomes `service.version`, and
+`resource` adds anything else, such as `deployment.environment`.
+
+Spans leave on a timer. Every `flush_ms` the exporter drains the
+runtime's finished spans and POSTs them in batches of at most
+`max_batch`, so `max_batch` bounds one request body, not latency.
+
+`exporter` receives each encoded batch. When it is `None`, the
+exporter POSTs to `endpoint` with `Export.http`. When both are `None`,
+the exporter is a no-op and finished spans stay in the runtime queue
+until it fills and drops them.
+
+The package reads no environment variables. The application decides
+where `endpoint` comes from.
+"""
+struct Config
+  endpoint: Option<String> = Option.None
+  exporter: Option<fn (String) -> Result<(), Export.Error>> = Option.None
+  flush_ms: Int = 5000
+  max_batch: Int = 512
+  resource: Map<String, Trace.Attribute> = [:]
+  service_name: String
+  service_version: Option<String> = Option.None
+end
+
+@doc """
+Why `Exporter.flush` did not complete. `Timeout` means the export did
+not finish within the deadline. `Down` means the exporter process is
+not running.
+"""
+enum Exporter.Error
+  Down
+  Timeout
+end
+
+@doc """
+The exporter's message contract. `Flush` is a call that drains and
+exports now and answers `Done`. `Tick` is the exporter's own timer.
+"""
+enum Msg
+  Flush
+  Tick
+end
+
+@doc """
+The exporter's reply contract.
+"""
+enum Reply
+  Done
+end
+
+@doc """
+A handle to a running exporter, or a no-op when tracing is off. The
+stdlib `Trace` opens spans and queues the finished records. The
+exporter process drains that queue on a timer, encodes each batch as
+OTLP/JSON, and POSTs it to the collector.
+
+```
+exporter = Exporter.start(Config{
+  endpoint: Option.Some("http://collector:4318"),
+  service_name: "remem",
+})
+
+Trace.root("GET /entities", span -> handle(request))
+```
+
+Nothing in the request path talks to the exporter, so a slow or
+absent collector never blocks the code that made the span.
+"""
+struct Exporter
+  ref: Option<Ref<Msg, Reply>>
+
+  @doc """
+  True when finished spans reach a collector.
+  """
+  fn enabled?(self) -> Bool
+    match self.ref
+      Option.Some(_) -> true
+      Option.None -> false
+    end
+  end
+
+  @doc """
+  Drains and exports the queued spans now and waits for the export to
+  finish. A no-op exporter has nothing to flush and returns at once.
+  """
+  fn flush(self, timeout_ms: Int = 5000) ! Exporter.Error
+    match self.ref
+      Option.None ->
+        ()
+
+      Option.Some(ref) ->
+        match ref.call(Msg.Flush, timeout_ms)
+          Result.Ok(Reply.Done) -> ()
+          Result.Err(CallError.Timeout) -> fail Exporter.Error.Timeout
+          Result.Err(CallError.ProcessDown) -> fail Exporter.Error.Down
+        end
+    end
+  end
+
+  @doc """
+  An exporter that ships nothing.
+  """
+  fn noop -> Exporter
+    Exporter{ref: Option.None}
+  end
+
+  @doc """
+  Spawns an exporter process for `config`, or returns a no-op when
+  `config` names neither an exporter nor an endpoint.
+  """
+  fn start(config: Config) -> Exporter
+    exporter =
+      match config.exporter
+        Option.Some(export) -> Option.Some(export)
+        Option.None -> config.endpoint.map(url -> Export.http(url))
+      end
+
+    match exporter
+      Option.None ->
+        Exporter.noop()
+
+      Option.Some(export) ->
+        server = Server.Config{
+          export: export,
+          flush_ms: config.flush_ms,
+          max_batch: config.max_batch,
+          resource: resource_attributes(config),
+        }
+        Exporter{ref: Option.Some(spawn Server.start(server))}
+    end
+  end
+
+  @doc """
+  Terminates the exporter process. Spans still queued in the runtime
+  are not exported, so call `flush` first when they matter.
+  """
+  fn stop(self)
+    match self.ref
+      Option.Some(ref) -> ref.kill()
+      Option.None -> ()
+    end
+  end
+
+  priv fn resource_attributes(config: Config) -> Map<String, Trace.Attribute>
+    resource = config.resource.put(
+      "service.name",
+      Trace.Attribute.from(config.service_name),
+    )
+
+    match config.service_version
+      Option.Some(version) ->
+        resource.put("service.version", Trace.Attribute.from(version))
+
+      Option.None ->
+        resource
+    end
+  end
+end
+
+# Settings the exporter process needs after `Exporter.start` has
+# resolved the exporter closure and the resource.
+priv struct Server.Config
+  export: fn (String) -> Result<(), Export.Error>
+  flush_ms: Int
+  max_batch: Int
+  resource: Map<String, Trace.Attribute>
+end
+
+# The process behind an `Exporter` handle. Drains `Trace.Export` on a
+# timer or a flush and POSTs each batch. A failed export drops the
+# batch and warns once, then stays quiet until an export succeeds
+# again. Runtime drops are reported once per drain that sees new ones.
+priv struct Server: Process<Server.Config, Msg, Reply>
+  dropped_seen: Int
+  export: fn (String) -> Result<(), Export.Error>
+  flush_ms: Int
+  max_batch: Int
+  resource: Map<String, Trace.Attribute>
+  warned?: Bool
+
+  fn start(config: Server.Config) -> Self ! StopReason
+    me: Ref<Msg, Reply> = Ref.self_ref()
+    me.send_after(Msg.Tick, config.flush_ms)
+
+    Server{
+      dropped_seen: Trace.Export.dropped(),
+      export: config.export,
+      flush_ms: config.flush_ms,
+      max_batch: config.max_batch,
+      resource: config.resource,
+      warned?: false,
+    }
+  end
+
+  fn handle(self, msg: Msg, from: Option<ReplyTo<Reply>>) -> Step<Self>
+    match msg
+      Msg.Flush ->
+        server = self.drain()
+        done: Reply = Reply.Done
+        _ = ReplyTo.reply(from, done)
+        Step.Continue(server)
+
+      Msg.Tick ->
+        me: Ref<Msg, Reply> = Ref.self_ref()
+        me.send_after(Msg.Tick, self.flush_ms)
+        Step.Continue(self.drain())
+    end
+  end
+
+  # Pops up to `max_batch` records, exports them, and repeats while a
+  # batch came back full.
+  priv fn drain(self) -> Self
+    dropped = Trace.Export.dropped()
+
+    if dropped > self.dropped_seen
+      IO.warn(
+        "open_telemetry: runtime dropped #{dropped - self.dropped_seen} spans, exporter is behind",
+      )
+      self.dropped_seen = dropped
+    end
+
+    loop
+      batch = take_batch(self.max_batch)
+
+      if batch.empty?()
+        break
+      end
+
+      self = self.export_batch(batch)
+
+      if batch.length() < self.max_batch
+        break
+      end
+    end
+
+    self
+  end
+
+  # Encodes and sends one batch. The batch is gone either way, so a
+  # collector outage costs spans, not memory.
+  priv fn export_batch(self, batch: List<Trace.SpanRecord>) -> Self
+    payload = OTLP.traces(self.resource, batch)
+
+    match self.export(payload)
+      Result.Ok(_) ->
+        self.warned? = false
+        self
+
+      Result.Err(error) ->
+        if not self.warned?
+          IO.warn("open_telemetry: export failed, dropping spans (#{error})")
+        end
+
+        self.warned? = true
+        self
+    end
+  end
+
+  # Pops at most `limit` finished spans off the runtime queue.
+  priv fn take_batch(limit: Int) -> List<Trace.SpanRecord>
+    batch: List<Trace.SpanRecord> = List.new()
+
+    while batch.length() < limit
+      match Trace.Export.pop()
+        Option.Some(record) -> batch = batch.append(record)
+        Option.None -> return batch
+      end
+    end
+
+    batch
+  end
+end

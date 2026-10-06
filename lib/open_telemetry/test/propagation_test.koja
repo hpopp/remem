@@ -4,44 +4,61 @@ priv const SPAN_ID: String = "00f067aa0ba902b7"
 priv const TRACE_ID: String = "4bf92f3577b34da6a3ce929d0e0e4736"
 
 struct PropagationTest
-  test "parse reads a sampled traceparent"
-    context = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-01"))
+  priv fn hex(bytes: Binary) -> String
+    Base.encode16(bytes)
+  end
 
-    assert context.trace_id == TRACE_ID
-    assert context.span_id == SPAN_ID
-    assert context.sampled?
+  # The context a process would carry inside a span that is the
+  # parent itself, so `header` writes the parent's own ids back.
+  priv fn context(parent: Trace.Parent) -> Process.Context
+    Process.Context{
+      flags: parent.sampled ? 1 : 0,
+      span: parent.span,
+      trace_hi: parent.trace_hi,
+      trace_lo: parent.trace_lo,
+    }
+  end
+
+  test "parse reads a sampled traceparent"
+    parent = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-01"))
+
+    assert hex(parent.trace_id()) == TRACE_ID
+    assert hex(parent.span_id()) == SPAN_ID
+    assert parent.trace_id().byte_size() == 16
+    assert parent.span_id().byte_size() == 8
+    assert parent.sampled
   end
 
   test "parse reads an unsampled flag"
-    context = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-00"))
+    parent = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-00"))
 
-    assert not context.sampled?
+    assert not parent.sampled
   end
 
-  test "parse lowercases uppercase hex"
-    context = try require(
+  test "parse accepts uppercase hex"
+    parent = try require(
       Propagation.parse(
         "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01",
       ),
     )
 
-    assert context.trace_id == TRACE_ID
-    assert context.span_id == SPAN_ID
+    assert hex(parent.trace_id()) == TRACE_ID
+    assert hex(parent.span_id()) == SPAN_ID
   end
 
   test "parse trims surrounding whitespace"
-    context = try require(Propagation.parse(" 00-#{TRACE_ID}-#{SPAN_ID}-01 "))
+    parent = try require(Propagation.parse(" 00-#{TRACE_ID}-#{SPAN_ID}-01 "))
 
-    assert context.trace_id == TRACE_ID
+    assert hex(parent.trace_id()) == TRACE_ID
   end
 
   test "parse accepts a newer version with extra fields"
-    context = try require(
+    parent = try require(
       Propagation.parse("01-#{TRACE_ID}-#{SPAN_ID}-01-extra"),
     )
 
-    assert context.trace_id == TRACE_ID
-    assert context.sampled?
+    assert hex(parent.trace_id()) == TRACE_ID
+    assert parent.sampled
   end
 
   test "parse rejects a malformed header"
@@ -78,9 +95,35 @@ struct PropagationTest
       Result.Err(Propagation.Error.InvalidFlags)
   end
 
+  test "a root under a parsed parent continues its trace"
+    parent = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-01"))
+    inside = Trace.root(
+      "request",
+      Trace.RootOptions{parent: Option.Some(parent)},
+      span -> Process.context(),
+    )
+    _ = Trace.Export.pop()
+
+    assert hex(inside.trace_id()) == TRACE_ID
+    assert hex(inside.span_id()) != SPAN_ID
+    assert inside.sampled?()
+  end
+
+  test "a root under a parsed parent carries the unsampled flag"
+    parent = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-00"))
+    inside = Trace.root(
+      "request",
+      Trace.RootOptions{parent: Option.Some(parent)},
+      span -> Process.context(),
+    )
+
+    assert hex(inside.trace_id()) == TRACE_ID
+    assert not inside.sampled?()
+  end
+
   test "header round trips through parse"
-    original = SpanContext{sampled?: true, span_id: SPAN_ID, trace_id: TRACE_ID}
-    header = Propagation.header(original)
+    original = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-01"))
+    header = Propagation.header(context(original))
 
     assert header == "00-#{TRACE_ID}-#{SPAN_ID}-01"
 
@@ -89,22 +132,21 @@ struct PropagationTest
   end
 
   test "header writes the unsampled flag"
-    context = SpanContext{sampled?: false, span_id: SPAN_ID, trace_id: TRACE_ID}
-    assert Propagation.header(context) == "00-#{TRACE_ID}-#{SPAN_ID}-00"
+    parent = try require(Propagation.parse("00-#{TRACE_ID}-#{SPAN_ID}-00"))
+
+    assert Propagation.header(context(parent)) == "00-#{TRACE_ID}-#{SPAN_ID}-00"
   end
 
-  test "root and child contexts have well formed identifiers"
-    root = SpanContext.root()
-    child = root.child()
+  test "header inside a root names the root span"
+    (header, inside) = Trace.root(
+      "request",
+      span -> (Propagation.header(Trace.current()), Process.context()),
+    )
+    _ = Trace.Export.pop()
 
-    assert root.trace_id.length() == 32
-    assert root.span_id.length() == 16
-    assert root.sampled?
-    assert child.trace_id == root.trace_id
-    assert child.span_id != root.span_id
-    assert child.span_id.length() == 16
-
-    reparsed = try require(Propagation.parse(Propagation.header(child)))
-    assert reparsed == child
+    parsed = try require(Propagation.parse(header))
+    assert parsed.trace_id() == inside.trace_id()
+    assert parsed.span_id() == inside.span_id()
+    assert parsed.sampled
   end
 end

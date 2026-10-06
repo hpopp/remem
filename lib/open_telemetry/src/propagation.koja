@@ -15,12 +15,16 @@ priv const TRACE_ID_LENGTH: Int = 32
 
 @doc """
 W3C Trace Context over HTTP headers. `parse` reads an incoming
-`traceparent` and `header` writes an outgoing one. The header shape
-is `00-<trace id>-<span id>-<flags>` with lowercase hex fields.
+`traceparent` into the `Trace.Parent` that `Trace.root` continues, and
+`header` writes an outgoing one from `Trace.current()`. The header
+shape is `00-<trace id>-<span id>-<flags>` with lowercase hex fields.
 
 ```
 parent = Propagation.parse(header).ok()
-outgoing = Headers.new().set(Propagation.HEADER, Propagation.header(ctx))
+options = Trace.RootOptions{kind: Trace.SpanKind.Server, parent: parent}
+response = Trace.root("GET /entities", options, span -> handle(request))
+
+outgoing = Headers.new().set(Propagation.HEADER, Propagation.header(Trace.current()))
 ```
 """
 struct Propagation
@@ -30,12 +34,22 @@ struct Propagation
   const HEADER: String = "traceparent"
 
   @doc """
-  Parses a `traceparent` header value. Hex fields are accepted in
-  either case and normalized to lowercase. An all-zero trace id or
-  span id is invalid, as is version `ff`. Versions above `00` parse
-  when their first four fields follow the `00` layout.
+  Writes the calling process's ids as a version `00` `traceparent`
+  value. Outside a trace the ids are all zero, which no receiver
+  accepts, so call it inside a span.
   """
-  fn parse(header: String) -> SpanContext ! Propagation.Error
+  fn header(context: Process.Context) -> String
+    flags = context.sampled?() ? "01" : "00"
+    "00-#{Base.encode16(context.trace_id())}-#{Base.encode16(context.span_id())}-#{flags}"
+  end
+
+  @doc """
+  Parses a `traceparent` header value into the parent a `Trace.root`
+  continues. Hex fields are accepted in either case. An all-zero trace
+  id or span id is invalid, as is version `ff`. Versions above `00`
+  parse when their first four fields follow the `00` layout.
+  """
+  fn parse(header: String) -> Trace.Parent ! Propagation.Error
     parts = header.trim().split("-")
 
     if parts.length() < 4
@@ -68,25 +82,23 @@ struct Propagation
     )
     flags = try flags(parts.get(3).or(""))
 
-    SpanContext{
-      sampled?: flags % 2 == FLAG_SAMPLED,
-      span_id: span_id,
-      trace_id: trace_id,
-    }
+    Trace.Parent.new(trace_id, span_id, flags % 2 == FLAG_SAMPLED)
+      rescue error -> fail from_trace(error)
   end
 
-  @doc """
-  Writes a context as a version `00` `traceparent` value.
-  """
-  fn header(context: SpanContext) -> String
-    flags = context.sampled? ? "01" : "00"
-    "00-#{context.trace_id}-#{context.span_id}-#{flags}"
+  # Maps a stdlib id error onto this package's. `identifier` already
+  # checked the lengths, so the stdlib never refuses them.
+  priv fn from_trace(error: Trace.Error) -> Propagation.Error
+    match error
+      Trace.Error.InvalidSpanId -> Propagation.Error.InvalidSpanId
+      Trace.Error.InvalidTraceId -> Propagation.Error.InvalidTraceId
+    end
   end
 
-  # Validates a hex identifier of `length` characters and returns it
-  # in lowercase. Rejects an all-zero value.
+  # Decodes a hex identifier of `length` characters to bytes. Rejects
+  # an all-zero value.
   priv fn identifier(text: String, length: Int, error: Propagation.Error)
-    -> String ! Propagation.Error
+    -> Binary ! Propagation.Error
 
     if text.length() != length
       fail error
@@ -98,7 +110,7 @@ struct Propagation
       fail error
     end
 
-    Base.encode16(bytes)
+    bytes
   end
 
   priv fn zero?(bytes: Binary) -> Bool

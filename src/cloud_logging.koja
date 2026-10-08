@@ -1,0 +1,209 @@
+alias JSON.Value
+alias Log.Attribute as LogAttribute
+alias Log.Level
+alias Log.Record
+
+# The `@type` that makes Error Reporting collect a log entry.
+priv const REPORTED_ERROR: String = "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
+
+# The attributes that fold into the `httpRequest` field. The names
+# follow the OpenTelemetry HTTP semantic conventions, except that the
+# duration is an `Int` of microseconds rather than a float of seconds.
+priv const HTTP_DURATION: String = "http.server.request.duration"
+priv const HTTP_METHOD: String = "http.request.method"
+priv const HTTP_STATUS: String = "http.response.status_code"
+priv const URL_PATH: String = "url.path"
+
+# The structured fields Cloud Logging reads trace correlation from.
+priv const TRACE_FIELD: String = "logging.googleapis.com/trace"
+priv const SPAN_FIELD: String = "logging.googleapis.com/spanId"
+priv const SAMPLED_FIELD: String = "logging.googleapis.com/trace_sampled"
+
+# A 16 byte trace id of zeros as hex, the context of a process nobody
+# traced.
+priv const ZERO_TRACE: String = "00000000000000000000000000000000"
+
+priv const MICROSECONDS_PER_SECOND: Int = 1_000_000
+
+@doc """
+The production log format for Google Cloud Logging. Each record is
+one JSON object that the GKE logging agent reads as a structured
+entry.
+
+- `severity`, `message`, and `time` are the fields the agent lifts
+  onto the `LogEntry`.
+- A record emitted under a trace carries the `logging.googleapis.com`
+  trace, span, and sampled fields, so Logs Explorer links the line to
+  its trace in Cloud Trace. `project_id` names the project in the
+  trace resource name.
+- Every other attribute lands at the top level and shows up under
+  `jsonPayload`.
+- The four HTTP attributes named in this file fold into the
+  `httpRequest` field, so Logs Explorer renders access lines as
+  requests with a method, a URL, a status, and a latency.
+- `Error` records carry the Error Reporting `@type` and a
+  `serviceContext` built from `service_name` and `service_version`,
+  so they appear in Error Reporting without any stack trace.
+"""
+struct CloudLogging: Log.Formatter<String>
+  project_id: String
+  service_name: String
+  service_version: String
+
+  @doc """
+  Renders one record as a single line of JSON.
+  """
+  fn format_log(self, record: Record) -> String
+    fields: List<(String, Value)> = [
+      ("severity", severity(record.level).to_json()),
+      ("message", record.message.to_json()), ("time", time(record).to_json())
+    ]
+
+    fields = fields.concat(self.trace_fields(record))
+
+    match record.level
+      Level.Error -> fields = fields.concat(self.error_fields())
+      _ -> ()
+    end
+
+    (request, rest) = split_http(record.attributes)
+
+    match request
+      Option.Some(value) -> fields = fields.append(("httpRequest", value))
+      Option.None -> ()
+    end
+
+    for (key, value) in rest
+      fields = fields.append((key, attribute_json(value)))
+    end
+
+    JSON.encode(Value.Object(fields))
+  end
+
+  # The trace correlation fields, empty for a record nobody traced.
+  priv fn trace_fields(self, record: Record) -> List<(String, Value)>
+    trace_id = Base.encode16(record.context.trace_id())
+
+    if trace_id == ZERO_TRACE
+      return []
+    end
+
+    [
+      (TRACE_FIELD, "projects/#{self.project_id}/traces/#{trace_id}".to_json()),
+      (SPAN_FIELD, Base.encode16(record.context.span_id()).to_json()),
+      (SAMPLED_FIELD, record.context.sampled?().to_json())
+    ]
+  end
+
+  priv fn error_fields(self) -> List<(String, Value)>
+    context: Value = [
+      "service": self.service_name.to_json(),
+      "version": self.service_version.to_json()
+    ]
+
+    [("@type", REPORTED_ERROR.to_json()), ("serviceContext", context)]
+  end
+end
+
+# The timestamp as ISO 8601 in UTC with microseconds, such as
+# `2026-09-23T20:00:00.123456Z`.
+priv fn time(record: Record) -> String
+  DateTime{timestamp: record.timestamp, zone: TimeZone.UTC}.to_string()
+end
+
+# Cloud Logging spells the levels differently from the text format, and
+# it has no severity below DEBUG, so a Trace record lands there.
+priv fn severity(level: Level) -> String
+  match level
+    Level.Debug -> "DEBUG"
+    Level.Error -> "ERROR"
+    Level.Info -> "INFO"
+    Level.Trace -> "DEBUG"
+    Level.Warn -> "WARNING"
+  end
+end
+
+# An attribute as the matching JSON scalar.
+priv fn attribute_json(attribute: LogAttribute) -> Value
+  match attribute.value
+    b: Bool -> b.to_json()
+    f: Float -> f.to_json()
+    i: Int -> i.to_json()
+    s: String -> s.to_json()
+  end
+end
+
+# Pulls the HTTP attributes out of `attributes` into an `httpRequest`
+# object and returns what is left. `None` when the record has none of
+# them.
+priv fn split_http(attributes: Map<String, LogAttribute>)
+  -> (Option<Value>, Map<String, LogAttribute>)
+
+  request: List<(String, Value)> = List.new()
+  rest = attributes
+
+  match attributes.get(HTTP_METHOD)
+    Option.Some(method) ->
+      request = request.append(("requestMethod", attribute_json(method)))
+      rest = rest.remove(HTTP_METHOD)
+
+    Option.None ->
+      ()
+  end
+
+  match attributes.get(URL_PATH)
+    Option.Some(path) ->
+      request = request.append(("requestUrl", attribute_json(path)))
+      rest = rest.remove(URL_PATH)
+
+    Option.None ->
+      ()
+  end
+
+  match attributes.get(HTTP_STATUS)
+    Option.Some(status) ->
+      request = request.append(("status", attribute_json(status)))
+      rest = rest.remove(HTTP_STATUS)
+
+    Option.None ->
+      ()
+  end
+
+  match attributes.get(HTTP_DURATION)
+    Option.Some(duration) ->
+      request = request.append(("latency", latency(duration)))
+      rest = rest.remove(HTTP_DURATION)
+
+    Option.None ->
+      ()
+  end
+
+  request.empty?()
+    ? (Option.None, rest)
+    : (Option.Some(Value.Object(request)), rest)
+end
+
+# Cloud Logging wants a latency as a protobuf `Duration` string,
+# decimal seconds with an `s` suffix. An attribute that is not an
+# integer count of microseconds passes through as given.
+priv fn latency(duration: LogAttribute) -> Value
+  match duration.value
+    micros: Int ->
+      seconds = micros / MICROSECONDS_PER_SECOND
+      fraction = pad_six(micros % MICROSECONDS_PER_SECOND)
+      "#{seconds}.#{fraction}s".to_json()
+
+    _ ->
+      attribute_json(duration)
+  end
+end
+
+priv fn pad_six(value: Int) -> String
+  digits = "#{value}"
+
+  while digits.length() < 6
+    digits = "0" <> digits
+  end
+
+  digits
+end

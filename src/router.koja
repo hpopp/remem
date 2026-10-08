@@ -5,7 +5,6 @@ alias HTTP.Method
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
-alias Log.Logger
 alias Pooler.Pool
 alias Postgres.Connection
 
@@ -29,14 +28,13 @@ fn build_router(
   pool: Pool<Connection>,
   embedder: Embedder,
   api_key: Option<String>,
-  log: Logger = Logger.default(),
 ) -> Router
 
   entities = EntityController{embedder: embedder, pool: pool}
   events = EventController{embedder: embedder, pool: pool}
   relations = RelationController{pool: pool}
-  search = SearchController{embedder: embedder, log: log, pool: pool}
-  meta = MetaController{embedder: embedder, log: log, pool: pool}
+  search = SearchController{embedder: embedder, pool: pool}
+  meta = MetaController{embedder: embedder, pool: pool}
 
   auth =
     fn (c: Conn) -> Conn

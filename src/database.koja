@@ -1,0 +1,94 @@
+alias Pooler.Config as PoolConfig
+alias Pooler.Pool
+alias Postgres.Config as DbConfig
+alias Postgres.Connection
+alias Process.StopReason
+
+const POOL_SIZE: Int = 10
+
+# SCRAM auth costs ~1s per connect under the interpreter, and the
+# startup probe waits for the whole pool, so give it a generous budget.
+priv const STARTUP_PROBE_MS: Int = 30000
+
+@doc """
+Brings the database up for the entry process. `start` runs pending
+migrations on a dedicated connection, spawns a pool of `POOL_SIZE`
+connections, and probes the pool once so a bad database config fails
+at startup instead of on the first request. Each failure is logged
+and fails with `StopReason.Shutdown`, which stops the entry process.
+"""
+struct Database
+  fn start(settings: Config.Database) -> Pool<Connection> ! StopReason
+    db_config = connection_config(settings)
+    try migrate(db_config)
+
+    create =
+      fn () -> Result<Connection, String>
+        Connection.connect(db_config).map_err(e -> e.message())
+      end
+
+    # The pool drops any connection that comes back closed or stuck in
+    # a transaction and refills the slot, so a database restart heals
+    # instead of leaving broken sockets on the shelf.
+    pool = Pool.start(
+      PoolConfig{
+        create: create,
+        size: POOL_SIZE,
+        valid: Option.Some(fn (conn: Connection) -> Bool conn.idle?() end),
+      },
+    )
+
+    try probe(pool)
+    pool
+  end
+
+  priv fn connection_config(settings: Config.Database) -> DbConfig
+    DbConfig.new(settings.host, settings.port, settings.user, settings.name)
+      .with_password(settings.password)
+      .with_statement_cache_size(settings.statement_cache)
+  end
+
+  # Runs pending migrations on a dedicated connection, closed after.
+  priv fn migrate(db_config: DbConfig) ! StopReason
+    conn =
+      match Connection.connect(db_config)
+        Result.Err(e) ->
+          Log.error(
+            "Migration could not connect to the database. #{e.message()}",
+          )
+          fail StopReason.Shutdown
+
+        Result.Ok(connected) ->
+          connected
+      end
+
+    match Migrator.run(conn)
+      Result.Ok(migrated) ->
+        _ = migrated.close()
+
+      Result.Err(e) ->
+        Log.error("Migration failed. #{e.message()}")
+        fail StopReason.Shutdown
+    end
+  end
+
+  # The pool builds its connections eagerly but reports factory
+  # failure as PoolDown on first use. Probe once so a bad database
+  # config fails at startup instead of on the first request.
+  priv fn probe(pool: Pool<Connection>) ! StopReason
+    match pool.checkout(STARTUP_PROBE_MS)
+      Result.Ok(conn) ->
+        pool.checkin(conn)
+
+      Result.Err(Pooler.Error.Timeout) ->
+        Log.error(
+          "Database connections are still warming up. Try again shortly.",
+        )
+        fail StopReason.Shutdown
+
+      Result.Err(_) ->
+        Log.error("Database connection failed. Is the compose stack up?")
+        fail StopReason.Shutdown
+    end
+  end
+end

@@ -21,6 +21,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db.query` spans record the error message in the span status when
   the database phase fails, as before, and the embedder's
   `POST /embed` span does the same.
+- Logging runs on the Koja stdlib `Log`. `App.start` calls
+  `Log.configure` once, every process spawned below it inherits the
+  configuration, and code logs through the static `Log.info` and its
+  siblings. The `Logger` value that was threaded through the
+  controllers, the embedder, the sweeper, the backfill, and every MCP
+  tool is gone, along with the `log` fields and parameters that
+  carried it. `LOG_LEVEL` and `GCP_PROJECT_ID` select the floor and
+  the format as before, and `LOG_LEVEL=trace` is accepted. Cloud
+  Logging has no severity below `DEBUG`, so a trace line is sent as
+  `DEBUG`.
+- A best-effort failure that logs and falls back is a `match` on the
+  outcome at the call site. The `warn_and` helper that stood in for a
+  two-statement `rescue` handler is gone.
+- Cloud Logging lines written inside a traced request carry the
+  `logging.googleapis.com/trace`, `spanId`, and `trace_sampled`
+  fields, read from the process context the runtime stamps on each
+  record. Logs Explorer links the line to its trace in Cloud Trace.
+  The Cloud Logging formatter is now `CloudLogging` in `src/`.
+- The access log line is written inside the server span, so it
+  carries the trace fields like every other line in the request. The
+  hex trace id that led the message is gone, since the field says it.
+  Latency is measured from the start of dispatch rather than from the
+  first byte of the request, a difference of microseconds.
+
+### Removed
+
+- `lib/log`, the vendored logging package. The stdlib `Log` provides
+  the levels, attributes, records, handlers, and the text format, and
+  `CloudLogging` in `src/` provides the Cloud Logging JSON format.
 
 ## [0.6.0] - 2026-09-25
 

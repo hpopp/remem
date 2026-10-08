@@ -86,12 +86,3 @@ fn affected(tag: String) -> Int
     Option.Some(text) -> text.to_int() rescue _ -> 0
   end
 end
-
-@doc """
-Logs a warning and yields `default`, for a `rescue` handler that
-must both report and fall back.
-"""
-fn warn_and<T>(log: Log.Logger, message: String, default: T) -> T
-  log.warn(message)
-  default
-end

@@ -51,16 +51,18 @@ the shape Google Cloud Logging reads: `severity`, `message`, and
 `time`, with any other fields under `jsonPayload`. Access lines put
 the method, path, status, and latency in `httpRequest`, and error
 lines carry the Error Reporting `@type` with a `serviceContext` of
-`GCP_SERVICE_NAME` and the running version. Without it, lines are
-text for a terminal. `LOG_LEVEL` accepts `debug`, `info`, `warn`, or
-`error`.
+`GCP_SERVICE_NAME` and the running version. A line written inside a
+traced request carries the `logging.googleapis.com` trace, span, and
+sampled fields, so Logs Explorer links it to its trace. Without
+`GCP_PROJECT_ID`, lines are text for a terminal. `LOG_LEVEL` accepts
+`trace`, `debug`, `info`, `warn`, or `error`. Cloud Logging has no
+severity below `DEBUG`, so a `trace` line is sent as `DEBUG`.
 
 When `OTEL_EXPORTER_OTLP_ENDPOINT` names an OTLP/HTTP collector,
 every request runs in a server span that continues the caller's
 `traceparent`, with child spans for the database phase, embedding
 requests, and MCP tool calls. The response carries the server span
-as a `traceparent` header and the access log line starts with the
-trace id. `GET /health` is not traced.
+as a `traceparent` header. `GET /health` is not traced.
 
 ## API
 

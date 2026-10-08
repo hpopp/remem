@@ -1,37 +1,15 @@
-alias Conn.Router
-alias HTTP.Method
-alias HTTP.Request
-alias HTTP.Response
-alias HTTP.Status
-alias Log.Attribute as LogAttribute
-alias Log.Config as LogConfig
-alias Log.GCP
-alias Log.Logger
-alias Log.Text
 alias Net.TCPServer
 alias Net.TCPServer.Config as TCPServerConfig
 alias Net.TCPServer.Event as TCPEvent
 alias OpenTelemetry.Config as ExporterConfig
 alias OpenTelemetry.Exporter
-alias OpenTelemetry.Propagation
-alias Pooler.Config as PoolConfig
-alias Pooler.Pool
-alias Postgres.Config as DbConfig
-alias Postgres.Connection
 alias Process.Lifecycle
 alias Process.Step
 alias Process.StopReason
-alias Trace.Attribute
 alias Trail.Config as TrailConfig
 alias Trail.Worker
 
 const VERSION: String = "0.7.0"
-
-const POOL_SIZE: Int = 10
-
-# SCRAM auth costs ~1s per connect under the interpreter, and the
-# startup probe waits for the whole pool, so give it a generous budget.
-const STARTUP_PROBE_MS: Int = 30000
 
 # How often the search log sweeper ticks.
 priv const SWEEP_INTERVAL_MS: Int = 3600000
@@ -42,62 +20,24 @@ priv const BACKFILL_INTERVAL_MS: Int = 60000
 
 @doc """
 The remem entry process. `start` loads config from the environment,
-builds the logger, runs schema migrations on a dedicated connection,
-spawns a pool of `POOL_SIZE` Postgres connections, builds the route
-table once, starts the trace exporter, the search log sweeper, and the
-embedding backfill, and spawns a `Net.TCPServer` acceptor that
+configures logging for this process and every process spawned below
+it, brings the database up through `Database`, starts the trace
+exporter, builds the route table once, spawns the search log sweeper
+and the embedding backfill, and spawns a `Net.TCPServer` acceptor that
 delivers connected sockets as `TCPEvent.Connected` messages. Each
 connection is handed to a one-shot `Trail.Worker`, so requests are
 handled concurrently and the entry process never blocks on IO.
+
+`handle` and `handle_signal` are the acceptor half of the process.
+They would move into `trail` if it grew a blocking `serve`.
 """
 struct App: Process<List<String>, TCPEvent, String>
-  log: Logger
   server: TrailConfig
 
   fn start(config: List<String>) -> Self ! StopReason
     settings = Config.load()
-    log = build_logger(settings)
-    database = settings.database
-    db_config =
-      DbConfig.new(database.host, database.port, database.user, database.name)
-      .with_password(database.password)
-      .with_statement_cache_size(database.statement_cache)
-
-    try migrate(db_config, log)
-
-    create =
-      fn () -> Result<Connection, String>
-        Connection.connect(db_config).map_err(e -> e.message())
-      end
-
-    # The pool drops any connection that comes back closed or stuck in
-    # a transaction and refills the slot, so a database restart heals
-    # instead of leaving broken sockets on the shelf.
-    pool = Pool.start(
-      PoolConfig{
-        create: create,
-        size: POOL_SIZE,
-        valid: Option.Some(fn (conn: Connection) -> Bool conn.idle?() end),
-      },
-    )
-
-    # The pool builds its connections eagerly but reports factory
-    # failure as PoolDown on first use. Probe once so a bad database
-    # config fails at startup instead of on the first request.
-    match pool.checkout(STARTUP_PROBE_MS)
-      Result.Ok(conn) ->
-        pool.checkin(conn)
-
-      Result.Err(Pooler.Error.Timeout) ->
-        log.error(
-          "database connections are still warming up, try again shortly",
-        )
-        fail StopReason.Shutdown
-
-      Result.Err(_) ->
-        log.error("database connection failed (is the compose stack up?)")
-        fail StopReason.Shutdown
-    end
+    Log.configure(Logging.config(settings))
+    pool = try Database.start(settings.database)
 
     exporter = Exporter.start(
       ExporterConfig{
@@ -107,18 +47,17 @@ struct App: Process<List<String>, TCPEvent, String>
       },
     )
 
-    embedder = Embedder{log: log, url: settings.embedding_url}
-    router = build_router(pool, embedder, settings.api_key, log)
+    embedder = Embedder{url: settings.embedding_url}
+    router = build_router(pool, embedder, settings.api_key)
 
     _cleaner = spawn Cleaner.start(
-      Cleaner.Config{interval_ms: SWEEP_INTERVAL_MS, log: log, pool: pool},
+      Cleaner.Config{interval_ms: SWEEP_INTERVAL_MS, pool: pool},
     )
 
     _backfill = spawn Backfill.start(
       Backfill.Config{
         embedder: embedder,
         interval_ms: BACKFILL_INTERVAL_MS,
-        log: log,
         pool: pool,
       },
     )
@@ -128,14 +67,8 @@ struct App: Process<List<String>, TCPEvent, String>
       TCPServerConfig{port: settings.port, owner: me},
     )
 
-    auth = settings.api_key.some?() ? "required" : "off"
-    tracing = settings.tracing.endpoint.or("off")
-    log.info("remem #{VERSION} listening on http://127.0.0.1:#{settings.port}")
-    log.info("embedding server: #{settings.embedding_url}")
-    log.info("api key auth: #{auth}, #{POOL_SIZE} pooled db connections")
-    log.info("trace export: #{tracing}")
-
-    App{log: log, server: server_config(router, exporter, log)}
+    log_startup(settings)
+    App{server: Server.config(router, exporter)}
   end
 
   fn handle(self, msg: TCPEvent, from: Option<ReplyTo<String>>) -> Step<Self>
@@ -145,7 +78,7 @@ struct App: Process<List<String>, TCPEvent, String>
         Step.Continue(self)
 
       TCPEvent.Error(e) ->
-        self.log.error("listener error: " <> e.message())
+        Log.error("The listener failed. #{e.message()}")
         Step.Done(StopReason.Shutdown)
     end
   end
@@ -154,186 +87,26 @@ struct App: Process<List<String>, TCPEvent, String>
     match signal
       Lifecycle.Interrupt ->
         IO.puts("")
-        self.log.info("received SIGINT, shutting down...")
+        Log.info("Received SIGINT, shutting down.")
         Step.Done(StopReason.Normal)
 
       Lifecycle.Reload ->
         Step.Continue(self)
 
       Lifecycle.Shutdown ->
-        self.log.info("received SIGTERM, shutting down...")
+        Log.info("Received SIGTERM, shutting down.")
         Step.Done(StopReason.Shutdown)
     end
   end
 
-  # Runs pending migrations on a dedicated connection, closed after.
-  priv fn migrate(db_config: DbConfig, log: Logger) ! StopReason
-    conn =
-      match Connection.connect(db_config)
-        Result.Err(e) ->
-          log.error("migration connect failed: " <> e.message())
-          fail StopReason.Shutdown
-
-        Result.Ok(connected) ->
-          connected
-      end
-
-    match Migrator.run(conn)
-      Result.Ok(migrated) ->
-        _ = migrated.close()
-
-      Result.Err(e) ->
-        log.error("migration failed: " <> e.message())
-        fail StopReason.Shutdown
-    end
+  # The startup banner, four lines that say what this process is
+  # serving and where it is sending traces.
+  priv fn log_startup(settings: Config)
+    auth = settings.api_key.some?() ? "required" : "off"
+    tracing = settings.tracing.endpoint.or("off")
+    Log.info("remem #{VERSION} listening on http://127.0.0.1:#{settings.port}.")
+    Log.info("Embedding server: #{settings.embedding_url}.")
+    Log.info("API key auth: #{auth}, #{POOL_SIZE} pooled db connections.")
+    Log.info("Trace export: #{tracing}.")
   end
-end
-
-# Picks the log format from the settings. A `GCP_PROJECT_ID` means
-# the service runs on GKE, where the logging agent reads Cloud
-# Logging JSON. Without one, lines are text for a terminal.
-priv fn build_logger(settings: Config) -> Logger
-  formatter =
-    match settings.gcp
-      Option.Some(gcp) ->
-        GCP.formatter(
-          GCP.Config{
-            project_id: gcp.project_id,
-            service_name: gcp.service_name,
-            service_version: VERSION,
-          },
-        )
-
-      Option.None ->
-        Text.formatter()
-    end
-
-  Logger.new(LogConfig{formatter: formatter, level: settings.log_level})
-end
-
-# Wires the route table and remem's logging and error shape into a
-# trail worker config. When an exporter is configured, every
-# dispatched request runs inside a server span that continues the
-# caller's trace when it sent a `traceparent` header, and the response
-# carries the span's own `traceparent` so a client can find its trace.
-# Without an exporter the router runs bare and no span is opened.
-# Rejected requests render the same JSON error body as routed
-# failures, and every dispatched request logs one access line with the
-# trace id in front when tracing is on. The line carries the method,
-# path, status, and duration as attributes, which the GCP format folds
-# into `httpRequest`. Successful health probes are the exception,
-# since they arrive every few seconds and would drown both the log and
-# the trace store.
-priv fn server_config(router: Router, exporter: Exporter, log: Logger)
-  -> TrailConfig
-
-  handler =
-    fn (request: Request) -> Response
-      if health_probe?(request) or not exporter.enabled?()
-        return router.dispatch(request)
-      end
-
-      traced_dispatch(router, request)
-    end
-
-  error_response =
-    fn (status: Status, message: String) -> Response
-      Render.raw(status, message)
-    end
-
-  on_request =
-    fn (request: Request, response: Response, elapsed: Duration)
-      if health_probe?(request) and response.status.ok?()
-        return
-      end
-
-      prefix = exporter.enabled?() ? trace_prefix(response) : ""
-      method = request.method.to_string()
-      code = response.status.code
-
-      log.info(
-        "#{prefix}#{method} #{request.path} #{code} #{Log.elapsed(elapsed)}",
-        [
-          "http.request.method": LogAttribute.from(method),
-          "url.path": LogAttribute.from(request.path),
-          "http.response.status_code": LogAttribute.from(code),
-          "http.server.request.duration": LogAttribute.from(
-            elapsed.to_microseconds(),
-          )
-        ],
-      )
-    end
-
-  on_reject =
-    fn (status: Status)
-      match status.code
-        400 -> log.warn("unparseable request 400")
-        413 -> log.warn("oversized request 413")
-        _ -> log.warn("rejected request #{status.code}")
-      end
-    end
-
-  TrailConfig.new(handler)
-    .with_error_response(error_response)
-    .with_on_request(on_request)
-    .with_on_reject(on_reject)
-end
-
-# Runs the router inside a server span. A `traceparent` on the request
-# becomes the root's parent, so the root continues the caller's trace.
-# Without one the root starts a fresh trace. The root ignores whatever
-# context this worker carries, so a keep-alive connection never
-# continues the previous request's trace. The span records the method,
-# path, and status code, and its status follows the response code.
-# Handlers below open children through `Trace.span` and read nothing
-# off the conn.
-priv fn traced_dispatch(router: Router, request: Request) -> Response
-  method = request.method.to_string()
-  parent = request.headers.get(Propagation.HEADER)
-    .then(header -> Propagation.parse(header).ok())
-
-  Trace.root(
-    "#{method} #{request.path}",
-    Trace.RootOptions{kind: Trace.SpanKind.Server, parent: parent},
-    fn (span: Trace.Span) -> Response
-      span.attribute("http.request.method", Attribute.from(method))
-      span.attribute("url.path", Attribute.from(request.path))
-      response = router.dispatch(request)
-      code = response.status.code
-      span.attribute("http.response.status_code", Attribute.from(code))
-      span.status(span_status(code))
-      response.headers = response.headers.set(
-        Propagation.HEADER,
-        Propagation.header(Trace.current()),
-      )
-      response
-    end,
-  )
-end
-
-# The server span status for a response code. remem is the
-# application, so it makes the positive claim that a 2xx or 3xx
-# completed successfully. A 4xx is the client's mistake and gets no
-# opinion, and a 5xx is an error.
-priv fn span_status(code: Int) -> Trace.Status
-  cond
-    code >= 500 -> Trace.Status.Error("HTTP #{code}")
-    code >= 400 -> Trace.Status.Unset
-    else -> Trace.Status.Ok
-  end
-end
-
-# The trace id from the `traceparent` the server span put on the
-# response, ready to lead an access log line.
-priv fn trace_prefix(response: Response) -> String
-  response.headers.get(Propagation.HEADER)
-    .then(header -> Propagation.parse(header).ok())
-    .map(parent -> "#{Base.encode16(parent.trace_id())} ")
-    .or("")
-end
-
-# True for a `GET /health`. Probes are neither traced nor, when they
-# pass, logged. A failed probe still logs so a sick database shows up.
-priv fn health_probe?(request: Request) -> Bool
-  request.method == Method.Get and request.path == "/health"
 end

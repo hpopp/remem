@@ -1,6 +1,5 @@
 alias HTTP.Response
 alias JSON.Value as Json
-alias Log.Logger
 alias Postgres.Connection
 alias Trace.Attribute
 
@@ -28,15 +27,10 @@ struct Mcp
   @doc """
   Handles one JSON-RPC message. Notifications get 202 with no body.
   A `tools/call` runs in its own span under the calling process's
-  context and logs through `log`, which defaults to text on stdout so
-  tests need not build one.
+  context and logs through the calling process's `Log` configuration.
   """
-  fn handle(
-    body: String,
-    conn: Connection,
-    embedder: Embedder,
-    log: Logger = Logger.default(),
-  ) -> (Response, Connection)
+  fn handle(body: String, conn: Connection, embedder: Embedder)
+    -> (Response, Connection)
 
     root =
       match JSON.decode(body)
@@ -59,7 +53,7 @@ struct Mcp
       "initialize" -> (RPC.result(id, initialize_result()), conn)
       "ping" -> (RPC.result(id, RPC.empty_object()), conn)
       "tools/list" -> (RPC.result(id, tools_result()), conn)
-      "tools/call" -> call_tool(root, id, conn, embedder, log)
+      "tools/call" -> call_tool(root, id, conn, embedder)
       _ -> (RPC.error(id, -32601, "no such method #{method}"), conn)
     end
   end
@@ -67,24 +61,19 @@ struct Mcp
   # Names the tool in the log and the trace, then dispatches it. The
   # embedder's request nests under the tool span through the process
   # context.
-  priv fn call_tool(
-    root: Json,
-    id: Json,
-    conn: Connection,
-    embedder: Embedder,
-    log: Logger,
-  ) -> (Response, Connection)
+  priv fn call_tool(root: Json, id: Json, conn: Connection, embedder: Embedder)
+    -> (Response, Connection)
 
     params = JsonUtil.get(root, "params").or(Json.Null)
     name = JsonUtil.get_string(params, "name").or("")
     arguments = JsonUtil.get(params, "arguments").or(Json.Null)
 
     # The access log only shows POST /mcp, so name the tool here.
-    log.info("mcp tools/call #{name}")
+    Log.info("MCP tools/call #{name}.")
 
     Trace.span("tools/call", fn (span: Trace.Span) -> (Response, Connection)
         span.attribute("mcp.tool", Attribute.from(name))
-        dispatch_tool(name, arguments, id, conn, embedder, log)
+        dispatch_tool(name, arguments, id, conn, embedder)
       end)
   end
 
@@ -94,51 +83,50 @@ struct Mcp
     id: Json,
     conn: Connection,
     embedder: Embedder,
-    log: Logger,
   ) -> (Response, Connection)
 
     match name
       "search_memory" ->
-        EntityTools.search(arguments, id, conn, embedder, log)
+        EntityTools.search(arguments, id, conn, embedder)
 
       "get_entity" ->
-        EntityTools.get(arguments, id, conn, log)
+        EntityTools.get(arguments, id, conn)
 
       "create_entity" ->
-        EntityTools.create(arguments, id, conn, embedder, log)
+        EntityTools.create(arguments, id, conn, embedder)
 
       "rename_entity" ->
-        EntityTools.rename(arguments, id, conn, log)
+        EntityTools.rename(arguments, id, conn)
 
       "merge_entities" ->
-        EntityTools.merge(arguments, id, conn, log)
+        EntityTools.merge(arguments, id, conn)
 
       "list_entities" ->
-        EntityTools.list(arguments, id, conn, log)
+        EntityTools.list(arguments, id, conn)
 
       "delete_entity" ->
-        EntityTools.delete(arguments, id, conn, log)
+        EntityTools.delete(arguments, id, conn)
 
       "add_observations" ->
-        ObservationTools.add(arguments, id, conn, embedder, log)
+        ObservationTools.add(arguments, id, conn, embedder)
 
       "remove_observations" ->
-        ObservationTools.remove(arguments, id, conn, log)
+        ObservationTools.remove(arguments, id, conn)
 
       "add_event" ->
-        EventTools.add(arguments, id, conn, embedder, log)
+        EventTools.add(arguments, id, conn, embedder)
 
       "recent_events" ->
-        EventTools.recent(arguments, id, conn, log)
+        EventTools.recent(arguments, id, conn)
 
       "remove_event" ->
-        EventTools.remove(arguments, id, conn, log)
+        EventTools.remove(arguments, id, conn)
 
       "create_relation" ->
-        RelationTools.create(arguments, id, conn, log)
+        RelationTools.create(arguments, id, conn)
 
       "delete_relation" ->
-        RelationTools.delete(arguments, id, conn, log)
+        RelationTools.delete(arguments, id, conn)
 
       _ ->
         (RPC.error(id, -32602, "no such tool #{name}"), conn)

@@ -1,6 +1,5 @@
 alias HTTP.Headers
 alias JSON.Value as Json
-alias Log.Logger
 alias OpenTelemetry.Propagation
 alias Trace.Attribute
 
@@ -15,10 +14,9 @@ Client for a TEI-protocol embedding server (nomic-embed-text,
 Each request runs in a `Client` span under the calling process's
 context and carries the span as a `traceparent` header. A call outside
 a sampled trace, such as the backfill, records nothing. Best-effort
-embedding failures are logged through `log`.
+embedding failures are logged as warnings.
 """
 struct Embedder
-  log: Logger
   url: String
 
   @doc """
@@ -175,12 +173,13 @@ fn embed_event(
   text = event_text(entity.name, entity.kind, event.occurred_at, event.content)
   (conn, outcome) = embed_event_texts(conn, embedder, [event.id], [text])
 
-  _ = outcome
-    rescue e -> warn_and(
-      embedder.log,
-      "embedding event on #{entity.name} failed: " <> e.message(),
-      0,
-    )
+  match outcome
+    Result.Ok(_) ->
+      ()
+
+    Result.Err(e) ->
+      Log.warn("Embedding an event on #{entity.name} failed. #{e.message()}")
+  end
 
   conn
 end
@@ -213,12 +212,13 @@ fn embed_rows(
 
   (conn, outcome) = embed_texts(conn, embedder, ids, texts)
 
-  _ = outcome
-    rescue e -> warn_and(
-      embedder.log,
-      "embedding #{entity.name} failed: " <> e.message(),
-      0,
-    )
+  match outcome
+    Result.Ok(_) ->
+      ()
+
+    Result.Err(e) ->
+      Log.warn("Embedding #{entity.name} failed. #{e.message()}")
+  end
 
   conn
 end

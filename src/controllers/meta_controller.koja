@@ -2,7 +2,6 @@ alias Conn.Conn
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
-alias Log.Logger
 alias Pooler.Pool
 alias Postgres.Connection
 
@@ -14,7 +13,6 @@ restart would not repair it.
 """
 struct MetaController
   embedder: Embedder
-  log: Logger
   pool: Pool<Connection>
 
   fn health(self, c: Conn) -> Conn
@@ -51,8 +49,7 @@ struct MetaController
   priv fn do_mcp(self, c: Conn) -> Conn ! Error
     embedder = self.embedder
     body = c.body
-    log = self.log
-    response = try with_db(self.pool, db -> mcp_db(db, embedder, body, log))
+    response = try with_db(self.pool, db -> mcp_db(db, embedder, body))
     Render.http(c, response)
   end
 end
@@ -79,9 +76,9 @@ end
 
 # Runs one MCP message. `Mcp.handle` renders JSON-RPC level errors
 # itself, so the outcome only fails when the pool does.
-priv fn mcp_db(db: Connection, embedder: Embedder, body: String, log: Logger)
+priv fn mcp_db(db: Connection, embedder: Embedder, body: String)
   -> (Connection, Result<Response, Error>)
 
-  (response, db) = Mcp.handle(body, db, embedder, log)
+  (response, db) = Mcp.handle(body, db, embedder)
   (db, Result.Ok(response))
 end

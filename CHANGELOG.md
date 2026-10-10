@@ -5,51 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.7.0] - 2026-10-10
+
+### Added
+
+- Cloud Logging lines written inside a traced request carry the
+  `logging.googleapis.com/trace`, `spanId`, and `trace_sampled`
+  fields, so Logs Explorer links each line to its trace in Cloud
+  Trace.
+- `LOG_LEVEL=trace`. Cloud Logging has no severity below `DEBUG`, so
+  a trace line is sent as `DEBUG`.
 
 ### Changed
 
-- Tracing runs on the Koja stdlib `Trace`. The runtime carries the
-  trace context on every message, so handlers, the embedder, and the
-  MCP tools open child spans with `Trace.span` and no longer pass a
-  trace value through the conn. The `open_telemetry` package is now
-  the wire side only: it parses and writes `traceparent` headers and
-  drains the runtime's finished spans to the collector on a timer.
-- With no `OTEL_EXPORTER_OTLP_ENDPOINT` set, requests dispatch bare.
-  No span opens and the response carries no `traceparent` header.
-  Before, an unexported span still ran and the header was still set.
-- `db.query` spans record the error message in the span status when
-  the database phase fails, as before, and the embedder's
-  `POST /embed` span does the same.
-- Logging runs on the Koja stdlib `Log`. `App.start` calls
-  `Log.configure` once, every process spawned below it inherits the
-  configuration, and code logs through the static `Log.info` and its
-  siblings. The `Logger` value that was threaded through the
-  controllers, the embedder, the sweeper, the backfill, and every MCP
-  tool is gone, along with the `log` fields and parameters that
-  carried it. `LOG_LEVEL` and `GCP_PROJECT_ID` select the floor and
-  the format as before, and `LOG_LEVEL=trace` is accepted. Cloud
-  Logging has no severity below `DEBUG`, so a trace line is sent as
-  `DEBUG`.
-- A best-effort failure that logs and falls back is a `match` on the
-  outcome at the call site. The `warn_and` helper that stood in for a
-  two-statement `rescue` handler is gone.
-- Cloud Logging lines written inside a traced request carry the
-  `logging.googleapis.com/trace`, `spanId`, and `trace_sampled`
-  fields, read from the process context the runtime stamps on each
-  record. Logs Explorer links the line to its trace in Cloud Trace.
-  The Cloud Logging formatter is now `CloudLogging` in `src/`.
-- The access log line is written inside the server span, so it
-  carries the trace fields like every other line in the request. The
-  hex trace id that led the message is gone, since the field says it.
-  Latency is measured from the start of dispatch rather than from the
-  first byte of the request, a difference of microseconds.
-
-### Removed
-
-- `lib/log`, the vendored logging package. The stdlib `Log` provides
-  the levels, attributes, records, handlers, and the text format, and
-  `CloudLogging` in `src/` provides the Cloud Logging JSON format.
+- Requires Koja 0.20.
+- Upgraded postgres-koja to 0.5.0.
+- Tracing and logging run on the Koja stdlib `Trace` and `Log`. The
+  vendored `lib/log` is gone, and `lib/open_telemetry` now only
+  handles `traceparent` headers and the OTLP export.
+- With no `OTEL_EXPORTER_OTLP_ENDPOINT` set, no span opens and the
+  response carries no `traceparent` header. Before, an unexported
+  span still ran and the header was still set.
+- The embedder's `POST /embed` span records the error message in its
+  status when the request fails, as `db.query` spans already did.
+- Access log lines no longer start with the trace id. Cloud Logging
+  lines carry it in the trace fields instead.
 
 ## [0.6.0] - 2026-09-25
 
@@ -227,6 +207,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
+[0.7.0]: https://github.com/hpopp/remem/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/hpopp/remem/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/hpopp/remem/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/hpopp/remem/compare/v0.4.0...v0.5.0

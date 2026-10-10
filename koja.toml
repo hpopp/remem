@@ -1,7 +1,7 @@
 [project]
 entry = "App"
 experimental = true
-koja = "0.19"
+koja = "0.20"
 name = "remem"
 version = "0.7.0"
 
@@ -9,5 +9,5 @@ version = "0.7.0"
 conn = { path = "lib/conn" }
 open_telemetry = { path = "lib/open_telemetry" }
 pooler = { path = "lib/pooler" }
-postgres = { path = "../postgres-koja" }
+postgres = { github = "hpopp/postgres-koja", tag = "v0.5.0" }
 trail = { path = "lib/trail" }

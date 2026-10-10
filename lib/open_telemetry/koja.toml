@@ -2,7 +2,7 @@
 authors = ["Henry Popp <henry@hpopp.dev>"]
 description = "OpenTelemetry export for Koja with W3C context propagation and OTLP/JSON export"
 experimental = true
-koja = "0.19"
+koja = "0.20"
 license = "MIT"
 name = "open_telemetry"
 namespace = "OpenTelemetry"

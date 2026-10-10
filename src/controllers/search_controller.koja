@@ -1,7 +1,6 @@
 alias Conn.Conn
 alias HTTP.Status
 alias JSON.Value as Json
-alias Log.Logger
 alias Pooler.Pool
 alias Postgres.Connection
 
@@ -16,9 +15,7 @@ search.
 """
 struct SearchController
   embedder: Embedder
-  log: Logger
   pool: Pool<Connection>
-  trace: Trace
 
   fn search(self, c: Conn) -> Conn
     self.do_search(c) rescue e -> Render.from_error(c, e)
@@ -39,13 +36,8 @@ struct SearchController
       fail Error.Validation("limit must be between 1 and #{MAX_SEARCH_LIMIT}")
     end
 
-    embedder = self.embedder.with_trace(self.trace.at(c))
-    log = self.log
-    results = try with_db(
-      self.pool,
-      self.trace.at(c),
-      db -> search_db(db, embedder, q, limit, log),
-    )
+    embedder = self.embedder
+    results = try with_db(self.pool, db -> search_db(db, embedder, q, limit))
 
     body: Json = [
       "query": q.to_json(), "results": Json.Array(results.map(r -> r.to_json()))
@@ -57,16 +49,11 @@ end
 # Logs the query, embeds it, and runs the hybrid search. The log is
 # bookkeeping and the embedder is best-effort, so neither failure
 # fails the search.
-priv fn search_db(
-  db: Connection,
-  embedder: Embedder,
-  q: String,
-  limit: Int,
-  log: Logger,
-) -> (Connection, Result<List<SearchResult>, Error>)
+priv fn search_db(db: Connection, embedder: Embedder, q: String, limit: Int)
+  -> (Connection, Result<List<SearchResult>, Error>)
 
   (db, logged) = SearchLog.record(db, q)
-  logged rescue e -> warn_and(log, "search log: " <> e.message(), ())
+  logged rescue e -> Log.warn("Search log write failed. #{e.message()}")
 
   embedding =
     match embedder.embed(q)
@@ -74,7 +61,9 @@ priv fn search_db(
         Option.Some(vector)
 
       Result.Err(e) ->
-        log.warn("search falls back to fuzzy ranking only: " <> e.message())
+        Log.warn(
+          "Embedding failed, search falls back to fuzzy ranking. #{e.message()}",
+        )
         Option.None
     end
 

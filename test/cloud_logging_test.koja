@@ -1,25 +1,31 @@
 alias Duration.Unit as TimeUnit
 alias JSON.Value
+alias Log.Attribute as LogAttribute
+alias Log.Level
+alias Log.Record
 alias Test.require
 
 # 2026-09-23T20:00:00.123456Z
-priv const GCP_AT: Int = 1_790_193_600_123_456
+priv const LOGGED_AT: Int = 1_790_193_600_123_456
 
-struct GCPTest
-  priv fn config -> GCP.Config
-    GCP.Config{
+struct CloudLoggingTest
+  priv fn formatter -> CloudLogging
+    CloudLogging{
       project_id: "example-project",
       service_name: "remem",
       service_version: "0.5.0",
     }
   end
 
-  priv fn record(level: Level, attributes: Map<String, Attribute>) -> Record
+  # A record stamped with the calling process's context, which is the
+  # zero context unless the test opened a span.
+  priv fn record(level: Level, attributes: Map<String, LogAttribute>) -> Record
     Record{
       attributes: attributes,
+      context: Process.context(),
       level: level,
       message: "GET /entities 200 12ms",
-      timestamp: Timestamp.new(GCP_AT, TimeUnit.Microseconds),
+      timestamp: Timestamp.new(LOGGED_AT, TimeUnit.Microseconds),
     }
   end
 
@@ -39,13 +45,13 @@ struct GCPTest
     end
   end
 
-  priv fn render(level: Level, attributes: Map<String, Attribute>)
+  priv fn render(level: Level, attributes: Map<String, LogAttribute>)
     -> Value ! String
 
-    try JSON.decode(GCP.render(config(), record(level, attributes)))
+    try JSON.decode(formatter().format_log(record(level, attributes)))
   end
 
-  test "render writes the Cloud Logging special fields"
+  test "format_log writes the Cloud Logging special fields"
     object = try require(render(Level.Info, Map.new()))
 
     assert field(object, "severity") == Option.Some(Value.String("INFO"))
@@ -58,14 +64,22 @@ struct GCPTest
     assert field(object, "serviceContext") == Option.None
   end
 
-  test "render spells warn as WARNING"
+  test "format_log spells warn as WARNING"
     object = try require(render(Level.Warn, Map.new()))
 
     assert field(object, "severity") == Option.Some(Value.String("WARNING"))
   end
 
-  test "render places other attributes at the top level"
-    attributes: Map<String, Attribute> = ["mcp.tool": "search_memory", "n": 3]
+  test "format_log maps trace to DEBUG, the lowest Cloud Logging severity"
+    object = try require(render(Level.Trace, Map.new()))
+
+    assert field(object, "severity") == Option.Some(Value.String("DEBUG"))
+  end
+
+  test "format_log places other attributes at the top level"
+    attributes: Map<String, LogAttribute> = [
+      "mcp.tool": "search_memory", "n": 3
+    ]
     object = try require(render(Level.Info, attributes))
 
     assert field(object, "mcp.tool") ==
@@ -73,8 +87,8 @@ struct GCPTest
     assert field(object, "n") == Option.Some(Value.Int(3))
   end
 
-  test "render folds the HTTP attributes into httpRequest"
-    attributes: Map<String, Attribute> = [
+  test "format_log folds the HTTP attributes into httpRequest"
+    attributes: Map<String, LogAttribute> = [
       "http.request.method": "GET", "url.path": "/entities",
       "http.response.status_code": 200, "http.server.request.duration": 12_345
     ]
@@ -92,8 +106,8 @@ struct GCPTest
     assert field(object, "http.server.request.duration") == Option.None
   end
 
-  test "render writes a latency above one second"
-    attributes: Map<String, Attribute> = [
+  test "format_log writes a latency above one second"
+    attributes: Map<String, LogAttribute> = [
       "http.server.request.duration": 2_500_000
     ]
     object = try require(render(Level.Info, attributes))
@@ -102,7 +116,7 @@ struct GCPTest
     assert field(request, "latency") == Option.Some(Value.String("2.500000s"))
   end
 
-  test "render marks an error for Error Reporting"
+  test "format_log marks an error for Error Reporting"
     object = try require(render(Level.Error, Map.new()))
     context = field(object, "serviceContext").or(Value.Null)
 
@@ -111,5 +125,35 @@ struct GCPTest
       Option.Some(Value.String("type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"))
     assert field(context, "service") == Option.Some(Value.String("remem"))
     assert field(context, "version") == Option.Some(Value.String("0.5.0"))
+  end
+
+  test "format_log writes no trace fields for a record nobody traced"
+    object = try require(render(Level.Info, Map.new()))
+
+    assert field(object, "logging.googleapis.com/trace") == Option.None
+    assert field(object, "logging.googleapis.com/spanId") == Option.None
+    assert field(object, "logging.googleapis.com/trace_sampled") == Option.None
+  end
+
+  test "format_log links a record emitted under a span to its trace"
+    (context, line) = Trace.root(
+      "test",
+      fn (span: Trace.Span) -> (Process.Context, String)
+        (
+          Process.context(),
+          formatter().format_log(record(Level.Info, Map.new()))
+        )
+      end,
+    )
+    object = try require(JSON.decode(line))
+    trace_id = Base.encode16(context.trace_id())
+    span_id = Base.encode16(context.span_id())
+
+    assert field(object, "logging.googleapis.com/trace") ==
+      Option.Some(Value.String("projects/example-project/traces/#{trace_id}"))
+    assert field(object, "logging.googleapis.com/spanId") ==
+      Option.Some(Value.String(span_id))
+    assert field(object, "logging.googleapis.com/trace_sampled") ==
+      Option.Some(Value.Bool(true))
   end
 end

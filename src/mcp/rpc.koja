@@ -2,7 +2,6 @@ alias HTTP.Headers
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json
-alias Log.Logger
 
 @doc """
 JSON-RPC 2.0 response builders for the MCP endpoint. Every reply is
@@ -66,8 +65,8 @@ struct ToolResult
     RPC.result(id, tool_result(text, false))
   end
 
-  fn err(log: Logger, id: Json, message: String) -> Response
-    log.warn("mcp tool error: " <> message)
+  fn err(id: Json, message: String) -> Response
+    Log.warn("MCP tool returned an error. #{message}")
     RPC.result(id, tool_result(message, true))
   end
 
@@ -75,12 +74,10 @@ struct ToolResult
   Renders a store outcome, the value as JSON on success and the
   error's message otherwise.
   """
-  fn render<T: JSON.Encoding>(log: Logger, id: Json, outcome: Result<T, Error>)
-    -> Response
-
+  fn render<T: JSON.Encoding>(id: Json, outcome: Result<T, Error>) -> Response
     match outcome
       Result.Ok(value) -> ok(id, value.to_json())
-      Result.Err(e) -> err(log, id, e.message())
+      Result.Err(e) -> err(id, e.message())
     end
   end
 
@@ -89,7 +86,6 @@ struct ToolResult
   when nothing matched.
   """
   fn deleted(
-    log: Logger,
     id: Json,
     removed: Result<Bool, Error>,
     text: String,
@@ -97,9 +93,9 @@ struct ToolResult
   ) -> Response
 
     match removed
-      Result.Err(e) -> err(log, id, e.message())
+      Result.Err(e) -> err(id, e.message())
       Result.Ok(true) -> ToolResult.text(id, text)
-      Result.Ok(false) -> err(log, id, missing)
+      Result.Ok(false) -> err(id, missing)
     end
   end
 

@@ -1,21 +1,21 @@
 # OpenTelemetry
 
-OpenTelemetry tracing for [Koja](https://github.com/koja-lang/koja).
-Parses and writes W3C `traceparent` headers, records closure-scoped
-spans, and ships them to a collector as OTLP/JSON over HTTP.
+OpenTelemetry export for [Koja](https://github.com/koja-lang/koja).
+Parses and writes W3C `traceparent` headers and ships the spans the
+stdlib `Trace` records to a collector as OTLP/JSON over HTTP.
 
-The package passes span context explicitly. The runtime-owned
-context slot that removes this is described in
-`design/OBSERVABILITY.md` at the root of this repository.
+The stdlib owns the spans. `Trace.root` and `Trace.span` open them,
+the runtime carries the context on every message, and finished
+records queue in `Trace.Export`. This package is the wire side: the
+codec at the HTTP boundary and the process that drains the queue.
 
 ## Features
 
 - `Propagation.parse` and `Propagation.header` for W3C Trace Context
-- Closure-scoped spans with `Server`, `Client`, and `Internal` kinds
-- Attribute maps as plain map literals
-- A tracer process that batches by count or timer and never blocks callers
+- An exporter process that drains `Trace.Export` on a timer and never
+  touches the request path
 - OTLP/JSON export to `<endpoint>/v1/traces`, or any exporter closure
-- A no-op tracer when no endpoint is configured
+- A no-op exporter when no endpoint is configured
 
 ## Installation
 
@@ -29,46 +29,53 @@ open_telemetry = { path = "lib/open_telemetry" }
 ## Usage
 
 ```koja
-alias OpenTelemetry.Attribute
-alias OpenTelemetry.Config as TracerConfig
+alias OpenTelemetry.Config as ExporterConfig
+alias OpenTelemetry.Exporter
 alias OpenTelemetry.Propagation
-alias OpenTelemetry.SpanKind
-alias OpenTelemetry.Tracer
 
-tracer = Tracer.start(TracerConfig{
+exporter = Exporter.start(ExporterConfig{
   endpoint: Option.Some("http://otel-collector:4318"),
   service_name: "remem",
-  service_version: Option.Some("0.5.0"),
+  service_version: Option.Some("0.7.0"),
 })
-
-# Continue the caller's trace when it sent one.
-parent = Propagation.parse(header) rescue _ -> Option.None
-
-attributes: Map<String, Attribute> = [
-  "http.method": "GET",
-  "http.route": Attribute.from(route),
-]
-
-response = tracer.span("GET /entities", SpanKind.Server, parent, attributes, ctx ->
-  handle(request, ctx))
 ```
 
-The closure receives the span's own context. Pass it to child spans
-as their parent, and to outgoing requests as a header:
+At the boundary, continue the caller's trace when it sent one and
+start a fresh one otherwise. `Propagation.parse` turns the header into
+the `Trace.Parent` that `Trace.RootOptions` carries, and no parent
+starts a fresh trace. The root ignores the context the worker carries,
+so a worker that serves many requests needs no reset between them.
 
 ```koja
-headers = Headers.new().set(Propagation.HEADER, Propagation.header(ctx))
+parent = request.headers.get(Propagation.HEADER).then(h -> Propagation.parse(h).ok())
+
+response = Trace.root(
+  "GET /entities",
+  Trace.RootOptions{kind: Trace.SpanKind.Server, parent: parent},
+  fn (span: Trace.Span) -> Response
+    response = handle(request)
+    span.attribute("http.response.status_code", response.status.code)
+    response
+  end,
+)
 ```
 
-`span_result` marks the span as an error when the closure returns
-`Err`. `span_with` lets the closure add attributes and a status it
-learns while it runs, such as an HTTP response code.
+Code below the boundary opens children with `Trace.span` and needs no
+context argument. An outgoing request carries the current context as
+a header:
+
+```koja
+headers = Headers.new().set(Propagation.HEADER, Propagation.header(Trace.current()))
+```
 
 The package reads no environment variables. The application decides
 where the endpoint comes from and passes it in `Config`.
 
 ## Export failures
 
-A batch that the collector refuses is dropped. The tracer warns on
-stderr once, then stays quiet until an export succeeds again. Tracing
-never costs the request path more than a cast.
+Every `flush_ms` the exporter pops the finished spans and POSTs them
+in batches of at most `max_batch`. A batch that the collector refuses
+is dropped. The exporter warns on stderr once, then stays quiet until
+an export succeeds again. When the runtime queue fills before a drain,
+the runtime drops the newest records and the exporter warns with the
+count it lost.

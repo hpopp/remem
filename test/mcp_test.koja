@@ -1,4 +1,3 @@
-alias Log.Logger
 alias Postgres.Config as DbConfig
 alias Postgres.Connection
 
@@ -49,10 +48,12 @@ struct McpTest
     }
     encoded = JSON.encode(event.to_json())
 
-    for key in [
+    keys = [
       "\"id\"", "\"content\"", "\"occurred_at\"", "\"created_at\"",
       "\"updated_at\""
     ]
+
+    for key in keys
       assert encoded.contains?(key), "event is missing #{key}: #{encoded}"
     end
 
@@ -65,7 +66,7 @@ struct McpTest
     conn = try cleanup(conn)
 
     # The embedder is never reached, since no observations are sent.
-    embedder = Embedder{log: Logger.default(), url: "http://127.0.0.1:1"}
+    embedder = Embedder{url: "http://127.0.0.1:1"}
 
     (response, conn) = Mcp.handle(
       create_call(1, "itest-mcp-guard", false),

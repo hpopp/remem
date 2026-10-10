@@ -1,0 +1,354 @@
+alias Process.Step
+alias Process.StopReason
+alias Test.require
+alias Trace.RootOptions
+alias Trace.SpanKind
+
+priv const UPSTREAM_SPAN_ID: String = "00f067aa0ba902b7"
+priv const UPSTREAM_TRACE_ID: String = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+# A fake collector. `Store` records a payload. `WaitFor(n)` answers
+# once at least `n` payloads have arrived, which lets a test wait on
+# the exporter's timer without sleeping.
+enum SinkMsg
+  Store(String)
+  WaitFor(Int)
+end
+
+enum SinkReply
+  Payloads(List<String>)
+end
+
+struct Sink: Process<Int, SinkMsg, SinkReply>
+  payloads: List<String>
+  waiting: List<(Int, ReplyTo<SinkReply>)>
+
+  fn start(_config: Int) -> Self ! StopReason
+    payloads: List<String> = List.new()
+    waiting: List<(Int, ReplyTo<SinkReply>)> = List.new()
+    Sink{payloads: payloads, waiting: waiting}
+  end
+
+  fn handle(self, msg: SinkMsg, from: Option<ReplyTo<SinkReply>>) -> Step<Self>
+    match msg
+      SinkMsg.Store(payload) ->
+        self.payloads = self.payloads.append(payload)
+        Step.Continue(self.answer())
+
+      SinkMsg.WaitFor(count) ->
+        match from
+          Option.Some(caller) ->
+            self.waiting = self.waiting.append((count, caller))
+          Option.None -> ()
+        end
+
+        Step.Continue(self.answer())
+    end
+  end
+
+  priv fn answer(self) -> Self
+    still_waiting: List<(Int, ReplyTo<SinkReply>)> = List.new()
+
+    for (count, caller) in self.waiting
+      if self.payloads.length() >= count
+        _ = caller.send(SinkReply.Payloads(self.payloads))
+      else
+        still_waiting = still_waiting.append((count, caller))
+      end
+    end
+
+    self.waiting = still_waiting
+    self
+  end
+end
+
+struct ExporterTest
+  # Every test starts from an empty runtime queue, so a span another
+  # test left behind does not land in this test's payload.
+  priv fn reset
+    while Trace.Export.pop() != Option.None
+    end
+  end
+
+  priv fn sink -> Ref<SinkMsg, SinkReply>
+    spawn Sink.start(0)
+  end
+
+  priv fn payloads(collector: Ref<SinkMsg, SinkReply>, count: Int)
+    -> List<String> ! Test.Failure
+
+    match collector.call(SinkMsg.WaitFor(count), 2000)
+      Result.Ok(SinkReply.Payloads(list)) -> list
+      Result.Err(_) -> fail "sink never received #{count} payloads"
+    end
+  end
+
+  priv fn exporter(
+    collector: Ref<SinkMsg, SinkReply>,
+    max_batch: Int,
+    flush_ms: Int,
+  ) -> Exporter
+
+    capturing =
+      fn (payload: String) -> Result<(), Export.Error>
+        collector.cast(SinkMsg.Store(payload))
+        Result.Ok(())
+      end
+
+    Exporter.start(
+      Config{
+        exporter: Option.Some(capturing),
+        flush_ms: flush_ms,
+        max_batch: max_batch,
+        service_name: "test-service",
+        service_version: Option.Some("1.2.3"),
+      },
+    )
+  end
+
+  test "an exporter with no exporter and no endpoint is a no-op"
+    reset()
+    exporter = Exporter.start(Config{service_name: "quiet"})
+
+    assert not exporter.enabled?()
+    try require(exporter.flush())
+  end
+
+  test "an endpoint alone enables the exporter"
+    endpoint: Option<String> = Option.Some("http://127.0.0.1:1")
+    exporter = Exporter.start(Config{endpoint: endpoint, service_name: "remem"})
+
+    assert exporter.enabled?()
+    exporter.stop()
+  end
+
+  test "flush exports a root span with resource attributes"
+    reset()
+    collector = sink()
+    exporter = exporter(collector, 512, 60000)
+
+    sampled =
+      Trace.root(
+        "GET /entities",
+        RootOptions{kind: SpanKind.Server},
+        fn (span: Trace.Span) -> Bool
+          span.attribute("http.route", "/entities")
+          span.attribute("status", 200)
+          Process.context().sampled?()
+        end,
+      )
+
+    assert sampled
+    try require(exporter.flush())
+
+    payloads = try payloads(collector, 1)
+    exporter.stop()
+
+    assert payloads.length() == 1
+
+    body = payloads.first().or("")
+    assert body.starts_with?(
+      "{\"resourceSpans\":[{\"resource\":{\"attributes\":[",
+    )
+    assert body.contains?(
+      "{\"key\":\"service.name\",\"value\":{\"stringValue\":\"test-service\"}}",
+    )
+    assert body.contains?(
+      "{\"key\":\"service.version\",\"value\":{\"stringValue\":\"1.2.3\"}}",
+    )
+    assert body.contains?(
+      "\"scope\":{\"name\":\"open_telemetry\",\"version\":\"0.2.0\"}",
+    )
+    assert body.contains?("\"name\":\"GET /entities\",\"kind\":2,")
+    assert body.contains?(
+      "{\"key\":\"http.route\",\"value\":{\"stringValue\":\"/entities\"}}",
+    )
+    assert body.contains?(
+      "{\"key\":\"status\",\"value\":{\"intValue\":\"200\"}}",
+    )
+    assert not body.contains?("parentSpanId")
+  end
+
+  test "a nested span links to its parent"
+    reset()
+    collector = sink()
+    exporter = exporter(collector, 512, 60000)
+
+    (outer, inner) =
+      Trace.root(
+        "GET /entities",
+        RootOptions{kind: SpanKind.Server},
+        fn (span: Trace.Span) -> (Process.Context, Process.Context)
+          inner = Trace.span("db.query", inner_span -> Process.context())
+          (Process.context(), inner)
+        end,
+      )
+
+    assert inner.trace_id() == outer.trace_id()
+    assert inner.span_id() != outer.span_id()
+    try require(exporter.flush())
+
+    body = try payloads(collector, 1)
+    exporter.stop()
+
+    text = body.first().or("")
+    assert text.contains?("\"traceId\":\"#{Base.encode16(outer.trace_id())}\"")
+    assert text.contains?("\"spanId\":\"#{Base.encode16(inner.span_id())}\"")
+    assert text.contains?(
+      "\"parentSpanId\":\"#{Base.encode16(outer.span_id())}\"",
+    )
+    assert text.contains?("\"name\":\"db.query\",\"kind\":1,")
+  end
+
+  test "a root under a sampled parent shows it as the parent span"
+    reset()
+    collector = sink()
+    exporter = exporter(collector, 512, 60000)
+    parent = try require(
+      Propagation.parse("00-#{UPSTREAM_TRACE_ID}-#{UPSTREAM_SPAN_ID}-01"),
+    )
+
+    inside = Trace.root(
+      "continued",
+      RootOptions{kind: SpanKind.Server, parent: Option.Some(parent)},
+      span -> Process.context(),
+    )
+
+    assert Base.encode16(inside.trace_id()) == UPSTREAM_TRACE_ID
+    assert Base.encode16(inside.span_id()) != UPSTREAM_SPAN_ID
+    try require(exporter.flush())
+
+    body = try payloads(collector, 1)
+    exporter.stop()
+
+    text = body.first().or("")
+    assert text.contains?("\"traceId\":\"#{UPSTREAM_TRACE_ID}\"")
+    assert text.contains?("\"parentSpanId\":\"#{UPSTREAM_SPAN_ID}\"")
+  end
+
+  test "a root under an unsampled parent records nothing"
+    reset()
+    collector = sink()
+    exporter = exporter(collector, 512, 60000)
+    parent = try require(
+      Propagation.parse("00-#{UPSTREAM_TRACE_ID}-#{UPSTREAM_SPAN_ID}-00"),
+    )
+
+    inside = Trace.root(
+      "skipped",
+      RootOptions{kind: SpanKind.Server, parent: Option.Some(parent)},
+      span -> Process.context(),
+    )
+
+    assert not inside.sampled?()
+    assert Base.encode16(inside.trace_id()) == UPSTREAM_TRACE_ID
+    try require(exporter.flush())
+
+    outcome = collector.call(SinkMsg.WaitFor(1), 200)
+    exporter.stop()
+
+    assert outcome == Result.Err(Process.CallError.Timeout)
+  end
+
+  test "a flush splits the queue at max_batch"
+    reset()
+    collector = sink()
+    exporter = exporter(collector, 2, 60000)
+
+    for n in Range{start: 1, stop: 3}
+      _ = Trace.root("span #{n}", span -> n)
+    end
+
+    try require(exporter.flush())
+    batches = try payloads(collector, 2)
+    exporter.stop()
+
+    assert batches.length() == 2
+
+    first = batches.first().or("")
+    assert first.contains?("\"name\":\"span 1\"")
+    assert first.contains?("\"name\":\"span 2\"")
+    assert not first.contains?("\"name\":\"span 3\"")
+    assert batches.last().or("").contains?("\"name\":\"span 3\"")
+  end
+
+  test "the timer exports without a flush"
+    reset()
+    collector = sink()
+    exporter = exporter(collector, 512, 20)
+
+    _ = Trace.root("timed", span -> 0)
+
+    batch = try payloads(collector, 1)
+    exporter.stop()
+
+    assert batch.first().or("").contains?("\"name\":\"timed\"")
+  end
+
+  test "a failing exporter drops the batch and keeps running"
+    reset()
+
+    failing =
+      fn (_payload: String) -> Result<(), Export.Error>
+        Result.Err(Export.Error.Rejected(503))
+      end
+
+    exporter = Exporter.start(
+      Config{
+        exporter: Option.Some(failing),
+        flush_ms: 60000,
+        service_name: "unlucky",
+      },
+    )
+
+    first = Trace.root("one", span -> 1)
+    try require(exporter.flush())
+
+    second = Trace.root("two", span -> 2)
+    try require(exporter.flush())
+    exporter.stop()
+
+    assert first + second == 3
+    assert Trace.Export.pop() == Option.None
+  end
+
+  test "an error status reaches the payload"
+    reset()
+    collector = sink()
+    exporter = exporter(collector, 512, 60000)
+
+    Trace.root(
+      "POST /embed",
+      RootOptions{kind: SpanKind.Client},
+      fn (span: Trace.Span)
+        span.status(Trace.Status.Error("connection refused"))
+      end,
+    )
+    try require(exporter.flush())
+
+    body = try payloads(collector, 1)
+    exporter.stop()
+
+    text = body.first().or("")
+    assert text.contains?(
+      "\"status\":{\"code\":2,\"message\":\"connection refused\"}",
+    )
+    assert text.contains?("\"kind\":3,")
+  end
+
+  test "traces_url joins the endpoint with the traces path"
+    assert Export.traces_url("http://collector:4318") ==
+      "http://collector:4318/v1/traces"
+    assert Export.traces_url("http://collector:4318/") ==
+      "http://collector:4318/v1/traces"
+  end
+
+  test "the http exporter reports a transport failure"
+    export = Export.http("http://127.0.0.1:1")
+
+    match export("{}")
+      Result.Err(Export.Error.Transport(_)) -> ()
+      other -> fail "expected a transport error, got #{other}"
+    end
+  end
+end

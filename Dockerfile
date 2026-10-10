@@ -1,4 +1,4 @@
-FROM kojalang/koja:0.19 AS build
+FROM kojalang/koja:0.20 AS build
 
 WORKDIR /app
 

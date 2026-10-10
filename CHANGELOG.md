@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-10
+
+### Added
+
+- Cloud Logging lines written inside a traced request carry the
+  `logging.googleapis.com/trace`, `spanId`, and `trace_sampled`
+  fields, so Logs Explorer links each line to its trace in Cloud
+  Trace.
+- `LOG_LEVEL=trace`. Cloud Logging has no severity below `DEBUG`, so
+  a trace line is sent as `DEBUG`.
+
+### Changed
+
+- Requires Koja 0.20.
+- Upgraded postgres-koja to 0.5.0.
+- Tracing and logging run on the Koja stdlib `Trace` and `Log`. The
+  vendored `lib/log` is gone, and `lib/open_telemetry` now only
+  handles `traceparent` headers and the OTLP export.
+- With no `OTEL_EXPORTER_OTLP_ENDPOINT` set, no span opens and the
+  response carries no `traceparent` header. Before, an unexported
+  span still ran and the header was still set.
+- The embedder's `POST /embed` span records the error message in its
+  status when the request fails, as `db.query` spans already did.
+- Access log lines no longer start with the trace id. Cloud Logging
+  lines carry it in the trace fields instead.
+
 ## [0.6.0] - 2026-09-25
 
 ### Added
@@ -181,6 +207,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
+[0.7.0]: https://github.com/hpopp/remem/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/hpopp/remem/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/hpopp/remem/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/hpopp/remem/compare/v0.4.0...v0.5.0

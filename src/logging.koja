@@ -1,0 +1,26 @@
+@doc """
+Picks the log format from the settings. A `GCP_PROJECT_ID` means the
+service runs on GKE, where the logging agent reads Cloud Logging JSON.
+Without one, lines are text for a terminal. Either way the handler
+writes to stdout in the calling process.
+"""
+struct Logging
+  fn config(settings: Config) -> Log.Config
+    handler =
+      match settings.gcp
+        Option.Some(gcp) ->
+          Log.Stdout.new(
+            CloudLogging{
+              project_id: gcp.project_id,
+              service_name: gcp.service_name,
+              service_version: VERSION,
+            },
+          ).to_fn()
+
+        Option.None ->
+          Log.Stdout.new(Log.Text{}).to_fn()
+      end
+
+    Log.Config{handlers: [handler], level: settings.log_level}
+  end
+end

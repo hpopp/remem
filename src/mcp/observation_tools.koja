@@ -1,6 +1,5 @@
 alias HTTP.Response
 alias JSON.Value as Json
-alias Log.Logger
 alias Postgres.Connection
 
 @doc """
@@ -8,25 +7,20 @@ The `add_observations` and `remove_observations` tools. Both take
 the same `{name, observations}` arguments.
 """
 struct ObservationTools
-  fn add(
-    arguments: Json,
-    id: Json,
-    conn: Connection,
-    embedder: Embedder,
-    log: Logger,
-  ) -> (Response, Connection)
+  fn add(arguments: Json, id: Json, conn: Connection, embedder: Embedder)
+    -> (Response, Connection)
 
     (name, observations) =
       match args(arguments)
         Result.Ok(parsed) -> parsed
-        Result.Err(message) -> return (ToolResult.err(log, id, message), conn)
+        Result.Err(message) -> return (ToolResult.err(id, message), conn)
       end
 
     (conn, updated) = EntityStore.add_observations(conn, name, observations)
 
     match required(updated, name)
       Result.Err(e) ->
-        (ToolResult.err(log, id, e.message()), conn)
+        (ToolResult.err(id, e.message()), conn)
 
       Result.Ok(pair) ->
         (entity, rows) = pair
@@ -35,17 +29,17 @@ struct ObservationTools
     end
   end
 
-  fn remove(arguments: Json, id: Json, conn: Connection, log: Logger)
+  fn remove(arguments: Json, id: Json, conn: Connection)
     -> (Response, Connection)
 
     (name, observations) =
       match args(arguments)
         Result.Ok(parsed) -> parsed
-        Result.Err(message) -> return (ToolResult.err(log, id, message), conn)
+        Result.Err(message) -> return (ToolResult.err(id, message), conn)
       end
 
     (conn, updated) = EntityStore.remove_observations(conn, name, observations)
-    (ToolResult.render(log, id, required(updated, name)), conn)
+    (ToolResult.render(id, required(updated, name)), conn)
   end
 
   priv fn args(arguments: Json) -> (String, List<String>) ! String

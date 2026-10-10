@@ -1,0 +1,159 @@
+alias Conn.Router
+alias HTTP.Method
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+alias Log.Attribute as LogAttribute
+alias OpenTelemetry.Exporter
+alias OpenTelemetry.Propagation
+alias Trace.Attribute
+alias Trail.Config as TrailConfig
+
+@doc """
+Wires the route table and remem's logging and error shape into a
+trail worker config. When an exporter is configured, every dispatched
+request runs inside a server span that continues the caller's trace
+when it sent a `traceparent` header, and the response carries the
+span's own `traceparent` so a client can find its trace. Without an
+exporter the router runs bare and no span is opened. Rejected
+requests render the same JSON error body as routed failures and log
+one warning each.
+"""
+struct Server
+  fn config(router: Router, exporter: Exporter) -> TrailConfig
+    handler =
+      fn (request: Request) -> Response
+        started = Instant.now()
+
+        if health_probe?(request) or not exporter.enabled?()
+          return dispatch_logged(router, request, started)
+        end
+
+        traced_dispatch(router, request, started)
+      end
+
+    error_response =
+      fn (status: Status, message: String) -> Response
+        Render.raw(status, message)
+      end
+
+    on_reject =
+      fn (status: Status)
+        match status.code
+          400 -> Log.warn("Rejected an unparseable request with 400.")
+          413 -> Log.warn("Rejected an oversized request with 413.")
+          _ -> Log.warn("Rejected a request with #{status.code}.")
+        end
+      end
+
+    TrailConfig.new(handler)
+      .with_error_response(error_response)
+      .with_on_reject(on_reject)
+  end
+
+  # Runs the router inside a server span. A `traceparent` on the
+  # request becomes the root's parent, so the root continues the
+  # caller's trace. Without one the root starts a fresh trace. The
+  # root ignores whatever context this worker carries, so a keep-alive
+  # connection never continues the previous request's trace. The span
+  # records the method, path, and status code, and its status follows
+  # the response code. The access line is written inside the span, so
+  # its record carries the trace. Handlers below open children through
+  # `Trace.span` and read nothing off the conn.
+  priv fn traced_dispatch(router: Router, request: Request, started: Instant)
+    -> Response
+
+    method = request.method.to_string()
+    parent = request.headers.get(Propagation.HEADER)
+      .then(header -> Propagation.parse(header).ok())
+
+    Trace.root(
+      "#{method} #{request.path}",
+      Trace.RootOptions{kind: Trace.SpanKind.Server, parent: parent},
+      fn (span: Trace.Span) -> Response
+        span.attribute("http.request.method", Attribute.from(method))
+        span.attribute("url.path", Attribute.from(request.path))
+        response = dispatch_logged(router, request, started)
+        code = response.status.code
+        span.attribute("http.response.status_code", Attribute.from(code))
+        span.status(span_status(code))
+        response.headers = response.headers.set(
+          Propagation.HEADER,
+          Propagation.header(Trace.current()),
+        )
+        response
+      end,
+    )
+  end
+
+  # Dispatches one request and writes its access line. The line
+  # carries the method, path, status, and duration as attributes,
+  # which the Cloud Logging format folds into `httpRequest`.
+  # Successful health probes are the exception, since they arrive
+  # every few seconds and would drown the log. A failed probe still
+  # logs so a sick database shows up.
+  priv fn dispatch_logged(router: Router, request: Request, started: Instant)
+    -> Response
+
+    response = router.dispatch(request)
+
+    if health_probe?(request) and response.status.ok?()
+      return response
+    end
+
+    method = request.method.to_string()
+    code = response.status.code
+    elapsed = started.elapsed()
+
+    Log.info(
+      "#{method} #{request.path} #{code} #{elapsed_text(elapsed)}",
+      [
+        "http.request.method": LogAttribute.from(method),
+        "url.path": LogAttribute.from(request.path),
+        "http.response.status_code": LogAttribute.from(code),
+        "http.server.request.duration": LogAttribute.from(
+          elapsed.to_microseconds(),
+        )
+      ],
+    )
+
+    response
+  end
+
+  # Formats an elapsed time the way `koja test` does. The unit follows
+  # the size, so `452µs` below one millisecond, `3ms` below one
+  # second, and `1.2s` from there.
+  priv fn elapsed_text(duration: Duration) -> String
+    microseconds = duration.to_microseconds()
+
+    cond
+      microseconds < 1_000 ->
+        "#{microseconds}µs"
+
+      microseconds < 1_000_000 ->
+        "#{duration.to_milliseconds()}ms"
+
+      else ->
+        tenths = duration.to_milliseconds() / 100
+        "#{tenths / 10}.#{tenths % 10}s"
+    end
+  end
+
+  # The server span status for a response code. remem is the
+  # application, so it makes the positive claim that a 2xx or 3xx
+  # completed successfully. A 4xx is the client's mistake and gets no
+  # opinion, and a 5xx is an error.
+  priv fn span_status(code: Int) -> Trace.Status
+    cond
+      code >= 500 -> Trace.Status.Error("HTTP #{code}")
+      code >= 400 -> Trace.Status.Unset
+      else -> Trace.Status.Ok
+    end
+  end
+
+  # True for a `GET /health`. Probes are neither traced nor, when they
+  # pass, logged.
+  priv fn health_probe?(request: Request) -> Bool
+    request.method == Method.Get and request.path == "/health"
+  end
+end

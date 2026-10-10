@@ -1,4 +1,3 @@
-alias Log.Logger
 alias Pooler.Pool
 alias Postgres.Connection
 alias Process.Step
@@ -19,7 +18,6 @@ priv const BACKFILL_CHECKOUT_MS: Int = 1000
 struct Backfill.Config
   embedder: Embedder
   interval_ms: Int
-  log: Logger
   pool: Pool<Connection>
 end
 
@@ -37,7 +35,6 @@ the whole interval.
 struct Backfill: Process<Backfill.Config, (), ()>
   embedder: Embedder
   interval_ms: Int
-  log: Logger
   pool: Pool<Connection>
 
   fn start(config: Backfill.Config) -> Self ! StopReason
@@ -46,7 +43,6 @@ struct Backfill: Process<Backfill.Config, (), ()>
     Backfill{
       embedder: config.embedder,
       interval_ms: config.interval_ms,
-      log: config.log,
       pool: config.pool,
     }
   end
@@ -57,12 +53,10 @@ struct Backfill: Process<Backfill.Config, (), ()>
 
     cond
       events > 0 ->
-        self.log.info(
-          "embedded #{observations} observations and #{events} events",
-        )
+        Log.info("Embedded #{observations} observations and #{events} events.")
 
       observations > 0 ->
-        self.log.info("embedded #{observations} observations")
+        Log.info("Embedded #{observations} observations.")
 
       else ->
         ()
@@ -83,10 +77,10 @@ struct Backfill: Process<Backfill.Config, (), ()>
         (0, 0)
 
       Result.Ok(db) ->
-        (db, observations) = embed_pending(db, self.embedder, self.log)
+        (db, observations) = embed_pending(db, self.embedder)
         remaining = BACKFILL_BATCH - observations
         (db, events) = remaining > 0
-          ? embed_pending_events(db, self.embedder, self.log, remaining)
+          ? embed_pending_events(db, self.embedder, remaining)
           : (db, 0)
         self.pool.checkin(db)
         (observations, events)
@@ -94,14 +88,21 @@ struct Backfill: Process<Backfill.Config, (), ()>
   end
 end
 
-priv fn embed_pending(db: Connection, embedder: Embedder, log: Logger)
-  -> (Connection, Int)
-
+priv fn embed_pending(db: Connection, embedder: Embedder) -> (Connection, Int)
   (db, pending) = EntityStore.unembedded(db, BACKFILL_BATCH)
 
-  # A failed read logs and reads as nothing pending.
-  rows = pending
-    rescue e -> warn_and(log, "embedding backfill: " <> e.message(), List.new())
+  # A failed read logs and the pass ends here.
+  rows =
+    match pending
+      Result.Ok(rows) ->
+        rows
+
+      Result.Err(e) ->
+        Log.warn(
+          "Embedding backfill could not read pending observations. #{e.message()}",
+        )
+        return (db, 0)
+    end
 
   if rows.empty?()
     return (db, 0)
@@ -111,27 +112,33 @@ priv fn embed_pending(db: Connection, embedder: Embedder, log: Logger)
   texts = rows.map(row -> embedding_text(row.name, row.kind, row.content))
 
   (db, outcome) = embed_texts(db, embedder, ids, texts)
-  (
-    db,
-    outcome rescue e -> warn_and(log, "embedding backfill: " <> e.message(), 0)
-  )
+
+  match outcome
+    Result.Ok(embedded) ->
+      (db, embedded)
+
+    Result.Err(e) ->
+      Log.warn("Embedding backfill failed. #{e.message()}")
+      (db, 0)
+  end
 end
 
-priv fn embed_pending_events(
-  db: Connection,
-  embedder: Embedder,
-  log: Logger,
-  limit: Int,
-) -> (Connection, Int)
+priv fn embed_pending_events(db: Connection, embedder: Embedder, limit: Int)
+  -> (Connection, Int)
 
   (db, pending) = EventStore.unembedded(db, limit)
 
-  rows = pending
-    rescue e -> warn_and(
-      log,
-      "event embedding backfill: " <> e.message(),
-      List.new(),
-    )
+  rows =
+    match pending
+      Result.Ok(rows) ->
+        rows
+
+      Result.Err(e) ->
+        Log.warn(
+          "Event embedding backfill could not read pending events. #{e.message()}",
+        )
+        return (db, 0)
+    end
 
   if rows.empty?()
     return (db, 0)
@@ -147,9 +154,12 @@ priv fn embed_pending_events(
 
   (db, outcome) = embed_event_texts(db, embedder, ids, texts)
 
-  (
-    db,
-    outcome
-      rescue e -> warn_and(log, "event embedding backfill: " <> e.message(), 0)
-  )
+  match outcome
+    Result.Ok(embedded) ->
+      (db, embedded)
+
+    Result.Err(e) ->
+      Log.warn("Event embedding backfill failed. #{e.message()}")
+      (db, 0)
+  end
 end

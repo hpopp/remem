@@ -1,6 +1,5 @@
 alias HTTP.Response
 alias JSON.Value as Json
-alias Log.Logger
 alias Postgres.Connection
 
 @doc """
@@ -8,33 +7,32 @@ The `create_relation` and `delete_relation` tools. Both take the
 same `{from, to, type}` arguments.
 """
 struct RelationTools
-  fn create(arguments: Json, id: Json, conn: Connection, log: Logger)
+  fn create(arguments: Json, id: Json, conn: Connection)
     -> (Response, Connection)
 
     (from, to, kind) =
       match args(arguments)
         Result.Ok(parsed) -> parsed
-        Result.Err(message) -> return (ToolResult.err(log, id, message), conn)
+        Result.Err(message) -> return (ToolResult.err(id, message), conn)
       end
 
     (conn, created) = RelationStore.create(conn, from, to, kind)
-    (ToolResult.render(log, id, created), conn)
+    (ToolResult.render(id, created), conn)
   end
 
-  fn delete(arguments: Json, id: Json, conn: Connection, log: Logger)
+  fn delete(arguments: Json, id: Json, conn: Connection)
     -> (Response, Connection)
 
     (from, to, kind) =
       match args(arguments)
         Result.Ok(parsed) -> parsed
-        Result.Err(message) -> return (ToolResult.err(log, id, message), conn)
+        Result.Err(message) -> return (ToolResult.err(id, message), conn)
       end
 
     (conn, removed) = RelationStore.remove(conn, from, to, kind)
 
     (
       ToolResult.deleted(
-        log,
         id,
         removed,
         "deleted #{from} -[#{kind}]-> #{to}",

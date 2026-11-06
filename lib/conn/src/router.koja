@@ -24,10 +24,11 @@ end
 
 @doc """
 An immutable route table. Build one with the chainable verb
-functions, then serve requests with `dispatch`:
+functions, then serve requests with `dispatch`. An empty `Router{}`
+answers 404 in plain text until `not_found` replaces the fallback:
 
 ```
-router = Router.new()
+router = Router{}
   .use(&log_requests/1)
   .get("/health", &health/1)
   .get("/sessions/:id", c -> sessions.show(c))
@@ -40,24 +41,9 @@ handler, and a halted conn stops the pipeline. Pattern segments
 starting with `:` bind path parameters, read with `Conn.param`.
 """
 struct Router
-  fallback: fn (Conn) -> Conn
-  middleware: List<fn (Conn) -> Conn>
-  routes: List<Route>
-
-  @doc """
-  Creates an empty router whose fallback answers 404 in plain text.
-  Replace the fallback with `not_found`.
-  """
-  fn new -> Router
-    empty_middleware: List<fn (Conn) -> Conn> = List.new()
-    empty_routes: List<Route> = List.new()
-
-    Router{
-      fallback: &default_fallback/1,
-      middleware: empty_middleware,
-      routes: empty_routes,
-    }
-  end
+  fallback: fn (Conn) -> Conn = &default_fallback/1
+  middleware: List<fn (Conn) -> Conn> = []
+  routes: List<Route> = []
 
   @doc """
   Appends a middleware function. Middleware runs for every request,
@@ -210,6 +196,6 @@ priv fn bind_params(pattern: List<String>, path: List<String>)
   Option.Some(params)
 end
 
-priv fn default_fallback(conn: Conn) -> Conn
+fn default_fallback(conn: Conn) -> Conn
   conn.text(Status.not_found(), "not found")
 end

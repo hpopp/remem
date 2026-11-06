@@ -46,7 +46,7 @@ struct Server
         end
       end
 
-    TrailConfig.new(handler)
+    TrailConfig{handler: handler}
       .with_error_response(error_response)
       .with_on_reject(on_reject)
   end

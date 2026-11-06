@@ -20,15 +20,15 @@ Spawn a `Worker` for each socket your acceptor receives:
 alias Trail.Config
 alias Trail.Worker
 
-config = Config.new(request -> router.dispatch(request))
+config = Config{handler: request -> router.dispatch(request)}
 
 # In the acceptor process:
 TCPEvent.Connected(client) ->
   _ = spawn Worker.start(Worker{client: client, config: config})
 ```
 
-`Config.new` takes the handler, a `fn (Request) -> Response`. The
-chainable `with_` functions adjust the rest:
+`Config` takes the handler, a `fn (Request) -> Response`. Every other
+field has a default, and the chainable `with_` functions adjust them:
 
 | Function                           | Default    | Purpose                          |
 | ---------------------------------- | ---------- | -------------------------------- |

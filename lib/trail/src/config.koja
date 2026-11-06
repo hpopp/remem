@@ -3,16 +3,16 @@ alias HTTP.Request
 alias HTTP.Response
 alias HTTP.Status
 
-priv const DEFAULT_MAX_BODY_BYTES: Int = 1048576
-priv const DEFAULT_MAX_HEADER_BYTES: Int = 16384
-priv const DEFAULT_MAX_REQUESTS_PER_CONNECTION: Int = 1000
+const DEFAULT_MAX_BODY_BYTES: Int = 1048576
+const DEFAULT_MAX_HEADER_BYTES: Int = 16384
+const DEFAULT_MAX_REQUESTS_PER_CONNECTION: Int = 1000
 
 @doc """
-Settings for a `Worker`. Build one with `new`, then adjust it with
-the chainable `with_` functions:
+Settings for a `Worker`. Build one with a handler, then adjust it
+with the chainable `with_` functions:
 
 ```
-config = Config.new(handler)
+config = Config{handler: handler}
   .with_max_body_bytes(4 * 1024 * 1024)
   .with_on_request((req, resp, elapsed) -> log_access(req, resp, elapsed))
 ```
@@ -25,25 +25,13 @@ time as a `Duration`, and `on_reject` fires when the worker rejects a
 request itself.
 """
 struct Config
-  error_response: fn (Status, String) -> Response
+  error_response: fn (Status, String) -> Response = &plain_error/2
   handler: fn (Request) -> Response
-  max_body_bytes: Int
-  max_header_bytes: Int
-  max_requests_per_connection: Int
-  on_reject: fn (Status) -> ()
-  on_request: fn (Request, Response, Duration) -> ()
-
-  fn new(handler: fn (Request) -> Response) -> Config
-    Config{
-      error_response: &plain_error/2,
-      handler: handler,
-      max_body_bytes: DEFAULT_MAX_BODY_BYTES,
-      max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
-      max_requests_per_connection: DEFAULT_MAX_REQUESTS_PER_CONNECTION,
-      on_reject: &ignore_reject/1,
-      on_request: &ignore_request/3,
-    }
-  end
+  max_body_bytes: Int = DEFAULT_MAX_BODY_BYTES
+  max_header_bytes: Int = DEFAULT_MAX_HEADER_BYTES
+  max_requests_per_connection: Int = DEFAULT_MAX_REQUESTS_PER_CONNECTION
+  on_reject: fn (Status) -> () = &ignore_reject/1
+  on_request: fn (Request, Response, Duration) -> () = &ignore_request/3
 
   fn with_error_response(self, build: fn (Status, String) -> Response) -> Config
     self.error_response = build
@@ -79,7 +67,7 @@ struct Config
 end
 
 # The default error body, a plain text line.
-priv fn plain_error(status: Status, message: String) -> Response
+fn plain_error(status: Status, message: String) -> Response
   headers =
     Headers.new()
     .set("Content-Type", "text/plain; charset=utf-8")
@@ -88,10 +76,10 @@ priv fn plain_error(status: Status, message: String) -> Response
   Response{body: message, headers: headers, status: status, version: "HTTP/1.1"}
 end
 
-priv fn ignore_reject(status: Status)
+fn ignore_reject(status: Status)
   ()
 end
 
-priv fn ignore_request(request: Request, response: Response, elapsed: Duration)
+fn ignore_request(request: Request, response: Response, elapsed: Duration)
   ()
 end

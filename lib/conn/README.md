@@ -15,7 +15,7 @@ fn health(conn: Conn) -> Conn
   conn.text(Status.ok(), "healthy")
 end
 
-router = Router.new()
+router = Router{}
   .use(check_auth)
   .get("/health", health)
   .get("/sessions/:id", c -> sessions.show(c))

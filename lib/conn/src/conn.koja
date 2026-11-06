@@ -23,15 +23,15 @@ as an authenticated user or a trace context, from whoever built the
 conn through middleware to the handler.
 """
 struct Conn
-  assigns: Map<String, String>
+  assigns: Map<String, String> = [:]
   body: String
-  halted: Bool
+  halted: Bool = false
   headers: Headers
   method: Method
   path: String
-  path_params: List<(String, String)>
+  path_params: List<(String, String)> = []
   query: String
-  resp_body: String
+  resp_body: String = ""
   resp_headers: Headers
   resp_status: Status
   version: String
@@ -42,19 +42,13 @@ struct Conn
   """
   fn from_request(request: Request) -> Conn
     parts = request.path.split("?")
-    empty_params: List<(String, String)> = List.new()
-    empty_assigns: Map<String, String> = Map.new()
 
     Conn{
-      assigns: empty_assigns,
       body: request.body,
-      halted: false,
       headers: request.headers,
       method: request.method,
       path: parts.get(0).or(request.path),
-      path_params: empty_params,
       query: parts.get(1).or(""),
-      resp_body: "",
       resp_headers: Headers.new(),
       resp_status: Status.new(0, ""),
       version: request.version,

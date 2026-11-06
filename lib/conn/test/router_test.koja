@@ -27,7 +27,7 @@ struct RouterTest
 
   test "routes by method and static path"
     router =
-      Router.new()
+      Router{}
       .get(
         "/health",
         fn (conn: Conn) -> Conn conn.text(Status.ok(), "healthy") end,
@@ -53,7 +53,7 @@ struct RouterTest
 
   test "binds path parameters"
     router =
-      Router.new()
+      Router{}
       .get("/sessions/:id", RouterTest.echo_param("id"))
       .get("/a/:x/b/:y", fn (conn: Conn) -> Conn
           text = "#{conn.param("x").or("?")}-#{conn.param("y").or("?")}"
@@ -78,7 +78,7 @@ struct RouterTest
 
   test "first matching route wins"
     router =
-      Router.new()
+      Router{}
       .get(
         "/things/special",
         fn (conn: Conn) -> Conn conn.text(Status.ok(), "special") end,
@@ -94,7 +94,7 @@ struct RouterTest
 
   test "middleware runs in order and halt stops the pipeline"
     router =
-      Router.new()
+      Router{}
       .use(fn (conn: Conn) -> Conn conn.put_resp_header("X-First", "1") end)
       .use(fn (conn: Conn) -> Conn
         match conn.get_header("Authorization")
@@ -122,10 +122,10 @@ struct RouterTest
 
   test "query and path split, query params read"
     router =
-      Router.new().get("/items", fn (conn: Conn) -> Conn
-            text = "#{conn.query_param("limit").or("none")}/#{conn.query_param("q").or("none")}"
-            conn.text(Status.ok(), text)
-          end)
+      Router{}.get("/items", fn (conn: Conn) -> Conn
+          text = "#{conn.query_param("limit").or("none")}/#{conn.query_param("q").or("none")}"
+          conn.text(Status.ok(), text)
+        end)
 
     response = router.dispatch(request(Method.Get, "/items?limit=5&q=abc"))
     assert response.body == "5/abc", "query params parse"
@@ -135,16 +135,15 @@ struct RouterTest
   end
 
   test "json helper sets body and content headers"
-    router = Router.new()
-      .get(
-        "/data",
-        fn (conn: Conn) -> Conn
-          conn.json(
-            Status.ok(),
-            Value.object([Value.entry("ok", Value.bool(true))]),
-          )
-        end,
-      )
+    router = Router{}.get(
+      "/data",
+      fn (conn: Conn) -> Conn
+        conn.json(
+          Status.ok(),
+          Value.object([Value.entry("ok", Value.bool(true))]),
+        )
+      end,
+    )
 
     response = router.dispatch(request(Method.Get, "/data"))
     assert response.body == "{\"ok\":true}", "json body"
@@ -155,7 +154,7 @@ struct RouterTest
 
   test "custom fallback and unresponded conns"
     router =
-      Router.new()
+      Router{}
       .not_found(fn (conn: Conn) -> Conn
         conn.json(Status.not_found(), Value.string("no route for #{conn.path}"))
       end)
@@ -171,7 +170,7 @@ struct RouterTest
 
   test "assigns seeded on the conn reach middleware and handlers"
     router =
-      Router.new()
+      Router{}
       .use(fn (conn: Conn) -> Conn
         conn.assign("seen", conn.assigned("trace").or("none"))
       end)

@@ -67,7 +67,7 @@ fn build_router(
       end
     end
 
-  Router.new()
+  Router{}
     .use(auth)
     .use(method_guard)
     .not_found(c -> Render.failure(c, Status.not_found(), "no such route"))

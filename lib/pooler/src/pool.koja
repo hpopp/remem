@@ -138,14 +138,13 @@ priv struct Server<T>: Process<Config<T>, Msg<T>, Reply<T>>
   backoff_min_ms: Int
   create: fn () -> Result<T, String>
   delay_ms: Int
-  missing: Int
-  rebuilding?: Bool
+  missing: Int = 0
+  rebuilding?: Bool = false
   valid: Option<fn (T) -> Bool>
-  waiting: List<ReplyTo<Reply<T>>>
+  waiting: List<ReplyTo<Reply<T>>> = []
 
   fn start(config: Config<T>) -> Self ! StopReason
     available: List<T> = List.new()
-    waiting: List<ReplyTo<Reply<T>>> = List.new()
 
     for _ in Range{start: 1, stop: config.size}
       resource = config.create() rescue _ -> fail StopReason.Shutdown
@@ -158,10 +157,7 @@ priv struct Server<T>: Process<Config<T>, Msg<T>, Reply<T>>
       backoff_min_ms: config.backoff_min_ms,
       create: config.create,
       delay_ms: config.backoff_min_ms,
-      missing: 0,
-      rebuilding?: false,
       valid: config.valid,
-      waiting: waiting,
     }
   end
 

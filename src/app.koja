@@ -9,7 +9,7 @@ alias Process.StopReason
 alias Ranger.Config as RangerConfig
 alias Ranger.Worker
 
-# const VERSION: String = "0.7.0"
+const VERSION: String = "0.7.2"
 
 # How often the search log sweeper ticks.
 priv const SWEEP_INTERVAL_MS: Int = 3600000
@@ -43,7 +43,7 @@ struct App: Process<List<String>, TCPEvent, String>
       ExporterConfig{
         endpoint: settings.tracing.endpoint,
         service_name: settings.tracing.service_name,
-        service_version: Option.Some(PACKAGE_VERSION),
+        service_version: Option.Some(VERSION),
       },
     )
 
@@ -104,9 +104,7 @@ struct App: Process<List<String>, TCPEvent, String>
   priv fn log_startup(settings: Config)
     auth = settings.api_key.some?() ? "required" : "off"
     tracing = settings.tracing.endpoint.or("off")
-    Log.info(
-      "#{PACKAGE_NAME} #{PACKAGE_VERSION} listening on http://127.0.0.1:#{settings.port}.",
-    )
+    Log.info("remem #{VERSION} listening on http://127.0.0.1:#{settings.port}.")
     Log.info("Embedding server: #{settings.embedding_url}.")
     Log.info("API key auth: #{auth}, #{POOL_SIZE} pooled db connections.")
     Log.info("Trace export: #{tracing}.")

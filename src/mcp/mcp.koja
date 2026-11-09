@@ -137,9 +137,7 @@ struct Mcp
     result: Json = [
       "protocolVersion": MCP_PROTOCOL_VERSION.to_json(),
       "capabilities": ["tools": RPC.empty_object()],
-      "serverInfo": [
-        "name": PACKAGE_NAME.to_json(), "version": PACKAGE_VERSION.to_json()
-      ]
+      "serverInfo": ["name": "remem".to_json(), "version": VERSION.to_json()]
     ]
     result
   end

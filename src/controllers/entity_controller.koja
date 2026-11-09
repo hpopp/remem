@@ -1,4 +1,4 @@
-alias Conn.Conn
+alias Trail.Conn
 alias HTTP.Status
 alias JSON.Value as Json
 alias Pooler.Pool
@@ -59,7 +59,7 @@ struct EntityController
   end
 
   priv fn do_show(self, c: Conn) -> Conn ! Error
-    name = try Params.name(c)
+    name = Params.name(c)
     (entity, relations, events) = try with_db(
       self.pool,
       db -> show_db(db, name),
@@ -87,7 +87,7 @@ struct EntityController
   end
 
   priv fn do_rename(self, c: Conn) -> Conn ! Error
-    name = try Params.name(c)
+    name = Params.name(c)
     new_name = try JsonUtil.parse_string_field(c.body, "name")
 
     entity = try with_db(self.pool, db -> rename_db(db, name, new_name))
@@ -95,7 +95,7 @@ struct EntityController
   end
 
   priv fn do_merge(self, c: Conn) -> Conn ! Error
-    source = try Params.name(c)
+    source = Params.name(c)
     into = try JsonUtil.parse_string_field(c.body, "into")
 
     entity = try with_db(self.pool, db -> EntityStore.merge(db, source, into))
@@ -103,7 +103,7 @@ struct EntityController
   end
 
   priv fn do_delete(self, c: Conn) -> Conn ! Error
-    name = try Params.name(c)
+    name = Params.name(c)
     deleted = try with_db(self.pool, db -> EntityStore.remove(db, name))
 
     if not deleted
@@ -114,7 +114,7 @@ struct EntityController
   end
 
   priv fn do_add_observations(self, c: Conn) -> Conn ! Error
-    name = try Params.name(c)
+    name = Params.name(c)
     observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
     embedder = self.embedder
 
@@ -126,7 +126,7 @@ struct EntityController
   end
 
   priv fn do_remove_observations(self, c: Conn) -> Conn ! Error
-    name = try Params.name(c)
+    name = Params.name(c)
     observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
 
     entity = try with_db(self.pool, db -> remove_db(db, name, observations))

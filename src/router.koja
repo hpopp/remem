@@ -1,5 +1,6 @@
-alias Conn.Conn
-alias Conn.Router
+alias Trail.Conn
+alias Trail.Rejection
+alias Trail.Router
 alias HTTP.Headers
 alias HTTP.Method
 alias HTTP.Response
@@ -18,11 +19,10 @@ Builds the route table. Controllers capture their dependencies when
 the router is built, so the routes themselves are plain
 `fn (Conn) -> Conn` closures.
 
-Two middleware steps run before any route matches. The bearer-auth
-check covers every route except `GET /health` when `API_KEY` is
-set, and the method guard answers 405 for verbs no route uses. Both
-halt before any database connection leaves the pool, and so does
-the 404 fallback.
+The bearer-auth middleware covers every route except `GET /health`
+when `API_KEY` is set. It halts before any database connection
+leaves the pool, and so do the 400, 404, and 405 answers the router
+renders through `on_reject`.
 """
 fn build_router(
   pool: Pool<Connection>,
@@ -51,26 +51,9 @@ fn build_router(
       end
     end
 
-  method_guard =
-    fn (c: Conn) -> Conn
-      allowed = c.method == Method.Get or c.method == Method.Post
-        or c.method == Method.Patch or c.method == Method.Delete
-
-      if allowed
-        c
-      else
-        Render.failure(
-          c,
-          Status.method_not_allowed(),
-          "#{c.method.to_string()} is not supported",
-        ).halt()
-      end
-    end
-
   Router{}
     .use(auth)
-    .use(method_guard)
-    .not_found(c -> Render.failure(c, Status.not_found(), "no such route"))
+    .on_reject(&reject/2)
     .get("/health", c -> meta.health(c))
     .get("/graph", c -> meta.graph(c))
     .get("/entities", c -> entities.list(c))
@@ -136,11 +119,12 @@ priv fn run_db<T>(
   work: fn (Connection) -> (Connection, Result<T, Error>),
 ) -> T ! Error
 
-  db = pool.checkout(CHECKOUT_MS)
+  lease = pool.checkout(CHECKOUT_MS)
     rescue _ -> fail Error.Unavailable("no database connection available")
 
-  (db, outcome) = work(db)
-  pool.checkin(db)
+  (db, outcome) = work(lease.resource)
+  lease.resource = db
+  pool.checkin(lease)
   try outcome
 end
 
@@ -225,11 +209,10 @@ Request parameter readers, failing with `Validation` (rendered as
 """
 struct Params
   @doc """
-  Reads the percent-decoded `:name` path parameter.
+  Reads the `:name` path parameter. The router has already decoded it.
   """
-  fn name(c: Conn) -> String ! Error
-    URI.decode(c.param("name").or(""))
-      rescue _ -> fail Error.Validation("malformed percent-encoding in path")
+  fn name(c: Conn) -> String
+    c.param("name").or("")
   end
 
   @doc """
@@ -278,6 +261,24 @@ struct Params
           rescue _ -> fail Error.Validation("#{name} must be an integer, got '#{text}'")
     end
   end
+end
+
+# Renders the answers the router gives without a handler in the
+# service error shape.
+priv fn reject(c: Conn, rejection: Rejection) -> Conn
+  message =
+    match rejection
+      Rejection.BadRequest(_) ->
+        "malformed encoding in path or query"
+
+      Rejection.MethodNotAllowed(_) ->
+        "#{c.method.to_string()} is not supported"
+
+      Rejection.NotFound ->
+        "no such route"
+    end
+
+  Render.failure(c, rejection.status(), message)
 end
 
 priv fn authorized?(c: Conn, api_key: Option<String>) -> Bool

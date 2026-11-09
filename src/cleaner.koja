@@ -61,9 +61,14 @@ struct Cleaner: Process<Cleaner.Config, (), ()>
       Result.Err(_) ->
         0
 
-      Result.Ok(db) ->
-        (db, outcome) = SearchLog.prune(db, RETENTION_DAYS, SWEEP_LIMIT)
-        self.pool.checkin(db)
+      Result.Ok(lease) ->
+        (db, outcome) = SearchLog.prune(
+          lease.resource,
+          RETENTION_DAYS,
+          SWEEP_LIMIT,
+        )
+        lease.resource = db
+        self.pool.checkin(lease)
 
         match outcome
           Result.Ok(deleted) ->

@@ -1,4 +1,4 @@
-alias Conn.Conn
+alias Trail.Conn
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as Json

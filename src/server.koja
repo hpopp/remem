@@ -1,4 +1,4 @@
-alias Conn.Router
+alias Trail.Router
 alias HTTP.Method
 alias HTTP.Request
 alias HTTP.Response
@@ -7,11 +7,11 @@ alias Log.Attribute as LogAttribute
 alias OpenTelemetry.Exporter
 alias OpenTelemetry.Propagation
 alias Trace.Attribute
-alias Trail.Config as TrailConfig
+alias Ranger.Config as RangerConfig
 
 @doc """
 Wires the route table and remem's logging and error shape into a
-trail worker config. When an exporter is configured, every dispatched
+ranger worker config. When an exporter is configured, every dispatched
 request runs inside a server span that continues the caller's trace
 when it sent a `traceparent` header, and the response carries the
 span's own `traceparent` so a client can find its trace. Without an
@@ -20,7 +20,7 @@ requests render the same JSON error body as routed failures and log
 one warning each.
 """
 struct Server
-  fn config(router: Router, exporter: Exporter) -> TrailConfig
+  fn config(router: Router, exporter: Exporter) -> RangerConfig
     handler =
       fn (request: Request) -> Response
         started = Instant.now()
@@ -46,7 +46,7 @@ struct Server
         end
       end
 
-    TrailConfig{handler: handler}
+    RangerConfig{handler: handler}
       .with_error_response(error_response)
       .with_on_reject(on_reject)
   end

@@ -1,4 +1,4 @@
-alias Conn.Conn
+alias Trail.Conn
 alias HTTP.Status
 alias JSON.Value as Json
 alias Pooler.Pool
@@ -27,8 +27,6 @@ struct SearchController
         Option.Some(text) when not text.empty?() -> text
         _ -> fail Error.Validation("q is required")
       end
-
-    q = URI.decode(q) rescue _ -> fail Error.Validation("q is not valid")
 
     limit = try Params.int(c, "limit", DEFAULT_SEARCH_LIMIT)
 

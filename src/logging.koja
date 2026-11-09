@@ -13,7 +13,7 @@ struct Logging
             CloudLogging{
               project_id: gcp.project_id,
               service_name: gcp.service_name,
-              service_version: VERSION,
+              service_version: PACKAGE_VERSION,
             },
           ).to_fn()
 

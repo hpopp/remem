@@ -1,4 +1,4 @@
-alias Conn.Conn
+alias Trail.Conn
 alias HTTP.Status
 alias Pooler.Pool
 alias Postgres.Connection

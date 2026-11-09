@@ -1,4 +1,3 @@
-alias Conn.Conn
 alias HTTP.Headers
 alias HTTP.Method
 alias HTTP.Request
@@ -8,10 +7,9 @@ alias Postgres.Config as DbConfig
 alias Postgres.Connection
 
 @doc """
-Route table and worker framing tests. Middleware tests (auth, method
-guard, 404 fallback) and the health test run against a router whose
-pool can never connect, which proves those paths answer without a
-database connection.
+Route table tests. The auth, rejection, and health tests run against
+a router whose pool can never connect, which proves those paths
+answer without a database connection.
 """
 struct RouterTest
   test "auth middleware rejects requests before any pool checkout"
@@ -34,7 +32,7 @@ struct RouterTest
     assert response.status.code == 401, "a wrong key should answer 401"
   end
 
-  test "404 fallback answers without a pool checkout"
+  test "404 answers in the error shape without a pool checkout"
     router = build_router(
       broken_pool(),
       test_embedder(),
@@ -49,7 +47,7 @@ struct RouterTest
     assert response.body.contains?("no such route"), "404 body should say no such route"
   end
 
-  test "method guard answers 405 for verbs no route uses"
+  test "405 lists the allowed methods in the error shape"
     router = build_router(
       broken_pool(),
       test_embedder(),
@@ -61,6 +59,23 @@ struct RouterTest
     )
 
     assert response.status.code == 405
+    assert response.headers.get("Allow") == Option.Some("GET, POST")
+    assert response.body.contains?("PUT is not supported"), "405 body should name the method"
+  end
+
+  test "400 answers in the error shape for a malformed path"
+    router = build_router(
+      broken_pool(),
+      test_embedder(),
+      Option.Some("test-key"),
+    )
+
+    response = router.dispatch(
+      request_with_headers(Method.Get, "/entities/%zz", "", bearer()),
+    )
+
+    assert response.status.code == 400
+    assert response.body.contains?("malformed encoding"), "400 body should name the encoding error"
   end
 
   test "GET /mcp answers 405 and points at POST"
@@ -123,23 +138,6 @@ struct RouterTest
     assert response.body.contains?("occurred_at must be RFC 3339"), "400 body should name the occurred_at error"
   end
 
-  test "path params percent-decode and reject malformed encoding"
-    c = Conn.from_request(request(Method.Get, "/entities/x", ""))
-    c.path_params = [("name", "Foo%20Bar")]
-
-    decoded = Params.name(c) rescue e -> fail "decode: #{e.message()}"
-    assert decoded == "Foo Bar"
-
-    c.path_params = [("name", "%zz")]
-
-    outcome = Params.name(c) rescue e -> match e
-        Error.Validation(_) -> "__rejected__"
-        _ -> fail "expected Validation, got #{e.message()}"
-      end
-
-    assert outcome == "__rejected__", "malformed encoding should fail"
-  end
-
   test "search log prune deletes at most the sweep bound"
     conn = try connect()
     conn = Migrator.run(conn) rescue e -> fail "migrate: #{e.message()}"
@@ -196,9 +194,10 @@ struct RouterTest
     Headers.new().set("Authorization", "Bearer test-key")
   end
 
-  # A pool whose factory always fails. Any checkout attempt reports
-  # PoolDown, so a test that passes against it never touched the
-  # database.
+  # A stopped pool. Any checkout attempt reports PoolDown, so a test
+  # that passes against it never touched the database. The factory
+  # fails rather than connect, and the pool logs that once before it
+  # stops.
   priv fn broken_pool -> Pool<Connection>
     create =
       fn () -> Result<Connection, String>
@@ -206,7 +205,9 @@ struct RouterTest
         broken
       end
 
-    Pool.start(PoolConfig{create: create, size: 1})
+    pool = Pool.start(PoolConfig{create: create, size: 1}).unwrap()
+    _ = pool.stop()
+    pool
   end
 
   priv fn test_embedder -> Embedder

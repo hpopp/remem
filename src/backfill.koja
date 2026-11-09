@@ -76,13 +76,14 @@ struct Backfill: Process<Backfill.Config, (), ()>
       Result.Err(_) ->
         (0, 0)
 
-      Result.Ok(db) ->
-        (db, observations) = embed_pending(db, self.embedder)
+      Result.Ok(lease) ->
+        (db, observations) = embed_pending(lease.resource, self.embedder)
         remaining = BACKFILL_BATCH - observations
         (db, events) = remaining > 0
           ? embed_pending_events(db, self.embedder, remaining)
           : (db, 0)
-        self.pool.checkin(db)
+        lease.resource = db
+        self.pool.checkin(lease)
         (observations, events)
     end
   end

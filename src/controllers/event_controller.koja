@@ -1,4 +1,4 @@
-alias Conn.Conn
+alias Trail.Conn
 alias HTTP.Status
 alias JSON.Value as Json
 alias Pooler.Pool
@@ -26,7 +26,7 @@ struct EventController
   end
 
   priv fn do_list(self, c: Conn) -> Conn ! Error
-    name = try Params.name(c)
+    name = Params.name(c)
     limit = try Params.limit(c, RECENT_EVENTS)
 
     events = try with_db(self.pool, db -> recent_db(db, name, limit))
@@ -36,7 +36,7 @@ struct EventController
   end
 
   priv fn do_create(self, c: Conn) -> Conn ! Error
-    name = try Params.name(c)
+    name = Params.name(c)
     (content, occurred_at) = try JsonUtil.parse_event(c.body)
     embedder = self.embedder
 

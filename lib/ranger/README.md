@@ -1,10 +1,10 @@
-# trail
+# ranger
 
-An HTTP/1.1 connection worker for Koja servers. Trail owns one
-accepted socket at a time and serves it correctly, so applications
-keep only their accept loop and their routes.
+An HTTP/1.1 connection worker for Koja servers. A ranger owns one
+accepted socket at a time and serves every request its visitor
+sends, so applications keep only their accept loop and their routes.
 
-Trail handles:
+Ranger handles:
 
 - Keep-alive serving with a per-connection request budget
 - Byte-correct framing, including pipelined requests and non-ASCII
@@ -17,8 +17,8 @@ Trail handles:
 Spawn a `Worker` for each socket your acceptor receives:
 
 ```koja
-alias Trail.Config
-alias Trail.Worker
+alias Ranger.Config
+alias Ranger.Worker
 
 config = Config{handler: request -> router.dispatch(request)}
 
@@ -45,7 +45,7 @@ the worker rejects a request itself, before a handler could run.
 
 ## Known gaps
 
-Trail inherits two limits from the Koja standard library. There is
+Ranger inherits two limits from the Koja standard library. There is
 no graceful drain, because `Net.TCPServer` cannot stop accepting,
 and no read deadline, so a client can hold a connection open
 without sending a complete request.

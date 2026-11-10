@@ -1,6 +1,10 @@
 struct EmbeddingTest
-  test "embedding_text leads with the entity name and type"
-    actual = embedding_text("Koja", "language", "compiled to native")
+  test "observation_text leads with the entity name and type"
+    actual = Embedding.observation_text(
+      "Koja",
+      "language",
+      "compiled to native",
+    )
     assert actual == "Koja (language): compiled to native"
   end
 end

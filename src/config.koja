@@ -12,6 +12,9 @@ struct Config.Database
   statement_cache: Int
   user: String
 
+  @doc """
+  Load the database settings from the environment.
+  """
   fn load -> Config.Database
     Config.Database{
       host: env_or("DB_HOST", "127.0.0.1"),
@@ -33,6 +36,10 @@ struct Config.GCP
   project_id: String
   service_name: String
 
+  @doc """
+  Load the Google Cloud settings from the environment. If
+  `GCP_PROJECT_ID` is not set, return `None`.
+  """
   fn load -> Option<Config.GCP>
     env_opt("GCP_PROJECT_ID").map(project_id -> Config.GCP{
       project_id: project_id,
@@ -50,6 +57,9 @@ struct Config.Tracing
   endpoint: Option<String>
   service_name: String
 
+  @doc """
+  Load the tracing settings from the environment.
+  """
   fn load -> Config.Tracing
     Config.Tracing{
       endpoint: env_opt("OTEL_EXPORTER_OTLP_ENDPOINT"),
@@ -76,8 +86,8 @@ struct Config
   tracing: Config.Tracing
 
   @doc """
-  Builds a `Config` from the environment, falling back to defaults
-  suitable for local development against the bundled compose stack.
+  Load every setting from the environment. The defaults suit local
+  development against the bundled compose stack.
   Set `API_KEY` to require bearer auth on every route except
   `GET /health`. `LOG_LEVEL` is the floor, `info` by default.
   """

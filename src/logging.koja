@@ -5,6 +5,9 @@ Without one, lines are text for a terminal. Either way the handler
 writes to stdout in the calling process.
 """
 struct Logging
+  @doc """
+  Build the log configuration for `settings`.
+  """
   fn config(settings: Config) -> Log.Config
     handler =
       match settings.gcp
@@ -13,7 +16,7 @@ struct Logging
             CloudLogging{
               project_id: gcp.project_id,
               service_name: gcp.service_name,
-              service_version: VERSION,
+              service_version: App.VERSION,
             },
           ).to_fn()
 

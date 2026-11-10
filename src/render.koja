@@ -1,0 +1,86 @@
+alias HTTP.Headers
+alias HTTP.Response
+alias HTTP.Status
+alias JSON.Value as JSONValue
+alias Trail.Conn
+
+@doc """
+Response builders shared by every controller. REST responses
+pretty-print their JSON, matching the service's original wire shape.
+"""
+struct Render
+  @doc """
+  Build an error `HTTP.Response` directly, for failures the worker
+  hits before a `Conn` exists (unparseable or oversized requests).
+  """
+  fn raw(status: Status, message: String) -> Response
+    text = JSON.encode(error_body(status, message), pretty())
+    headers =
+      Headers.new()
+      .set("Content-Type", "application/json")
+      .set("Content-Length", "#{text.byte_length()}")
+    Response{body: text, headers: headers, status: status, version: "HTTP/1.1"}
+  end
+
+  @doc """
+  Render the service error shape: `{error, message, status}`.
+  """
+  fn failure(c: Conn, status: Status, message: String) -> Conn
+    Render.json(c, status, error_body(status, message))
+  end
+
+  @doc """
+  Map a package `Error` onto the HTTP status it renders with.
+  """
+  fn from_error(c: Conn, e: Error) -> Conn
+    status =
+      match e
+        Error.Database(_) -> Status.internal_server_error()
+        Error.Duplicate(_) -> Status.new(409, "Conflict")
+        Error.Embedding(_) -> Status.new(502, "Bad Gateway")
+        Error.NotFound(_) -> Status.not_found()
+        Error.Unavailable(_) -> Status.new(503, "Service Unavailable")
+        Error.Validation(_) -> Status.bad_request()
+      end
+
+    Render.failure(c, status, e.message())
+  end
+
+  @doc """
+  Render `body` as pretty-printed JSON with `status`.
+  """
+  fn json<T: JSON.Encoding>(c: Conn, status: Status, body: T) -> Conn
+    text = JSON.encode(body, pretty())
+    c.resp(status, text).put_resp_header("Content-Type", "application/json")
+  end
+
+  @doc """
+  Render an empty 204 response.
+  """
+  fn no_content(c: Conn) -> Conn
+    c.resp(Status.no_content(), "")
+  end
+
+  @doc """
+  Adopt a prebuilt `HTTP.Response` (the MCP endpoint builds its own)
+  into the conn.
+  """
+  fn http(c: Conn, response: Response) -> Conn
+    c = c.resp(response.status, response.body)
+
+    c.resp_body.empty?()
+      ? c
+      : c.put_resp_header("Content-Type", "application/json")
+  end
+end
+
+priv fn error_body(status: Status, message: String) -> JSONValue
+  [
+    "error": status.reason.to_json(), "message": message.to_json(),
+    "status": status.code.to_json()
+  ]
+end
+
+priv fn pretty -> JSON.EncodeOptions
+  JSON.EncodeOptions{pretty?: true}
+end

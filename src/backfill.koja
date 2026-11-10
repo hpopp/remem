@@ -3,18 +3,6 @@ alias Postgres.Connection
 alias Process.Step
 alias Process.StopReason
 
-# Observations embedded per pass. Matches the embedder's request
-# batch, so one pass is one call to the embedding server.
-priv const BACKFILL_BATCH: Int = 32
-
-# Pause between passes while draining a backlog. Long enough for
-# request traffic to interleave, short enough to drain quickly.
-priv const BACKFILL_DRAIN_MS: Int = 100
-
-# Checkout budget for a pass. A busy pool skips the pass instead of
-# queueing behind request traffic.
-priv const BACKFILL_CHECKOUT_MS: Int = 1000
-
 struct Backfill.Config
   embedder: Embedder
   interval_ms: Int
@@ -23,7 +11,7 @@ end
 
 @doc """
 The background embedder. Ticks on its own timer and embeds
-observations and events whose `embedding` is NULL, `BACKFILL_BATCH`
+observations and events whose `embedding` is NULL, `Backfill.BATCH`
 rows at a time, observations first and events with whatever budget
 remains. Rows arrive there three ways: the migration that added the
 column, a write whose embedding call failed, and a merge or rename
@@ -37,6 +25,19 @@ struct Backfill: Process<Backfill.Config, (), ()>
   interval_ms: Int
   pool: Pool<Connection>
 
+  # Observations embedded per pass. Matches the embedder's request
+  # batch, so one pass is one call to the embedding server.
+  priv const BATCH: Int = 32
+  # Pause between passes while draining a backlog. Long enough for
+  # request traffic to interleave, short enough to drain quickly.
+  priv const DRAIN_MS: Int = 100
+  # Checkout budget for a pass. A busy pool skips the pass instead of
+  # queueing behind request traffic.
+  priv const CHECKOUT_MS: Int = 1000
+
+  @doc """
+  Schedule the first pass with no delay.
+  """
   fn start(config: Backfill.Config) -> Self ! StopReason
     me: Ref<(), ()> = Ref.self_ref()
     me.send_after((), 0)
@@ -47,6 +48,9 @@ struct Backfill: Process<Backfill.Config, (), ()>
     }
   end
 
+  @doc """
+  Run one pass, then schedule the next pass.
+  """
   fn handle(self, msg: (), from: Option<ReplyTo<()>>) -> Step<Self>
     (observations, events) = self.pass()
     embedded = observations + events
@@ -62,7 +66,7 @@ struct Backfill: Process<Backfill.Config, (), ()>
         ()
     end
 
-    delay = embedded >= BACKFILL_BATCH ? BACKFILL_DRAIN_MS : self.interval_ms
+    delay = embedded >= Backfill.BATCH ? Backfill.DRAIN_MS : self.interval_ms
     me: Ref<(), ()> = Ref.self_ref()
     me.send_after((), delay)
     Step.Continue(self)
@@ -72,24 +76,25 @@ struct Backfill: Process<Backfill.Config, (), ()>
   # were updated. Failures log and count as zero, so the next pass
   # waits the full interval.
   priv fn pass(self) -> (Int, Int)
-    match self.pool.checkout(BACKFILL_CHECKOUT_MS)
+    match self.pool.checkout(Backfill.CHECKOUT_MS)
       Result.Err(_) ->
         (0, 0)
 
-      Result.Ok(db) ->
-        (db, observations) = embed_pending(db, self.embedder)
-        remaining = BACKFILL_BATCH - observations
+      Result.Ok(lease) ->
+        (db, observations) = embed_pending(lease.resource, self.embedder)
+        remaining = Backfill.BATCH - observations
         (db, events) = remaining > 0
           ? embed_pending_events(db, self.embedder, remaining)
           : (db, 0)
-        self.pool.checkin(db)
+        lease.resource = db
+        self.pool.checkin(lease)
         (observations, events)
     end
   end
 end
 
 priv fn embed_pending(db: Connection, embedder: Embedder) -> (Connection, Int)
-  (db, pending) = EntityStore.unembedded(db, BACKFILL_BATCH)
+  (db, pending) = EntityStore.unembedded(db, Backfill.BATCH)
 
   # A failed read logs and the pass ends here.
   rows =
@@ -109,9 +114,13 @@ priv fn embed_pending(db: Connection, embedder: Embedder) -> (Connection, Int)
   end
 
   ids = rows.map(row -> row.id)
-  texts = rows.map(row -> embedding_text(row.name, row.kind, row.content))
+  texts = rows.map(row -> Embedding.observation_text(
+    row.name,
+    row.kind,
+    row.content,
+  ))
 
-  (db, outcome) = embed_texts(db, embedder, ids, texts)
+  (db, outcome) = Embedding.store_observations(db, embedder, ids, texts)
 
   match outcome
     Result.Ok(embedded) ->
@@ -145,14 +154,14 @@ priv fn embed_pending_events(db: Connection, embedder: Embedder, limit: Int)
   end
 
   ids = rows.map(row -> row.id)
-  texts = rows.map(row -> event_text(
+  texts = rows.map(row -> Embedding.event_text(
     row.name,
     row.kind,
     row.occurred_at,
     row.content,
   ))
 
-  (db, outcome) = embed_event_texts(db, embedder, ids, texts)
+  (db, outcome) = Embedding.store_events(db, embedder, ids, texts)
 
   match outcome
     Result.Ok(embedded) ->

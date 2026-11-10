@@ -1,0 +1,127 @@
+alias HTTP.Headers
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+
+@doc """
+Settings for a `Worker`. Build one with a handler, then adjust it
+with the chainable `with_` functions:
+
+```
+config = Config{handler: handler}
+  .with_max_body_bytes(4 * 1024 * 1024)
+  .with_on_request((req, resp, elapsed) -> log_access(req, resp, elapsed))
+```
+
+`handler` runs once per parsed request. `error_response` builds the
+bodies for requests the worker rejects before a handler could run
+(unparseable, or over a size cap). The hooks default to no-ops.
+`on_request` fires after each dispatched request with the elapsed
+time as a `Duration`, and `on_reject` fires when the worker rejects a
+request itself.
+"""
+struct Config
+  error_response: fn (Status, String) -> Response = &Config.plain_error/2
+  handler: fn (Request) -> Response
+  max_body_bytes: Int = Config.DEFAULT_MAX_BODY_BYTES
+  max_header_bytes: Int = Config.DEFAULT_MAX_HEADER_BYTES
+  max_requests_per_connection: Int = Config.DEFAULT_MAX_REQUESTS_PER_CONNECTION
+  on_reject: fn (Status) -> () = &Config.ignore_reject/1
+  on_request: fn (Request, Response, Duration) -> () = &Config.ignore_request/3
+
+  @doc """
+  The default largest request body the worker accepts, 1 MiB.
+  """
+  const DEFAULT_MAX_BODY_BYTES: Int = 1048576
+
+  @doc """
+  The default largest header block the worker accepts, 16 KiB.
+  """
+  const DEFAULT_MAX_HEADER_BYTES: Int = 16384
+
+  @doc """
+  The default number of requests one connection can serve.
+  """
+  const DEFAULT_MAX_REQUESTS_PER_CONNECTION: Int = 1000
+
+  @doc """
+  Set the function that builds the response for a rejected request.
+  """
+  fn with_error_response(self, build: fn (Status, String) -> Response) -> Config
+    self.error_response = build
+    self
+  end
+
+  @doc """
+  Set the largest request body the worker accepts, in bytes.
+  """
+  fn with_max_body_bytes(self, limit: Int) -> Config
+    self.max_body_bytes = limit
+    self
+  end
+
+  @doc """
+  Set the largest header block the worker accepts, in bytes.
+  """
+  fn with_max_header_bytes(self, limit: Int) -> Config
+    self.max_header_bytes = limit
+    self
+  end
+
+  @doc """
+  Set how many requests one connection can serve.
+  """
+  fn with_max_requests_per_connection(self, limit: Int) -> Config
+    self.max_requests_per_connection = limit
+    self
+  end
+
+  @doc """
+  Set the hook that runs when the worker rejects a request.
+  """
+  fn with_on_reject(self, observe: fn (Status) -> ()) -> Config
+    self.on_reject = observe
+    self
+  end
+
+  @doc """
+  Set the hook that runs after each dispatched request.
+  """
+  fn with_on_request(self, observe: fn (Request, Response, Duration) -> ())
+    -> Config
+
+    self.on_request = observe
+    self
+  end
+
+  @doc """
+  Build the default error response, a plain text line.
+  """
+  fn plain_error(status: Status, message: String) -> Response
+    headers =
+      Headers.new()
+      .set("Content-Type", "text/plain; charset=utf-8")
+      .set("Content-Length", "#{message.byte_length()}")
+
+    Response{
+      body: message,
+      headers: headers,
+      status: status,
+      version: "HTTP/1.1",
+    }
+  end
+
+  @doc """
+  Do nothing. This is the default `on_reject` hook.
+  """
+  fn ignore_reject(status: Status)
+    ()
+  end
+
+  @doc """
+  Do nothing. This is the default `on_request` hook.
+  """
+  fn ignore_request(request: Request, response: Response, elapsed: Duration)
+    ()
+  end
+end

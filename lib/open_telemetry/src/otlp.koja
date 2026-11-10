@@ -1,17 +1,17 @@
 alias JSON.Value
 
-# The instrumentation scope this package reports under.
-priv const SCOPE_NAME: String = "open_telemetry"
-priv const SCOPE_VERSION: String = "0.2.0"
-
 @doc """
 OTLP/JSON encoding for the traces signal. The input is the stdlib
 `Trace.SpanRecord` that `Trace.Export.pop` returns. The output is one
 `ExportTraceServiceRequest` body, ready to POST to `/v1/traces`.
 """
 struct OTLP
+  # The instrumentation scope this package reports under.
+  priv const SCOPE_NAME: String = "open_telemetry"
+  priv const SCOPE_VERSION: String = "0.2.0"
+
   @doc """
-  Encodes one attribute as an OTLP `AnyValue`. Integers travel as
+  Encode one attribute as an OTLP `AnyValue`. Integers travel as
   decimal strings, which is how OTLP/JSON carries 64-bit values.
   """
   fn attribute(attr: Trace.Attribute) -> Value
@@ -24,7 +24,7 @@ struct OTLP
   end
 
   @doc """
-  Encodes an attribute map as an OTLP `KeyValue` list.
+  Encode an attribute map as an OTLP `KeyValue` list.
   """
   fn attributes(map: Map<String, Trace.Attribute>) -> Value
     items: List<Value> = List.new()
@@ -37,7 +37,7 @@ struct OTLP
   end
 
   @doc """
-  The OTLP wire code for a span kind.
+  Return the OTLP wire code for a span kind.
   """
   fn kind_code(kind: Trace.SpanKind) -> Int
     match kind
@@ -48,7 +48,7 @@ struct OTLP
   end
 
   @doc """
-  Encodes a finished span as an OTLP `Span` object. Ids are lowercase
+  Encode a finished span as an OTLP `Span` object. Ids are lowercase
   hex and times are nanoseconds since the epoch as decimal strings.
   """
   fn span(record: Trace.SpanRecord) -> Value
@@ -77,7 +77,7 @@ struct OTLP
   end
 
   @doc """
-  Encodes a status for OTLP. `Unset` produces no status object.
+  Encode a status for OTLP. `Unset` produces no status object.
   """
   fn status(status: Trace.Status) -> Option<Value>
     match status
@@ -95,7 +95,7 @@ struct OTLP
   end
 
   @doc """
-  Encodes a batch of spans under one resource and one scope.
+  Encode a batch of spans under one resource and one scope.
   """
   fn traces(
     resource: Map<String, Trace.Attribute>,
@@ -103,7 +103,7 @@ struct OTLP
   ) -> String
 
     scope: Value = [
-      "name": SCOPE_NAME.to_json(), "version": SCOPE_VERSION.to_json()
+      "name": OTLP.SCOPE_NAME.to_json(), "version": OTLP.SCOPE_VERSION.to_json()
     ]
     scope_spans: Value = [
       "scope": scope, "spans": Value.Array(spans.map(record -> span(record)))

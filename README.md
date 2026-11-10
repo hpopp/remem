@@ -226,4 +226,4 @@ The integration tests in `test/store_test.koja` and
 
 Copyright (c) 2026 Henry Popp
 
-This project is MIT licensed.
+This project is MIT licensed. See the [LICENSE](LICENSE) for details.

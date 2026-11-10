@@ -1,18 +1,14 @@
 alias HTTP.Response
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 alias Postgres.Connection
 alias Trace.Attribute
-
-const MCP_PROTOCOL_VERSION: String = "2025-06-18"
-const MCP_DEFAULT_SEARCH_LIMIT: Int = 10
-const MCP_MAX_SEARCH_LIMIT: Int = 100
 
 @doc """
 MCP server endpoint (streamable HTTP transport) at `POST /mcp`. The
 server is stateless and never streams, so each JSON-RPC message gets
 one JSON response and `GET /mcp` is a 405.
 
-This file is the framing and the dispatch table. The tool catalog is
+`MCP` is the framing and the dispatch table. The tool catalog is
 `ToolCatalog`, response builders are `RPC` and `ToolResult`, and the
 tools themselves live in `EntityTools`, `ObservationTools`,
 `EventTools`, and `RelationTools`.
@@ -23,9 +19,26 @@ retrieve by relevance instead of loading everything. `list_entities`
 returns names and counts only, for curation. Tool descriptions steer
 agents to search before writing and to keep the graph curated.
 """
-struct Mcp
+struct MCP
   @doc """
-  Handles one JSON-RPC message. Notifications get 202 with no body.
+  The MCP protocol revision that the `initialize` response reports.
+  """
+  const PROTOCOL_VERSION: String = "2025-06-18"
+
+  @doc """
+  The number of results the `search_memory` tool returns when the
+  call sets no `limit`.
+  """
+  const DEFAULT_SEARCH_LIMIT: Int = 10
+
+  @doc """
+  The largest `limit` that the `search_memory` and `recent_events`
+  tools accept.
+  """
+  const MAX_SEARCH_LIMIT: Int = 100
+
+  @doc """
+  Handle one JSON-RPC message. Notifications get 202 with no body.
   A `tools/call` runs in its own span under the calling process's
   context and logs through the calling process's `Log` configuration.
   """
@@ -37,7 +50,8 @@ struct Mcp
         Result.Ok(value) -> value
         Result.Err(_) ->
           return (
-            RPC.error(Json.Null, -32700, "malformed JSON-RPC message"), conn
+            RPC.error(JSONValue.Null, -32700, "malformed JSON-RPC message"),
+            conn
           )
       end
 
@@ -61,12 +75,16 @@ struct Mcp
   # Names the tool in the log and the trace, then dispatches it. The
   # embedder's request nests under the tool span through the process
   # context.
-  priv fn call_tool(root: Json, id: Json, conn: Connection, embedder: Embedder)
-    -> (Response, Connection)
+  priv fn call_tool(
+    root: JSONValue,
+    id: JSONValue,
+    conn: Connection,
+    embedder: Embedder,
+  ) -> (Response, Connection)
 
-    params = JsonUtil.get(root, "params").or(Json.Null)
+    params = JsonUtil.get(root, "params").or(JSONValue.Null)
     name = JsonUtil.get_string(params, "name").or("")
-    arguments = JsonUtil.get(params, "arguments").or(Json.Null)
+    arguments = JsonUtil.get(params, "arguments").or(JSONValue.Null)
 
     # The access log only shows POST /mcp, so name the tool here.
     Log.info("MCP tools/call #{name}.")
@@ -79,8 +97,8 @@ struct Mcp
 
   priv fn dispatch_tool(
     name: String,
-    arguments: Json,
-    id: Json,
+    arguments: JSONValue,
+    id: JSONValue,
     conn: Connection,
     embedder: Embedder,
   ) -> (Response, Connection)
@@ -133,17 +151,19 @@ struct Mcp
     end
   end
 
-  priv fn initialize_result -> Json
-    result: Json = [
-      "protocolVersion": MCP_PROTOCOL_VERSION.to_json(),
+  priv fn initialize_result -> JSONValue
+    result: JSONValue = [
+      "protocolVersion": MCP.PROTOCOL_VERSION.to_json(),
       "capabilities": ["tools": RPC.empty_object()],
-      "serverInfo": ["name": "remem".to_json(), "version": VERSION.to_json()]
+      "serverInfo": [
+        "name": "remem".to_json(), "version": App.VERSION.to_json()
+      ]
     ]
     result
   end
 
-  priv fn tools_result -> Json
-    result: Json = ["tools": ToolCatalog.tools()]
+  priv fn tools_result -> JSONValue
+    result: JSONValue = ["tools": ToolCatalog.tools()]
     result
   end
 end

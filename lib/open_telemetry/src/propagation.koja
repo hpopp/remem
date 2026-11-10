@@ -9,10 +9,6 @@ enum Propagation.Error
   UnsupportedVersion
 end
 
-priv const FLAG_SAMPLED: Int = 1
-priv const SPAN_ID_LENGTH: Int = 16
-priv const TRACE_ID_LENGTH: Int = 32
-
 @doc """
 W3C Trace Context over HTTP headers. `parse` reads an incoming
 `traceparent` into the `Trace.Parent` that `Trace.root` continues, and
@@ -33,8 +29,12 @@ struct Propagation
   """
   const HEADER: String = "traceparent"
 
+  priv const FLAG_SAMPLED: Int = 1
+  priv const SPAN_ID_LENGTH: Int = 16
+  priv const TRACE_ID_LENGTH: Int = 32
+
   @doc """
-  Writes the calling process's ids as a version `00` `traceparent`
+  Write the calling process's ids as a version `00` `traceparent`
   value. Outside a trace the ids are all zero, which no receiver
   accepts, so call it inside a span.
   """
@@ -44,7 +44,7 @@ struct Propagation
   end
 
   @doc """
-  Parses a `traceparent` header value into the parent a `Trace.root`
+  Parse a `traceparent` header value into the parent a `Trace.root`
   continues. Hex fields are accepted in either case. An all-zero trace
   id or span id is invalid, as is version `ff`. Versions above `00`
   parse when their first four fields follow the `00` layout.
@@ -72,17 +72,17 @@ struct Propagation
 
     trace_id = try identifier(
       parts.get(1).or(""),
-      TRACE_ID_LENGTH,
+      Propagation.TRACE_ID_LENGTH,
       Propagation.Error.InvalidTraceId,
     )
     span_id = try identifier(
       parts.get(2).or(""),
-      SPAN_ID_LENGTH,
+      Propagation.SPAN_ID_LENGTH,
       Propagation.Error.InvalidSpanId,
     )
     flags = try flags(parts.get(3).or(""))
 
-    Trace.Parent.new(trace_id, span_id, flags % 2 == FLAG_SAMPLED)
+    Trace.Parent.new(trace_id, span_id, flags % 2 == Propagation.FLAG_SAMPLED)
       rescue error -> fail from_trace(error)
   end
 

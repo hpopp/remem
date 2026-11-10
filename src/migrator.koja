@@ -14,7 +14,7 @@ Startup schema migrations. Applied versions are recorded in
 """
 struct Migrator
   @doc """
-  Applies every pending migration in version order. Returns the
+  Apply every pending migration in version order. Return the
   updated connection, or the first failure as `Error.Database`.
   """
   fn run(conn: Connection) -> Connection ! Error
@@ -117,13 +117,13 @@ struct Migrator
 
   priv fn applied_versions(conn: Connection) -> (Connection, List<Int>) ! Error
     (conn, outcome) = conn.query("SELECT version FROM schema_migrations")
-    qr = try db_result(outcome)
-    (conn, qr.rows.map(row -> int_at(row, 0)))
+    qr = try Database.Query.result(outcome)
+    (conn, qr.rows.map(row -> Database.Row.int_at(row, 0)))
   end
 
   priv fn exec(conn: Connection, sql: String) -> Connection ! Error
     (conn, outcome) = conn.query(sql)
-    try done(outcome)
+    try Database.Query.done(outcome)
     conn
   end
 
@@ -133,7 +133,7 @@ struct Migrator
       [Postgres.Value.int(version)],
     )
 
-    try done(outcome)
+    try Database.Query.done(outcome)
     conn
   end
 end

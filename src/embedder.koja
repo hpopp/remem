@@ -1,0 +1,139 @@
+alias HTTP.Headers
+alias JSON.Value as JSONValue
+alias OpenTelemetry.Propagation
+alias Trace.Attribute
+
+@doc """
+Client for a TEI-protocol embedding server (nomic-embed-text,
+768 dimensions). Vectors come back as pgvector text literals
+(`[0.1,0.2,...]`), ready to bind as `$n::vector` parameters.
+
+Each request runs in a `Client` span under the calling process's
+context and carries the span as a `traceparent` header. A call outside
+a sampled trace, such as the backfill, records nothing. Best-effort
+embedding failures are logged as warnings.
+"""
+struct Embedder
+  url: String
+
+  # TEI rejects batches above its default `max-client-batch-size`.
+  priv const BATCH: Int = 32
+
+  @doc """
+  Request an embedding for one text. Fail with `Error.Embedding`
+  when the server is unreachable, answers non-200, or returns a
+  shape other than one array of numbers.
+  """
+  fn embed(self, text: String) -> String ! Error
+    vectors = try self.embed_many([text])
+
+    match vectors.first()
+      Option.Some(vector) -> vector
+      Option.None -> fail Error.Embedding("server returned no vector")
+    end
+  end
+
+  @doc """
+  Request embeddings for many texts, in the same order. Requests go
+  out in batches of `Embedder.BATCH` and the first failure aborts the
+  rest.
+  """
+  fn embed_many(self, texts: List<String>) -> List<String> ! Error
+    vectors: List<String> = List.new()
+
+    if texts.empty?()
+      return vectors
+    end
+
+    batches = (texts.length() + Embedder.BATCH - 1) / Embedder.BATCH
+
+    for batch in Range{start: 0, stop: batches - 1}
+      chunk = texts.slice(batch * Embedder.BATCH, Embedder.BATCH)
+      vectors = vectors.concat(try self.request(chunk))
+    end
+
+    vectors
+  end
+
+  priv fn request(self, texts: List<String>) -> List<String> ! Error
+    try Trace.span(
+      "POST /embed",
+      Trace.SpanKind.Client,
+      fn (span: Trace.Span) -> Result<List<String>, Error>
+        span.attribute("http.request.method", "POST")
+        span.attribute("url.full", Attribute.from(self.url <> "/embed"))
+        span.attribute("embedding.batch_size", Attribute.from(texts.length()))
+        Error.mark_span(span, self.post(texts))
+      end,
+    )
+  end
+
+  priv fn post(self, texts: List<String>) -> List<String> ! Error
+    payload: JSONValue = [
+      "inputs": JSONValue.Array(texts.map(t -> t.to_json()))
+    ]
+    headers =
+      Headers.new()
+      .set("Content-Type", "application/json")
+      .set(Propagation.HEADER, Propagation.header(Trace.current()))
+
+    response = HTTP.post(self.url <> "/embed", JSON.encode(payload), headers)
+      rescue e -> fail Error.Embedding(e.message())
+
+    if response.status.code != 200
+      fail Error.Embedding("embedding server returned #{response.status.code}: " <>
+        response.body)
+    end
+
+    decoded = JSON.decode(response.body)
+      rescue e -> fail Error.Embedding("malformed response: " <> e)
+
+    vectors = try vector_literals(decoded)
+
+    if vectors.length() != texts.length()
+      fail Error.Embedding("expected #{texts.length()} vectors, got #{vectors.length()}")
+    end
+
+    vectors
+  end
+
+  # TEI answers `[[f1, f2, ...], ...]`: one inner array per input.
+  priv fn vector_literals(decoded: JSONValue) -> List<String> ! Error
+    outer =
+      match decoded
+        JSONValue.Array(items) -> items
+        _ -> fail Error.Embedding("expected a JSON array response")
+      end
+
+    literals: List<String> = List.new()
+
+    for item in outer
+      numbers =
+        match item
+          JSONValue.Array(inner) -> inner
+          _ -> fail Error.Embedding("expected a nested array of floats")
+        end
+
+      literals = literals.append(try vector_literal(numbers))
+    end
+
+    literals
+  end
+
+  priv fn vector_literal(numbers: List<JSONValue>) -> String ! Error
+    parts: List<String> = List.new()
+
+    for number in numbers
+      part =
+        match number
+          JSONValue.Float(f) -> "#{f}"
+          JSONValue.Int(i) -> "#{i}"
+          _ -> fail Error.Embedding("expected numeric vector components")
+        end
+
+      parts = parts.append(part)
+    end
+
+    "[" <> String.join(parts, ",") <> "]"
+  end
+end

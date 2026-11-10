@@ -4,20 +4,28 @@ alias Postgres.Config as DbConfig
 alias Postgres.Connection
 alias Process.StopReason
 
-const POOL_SIZE: Int = 10
-
-# SCRAM auth costs ~1s per connect under the interpreter, and the
-# startup probe waits for the whole pool, so give it a generous budget.
-priv const STARTUP_PROBE_MS: Int = 30000
-
 @doc """
 Brings the database up for the entry process. `start` runs pending
-migrations on a dedicated connection, spawns a pool of `POOL_SIZE`
-connections, and probes the pool once so a bad database config fails
-at startup instead of on the first request. Each failure is logged
-and fails with `StopReason.Shutdown`, which stops the entry process.
+migrations on a dedicated connection, then spawns a pool of
+`Database.POOL_SIZE` connections. A migration failure is logged and
+fails with `StopReason.Shutdown`, which stops the entry process. The
+pool builds its connections in the background and keeps retrying
+while the database is unreachable, so requests see 503 until it is up
+rather than the service exiting. `with_connection` runs work on one
+pooled connection.
 """
 struct Database
+  @doc """
+  The number of connections the pool holds.
+  """
+  const POOL_SIZE: Int = 10
+
+  priv const CHECKOUT_MS: Int = 5000
+
+  @doc """
+  Run pending migrations, then start the connection pool. Either
+  step can fail with `StopReason.Shutdown`.
+  """
   fn start(settings: Config.Database) -> Pool<Connection> ! StopReason
     db_config = connection_config(settings)
     try migrate(db_config)
@@ -27,19 +35,49 @@ struct Database
         Connection.connect(db_config).map_err(e -> e.message())
       end
 
-    # The pool drops any connection that comes back closed or stuck in
-    # a transaction and refills the slot, so a database restart heals
+    # The pool closes and replaces any connection that comes back
+    # closed or stuck in a transaction, so a database restart heals
     # instead of leaving broken sockets on the shelf.
-    pool = Pool.start(
-      PoolConfig{
-        create: create,
-        size: POOL_SIZE,
-        valid: Option.Some(fn (conn: Connection) -> Bool conn.idle?() end),
-      },
-    )
+    pool_config = PoolConfig{
+      create: create,
+      destroy: Option.Some(fn (conn: Connection) -> () _ = conn.close() end),
+      size: Database.POOL_SIZE,
+      valid: Option.Some(fn (conn: Connection) -> Bool conn.idle?() end),
+    }
 
-    try probe(pool)
-    pool
+    match Pool.start(pool_config)
+      Result.Ok(pool) ->
+        pool
+
+      Result.Err(Pooler.Error.InvalidConfig(detail)) ->
+        Log.error("Database pool config is invalid. #{detail}")
+        fail StopReason.Shutdown
+
+      Result.Err(_) ->
+        fail StopReason.Shutdown
+    end
+  end
+
+  @doc """
+  Check a connection out of the pool, run `work`, and always check
+  the connection back in. The pool inspects the returned value and
+  replaces it when the connection is no longer idle, so callers never
+  need to discard. Checkout failure surfaces as `Unavailable`, which
+  renders 503.
+
+  The whole phase, checkout wait included, runs inside a `db.query`
+  span under the calling process's context, and an `Err` outcome marks
+  the span as failed. Outside a sampled trace the span records nothing.
+  """
+  fn with_connection<T>(
+    pool: Pool<Connection>,
+    work: fn (Connection) -> (Connection, Result<T, Error>),
+  ) -> T ! Error
+
+    try Trace.span("db.query", fn (span: Trace.Span)
+        span.attribute("db.system", "postgresql")
+        Error.mark_span(span, run(pool, work))
+      end)
   end
 
   priv fn connection_config(settings: Config.Database) -> DbConfig
@@ -72,23 +110,17 @@ struct Database
     end
   end
 
-  # The pool builds its connections eagerly but reports factory
-  # failure as PoolDown on first use. Probe once so a bad database
-  # config fails at startup instead of on the first request.
-  priv fn probe(pool: Pool<Connection>) ! StopReason
-    match pool.checkout(STARTUP_PROBE_MS)
-      Result.Ok(conn) ->
-        pool.checkin(conn)
+  priv fn run<T>(
+    pool: Pool<Connection>,
+    work: fn (Connection) -> (Connection, Result<T, Error>),
+  ) -> T ! Error
 
-      Result.Err(Pooler.Error.Timeout) ->
-        Log.error(
-          "Database connections are still warming up. Try again shortly.",
-        )
-        fail StopReason.Shutdown
+    lease = pool.checkout(Database.CHECKOUT_MS)
+      rescue _ -> fail Error.Unavailable("no database connection available")
 
-      Result.Err(_) ->
-        Log.error("Database connection failed. Is the compose stack up?")
-        fail StopReason.Shutdown
-    end
+    (db, outcome) = work(lease.resource)
+    lease.resource = db
+    pool.checkin(lease)
+    try outcome
   end
 end

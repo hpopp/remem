@@ -1,0 +1,121 @@
+alias HTTP.Method
+alias HTTP.Status
+alias Pooler.Pool
+alias Postgres.Connection
+alias Trail.Conn
+alias Trail.Rejection
+alias Trail.Router
+
+@doc """
+The routes of the REST API and the MCP endpoint.
+"""
+struct Routes
+  @doc """
+  Build the route table. Controllers capture their dependencies when
+  the router is built, so the routes themselves are plain
+  `fn (Conn) -> Conn` closures.
+
+  The bearer-auth middleware covers every route except `GET /health`
+  when `API_KEY` is set. It halts before any database connection
+  leaves the pool, and so do the 400, 404, and 405 answers the router
+  renders through `on_reject`.
+  """
+  fn build(pool: Pool<Connection>, embedder: Embedder, api_key: Option<String>)
+    -> Router
+
+    entities = EntityController{embedder: embedder, pool: pool}
+    events = EventController{embedder: embedder, pool: pool}
+    relations = RelationController{pool: pool}
+    search = SearchController{embedder: embedder, pool: pool}
+    meta = MetaController{embedder: embedder, pool: pool}
+
+    auth =
+      fn (c: Conn) -> Conn
+        exempt = c.method == Method.Get and c.path == "/health"
+
+        if exempt or authorized?(c, api_key)
+          c
+        else
+          Render.failure(
+            c,
+            Status.new(401, "Unauthorized"),
+            "missing or invalid API key",
+          ).halt()
+        end
+      end
+
+    Router{}
+      .use(auth)
+      .on_reject(&reject/2)
+      .get("/health", c -> meta.health(c))
+      .get("/graph", c -> meta.graph(c))
+      .get("/entities", c -> entities.list(c))
+      .post("/entities", c -> entities.create(c))
+      .get("/entities/:name", c -> entities.show(c))
+      .patch("/entities/:name", c -> entities.rename(c))
+      .delete("/entities/:name", c -> entities.delete(c))
+      .post("/entities/:name/merge", c -> entities.merge(c))
+      .post("/entities/:name/observations", c -> entities.add_observations(c))
+      .delete(
+        "/entities/:name/observations",
+        c -> entities.remove_observations(c),
+      )
+      .get("/entities/:name/events", c -> events.list(c))
+      .post("/entities/:name/events", c -> events.create(c))
+      .delete("/events/:id", c -> events.delete(c))
+      .post("/relations", c -> relations.create(c))
+      .delete("/relations", c -> relations.delete(c))
+      .get("/search", c -> search.search(c))
+      .get("/mcp", c -> meta.mcp_stream_rejected(c))
+      .post("/mcp", c -> meta.mcp(c))
+  end
+end
+
+# Renders the answers the router gives without a handler in the
+# service error shape.
+priv fn reject(c: Conn, rejection: Rejection) -> Conn
+  message =
+    match rejection
+      Rejection.BadRequest(_) ->
+        "malformed encoding in path or query"
+
+      Rejection.MethodNotAllowed(_) ->
+        "#{c.method.to_string()} is not supported"
+
+      Rejection.NotFound ->
+        "no such route"
+    end
+
+  Render.failure(c, rejection.status(), message)
+end
+
+priv fn authorized?(c: Conn, api_key: Option<String>) -> Bool
+  match api_key
+    Option.None ->
+      true
+
+    Option.Some(key) ->
+      match c.get_header("Authorization")
+        Option.Some(header) -> secure_equal?(header, "Bearer " <> key)
+        Option.None -> false
+      end
+  end
+end
+
+# Compares the full strings even after a mismatch, so timing does
+# not reveal how much of the key matched. Length still short-circuits.
+priv fn secure_equal?(a: String, b: String) -> Bool
+  if a.length() != b.length()
+    return false
+  end
+
+  mismatches = 0
+
+  for i in Range{start: 0, stop: a.length() - 1}
+    if a.get(i) != b.get(i)
+      mismatches = mismatches + 1
+    end
+  end
+
+  mismatches == 0
+end

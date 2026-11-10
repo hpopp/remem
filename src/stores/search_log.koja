@@ -11,7 +11,7 @@ prune candidates). Rows are never updated, so there is no
 """
 struct SearchLog
   @doc """
-  Records one search query.
+  Record one search query.
   """
   fn record(conn: Connection, query: String) -> (Connection, Result<(), Error>)
     (conn, outcome) = conn.execute(
@@ -19,12 +19,12 @@ struct SearchLog
       [Value.string(query)],
     )
 
-    (conn, done(outcome))
+    (conn, Database.Query.done(outcome))
   end
 
   @doc """
-  Deletes up to `limit` rows older than `days`, returning how many
-  went. The `Cleaner` calls this on its sweep timer.
+  Delete up to `limit` rows older than `days`. Return the number of
+  deleted rows. The `Cleaner` calls this on its sweep timer.
   """
   fn prune(conn: Connection, days: Int, limit: Int)
     -> (Connection, Result<Int, Error>)
@@ -38,6 +38,6 @@ struct SearchLog
       )
       """, [Value.int(days), Value.int(limit)])
 
-    (conn, affected_rows(outcome))
+    (conn, Database.Query.affected_rows(outcome))
   end
 end

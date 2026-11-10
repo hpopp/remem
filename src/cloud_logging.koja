@@ -3,28 +3,6 @@ alias Log.Attribute as LogAttribute
 alias Log.Level
 alias Log.Record
 
-# The `@type` that makes Error Reporting collect a log entry.
-priv const REPORTED_ERROR: String = "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
-
-# The attributes that fold into the `httpRequest` field. The names
-# follow the OpenTelemetry HTTP semantic conventions, except that the
-# duration is an `Int` of microseconds rather than a float of seconds.
-priv const HTTP_DURATION: String = "http.server.request.duration"
-priv const HTTP_METHOD: String = "http.request.method"
-priv const HTTP_STATUS: String = "http.response.status_code"
-priv const URL_PATH: String = "url.path"
-
-# The structured fields Cloud Logging reads trace correlation from.
-priv const TRACE_FIELD: String = "logging.googleapis.com/trace"
-priv const SPAN_FIELD: String = "logging.googleapis.com/spanId"
-priv const SAMPLED_FIELD: String = "logging.googleapis.com/trace_sampled"
-
-# A 16 byte trace id of zeros as hex, the context of a process nobody
-# traced.
-priv const ZERO_TRACE: String = "00000000000000000000000000000000"
-
-priv const MICROSECONDS_PER_SECOND: Int = 1_000_000
-
 @doc """
 The production log format for Google Cloud Logging. Each record is
 one JSON object that the GKE logging agent reads as a structured
@@ -38,8 +16,8 @@ entry.
   trace resource name.
 - Every other attribute lands at the top level and shows up under
   `jsonPayload`.
-- The four HTTP attributes named in this file fold into the
-  `httpRequest` field, so Logs Explorer renders access lines as
+- The HTTP method, path, status, and duration attributes fold into
+  the `httpRequest` field, so Logs Explorer renders access lines as
   requests with a method, a URL, a status, and a latency.
 - `Error` records carry the Error Reporting `@type` and a
   `serviceContext` built from `service_name` and `service_version`,
@@ -50,8 +28,26 @@ struct CloudLogging: Log.Formatter<String>
   service_name: String
   service_version: String
 
+  # The `@type` that makes Error Reporting collect a log entry.
+  priv const REPORTED_ERROR: String = "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
+  # The attributes that fold into the `httpRequest` field. The names
+  # follow the OpenTelemetry HTTP semantic conventions, except that the
+  # duration is an `Int` of microseconds rather than a float of seconds.
+  priv const HTTP_DURATION: String = "http.server.request.duration"
+  priv const HTTP_METHOD: String = "http.request.method"
+  priv const HTTP_STATUS: String = "http.response.status_code"
+  priv const URL_PATH: String = "url.path"
+  # The structured fields Cloud Logging reads trace correlation from.
+  priv const TRACE_FIELD: String = "logging.googleapis.com/trace"
+  priv const SPAN_FIELD: String = "logging.googleapis.com/spanId"
+  priv const SAMPLED_FIELD: String = "logging.googleapis.com/trace_sampled"
+  # A 16 byte trace id of zeros as hex, the context of a process nobody
+  # traced.
+  priv const ZERO_TRACE: String = "00000000000000000000000000000000"
+  priv const MICROSECONDS_PER_SECOND: Int = 1_000_000
+
   @doc """
-  Renders one record as a single line of JSON.
+  Render one record as a single line of JSON.
   """
   fn format_log(self, record: Record) -> String
     fields: List<(String, Value)> = [
@@ -84,14 +80,19 @@ struct CloudLogging: Log.Formatter<String>
   priv fn trace_fields(self, record: Record) -> List<(String, Value)>
     trace_id = Base.encode16(record.context.trace_id())
 
-    if trace_id == ZERO_TRACE
+    if trace_id == CloudLogging.ZERO_TRACE
       return []
     end
 
     [
-      (TRACE_FIELD, "projects/#{self.project_id}/traces/#{trace_id}".to_json()),
-      (SPAN_FIELD, Base.encode16(record.context.span_id()).to_json()),
-      (SAMPLED_FIELD, record.context.sampled?().to_json())
+      (
+        CloudLogging.TRACE_FIELD,
+        "projects/#{self.project_id}/traces/#{trace_id}".to_json()
+      ),
+      (
+        CloudLogging.SPAN_FIELD,
+        Base.encode16(record.context.span_id()).to_json()
+      ), (CloudLogging.SAMPLED_FIELD, record.context.sampled?().to_json())
     ]
   end
 
@@ -101,7 +102,10 @@ struct CloudLogging: Log.Formatter<String>
       "version": self.service_version.to_json()
     ]
 
-    [("@type", REPORTED_ERROR.to_json()), ("serviceContext", context)]
+    [
+      ("@type", CloudLogging.REPORTED_ERROR.to_json()),
+      ("serviceContext", context)
+    ]
   end
 end
 
@@ -142,37 +146,37 @@ priv fn split_http(attributes: Map<String, LogAttribute>)
   request: List<(String, Value)> = List.new()
   rest = attributes
 
-  match attributes.get(HTTP_METHOD)
+  match attributes.get(CloudLogging.HTTP_METHOD)
     Option.Some(method) ->
       request = request.append(("requestMethod", attribute_json(method)))
-      rest = rest.remove(HTTP_METHOD)
+      rest = rest.remove(CloudLogging.HTTP_METHOD)
 
     Option.None ->
       ()
   end
 
-  match attributes.get(URL_PATH)
+  match attributes.get(CloudLogging.URL_PATH)
     Option.Some(path) ->
       request = request.append(("requestUrl", attribute_json(path)))
-      rest = rest.remove(URL_PATH)
+      rest = rest.remove(CloudLogging.URL_PATH)
 
     Option.None ->
       ()
   end
 
-  match attributes.get(HTTP_STATUS)
+  match attributes.get(CloudLogging.HTTP_STATUS)
     Option.Some(status) ->
       request = request.append(("status", attribute_json(status)))
-      rest = rest.remove(HTTP_STATUS)
+      rest = rest.remove(CloudLogging.HTTP_STATUS)
 
     Option.None ->
       ()
   end
 
-  match attributes.get(HTTP_DURATION)
+  match attributes.get(CloudLogging.HTTP_DURATION)
     Option.Some(duration) ->
       request = request.append(("latency", latency(duration)))
-      rest = rest.remove(HTTP_DURATION)
+      rest = rest.remove(CloudLogging.HTTP_DURATION)
 
     Option.None ->
       ()
@@ -189,8 +193,8 @@ end
 priv fn latency(duration: LogAttribute) -> Value
   match duration.value
     micros: Int ->
-      seconds = micros / MICROSECONDS_PER_SECOND
-      fraction = pad_six(micros % MICROSECONDS_PER_SECOND)
+      seconds = micros / CloudLogging.MICROSECONDS_PER_SECOND
+      fraction = pad_six(micros % CloudLogging.MICROSECONDS_PER_SECOND)
       "#{seconds}.#{fraction}s".to_json()
 
     _ ->

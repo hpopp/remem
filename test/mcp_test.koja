@@ -1,7 +1,7 @@
 alias Postgres.Config as DbConfig
 alias Postgres.Connection
 
-struct McpTest
+struct MCPTest
   test "tool catalog lists every tool with a schema"
     encoded = JSON.encode(ToolCatalog.tools())
 
@@ -68,7 +68,7 @@ struct McpTest
     # The embedder is never reached, since no observations are sent.
     embedder = Embedder{url: "http://127.0.0.1:1"}
 
-    (response, conn) = Mcp.handle(
+    (response, conn) = MCP.handle(
       create_call(1, "itest-mcp-guard", false),
       conn,
       embedder,
@@ -76,7 +76,7 @@ struct McpTest
 
     assert response.body.contains?("\"isError\":false"), "first create should succeed: #{response.body}"
 
-    (response, conn) = Mcp.handle(
+    (response, conn) = MCP.handle(
       create_call(2, "Itest MCP Guard", false),
       conn,
       embedder,
@@ -85,7 +85,7 @@ struct McpTest
     assert response.body.contains?("\"isError\":true"), "near-duplicate create should be refused: #{response.body}"
     assert response.body.contains?("similar entities exist"), "refusal should name the similar entities: #{response.body}"
 
-    (response, conn) = Mcp.handle(
+    (response, conn) = MCP.handle(
       create_call(3, "Itest MCP Guard", true),
       conn,
       embedder,

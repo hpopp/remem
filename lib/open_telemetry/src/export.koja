@@ -24,7 +24,7 @@ tracer = Tracer.start(Config{
 """
 struct Export
   @doc """
-  Builds an exporter that POSTs each batch to `<endpoint>/v1/traces`
+  Build an exporter that POSTs each batch to `<endpoint>/v1/traces`
   as JSON. A trailing slash on the endpoint is fine.
   """
   fn http(endpoint: String) -> fn (String) -> Result<(), Export.Error>
@@ -47,7 +47,7 @@ struct Export
   end
 
   @doc """
-  Joins the collector endpoint with the traces path.
+  Join the collector endpoint with the traces path.
   """
   fn traces_url(endpoint: String) -> String
     base = endpoint.ends_with?("/")

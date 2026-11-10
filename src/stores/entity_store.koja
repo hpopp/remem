@@ -1,4 +1,4 @@
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 alias Postgres.Connection
 alias Postgres.QueryResult
 alias Postgres.Value
@@ -11,6 +11,9 @@ struct Observation: JSON.Encoding
   created_at: DateTime
   updated_at: DateTime
 
+  @doc """
+  Encode the observation as JSON.
+  """
   fn to_json(self) -> JSON.Value
     [
       "content": self.content.to_json(),
@@ -33,6 +36,9 @@ struct Entity: JSON.Encoding
   observations: List<Observation>
   updated_at: DateTime
 
+  @doc """
+  Encode the entity as JSON.
+  """
   fn to_json(self) -> JSON.Value
     [
       "name": self.name.to_json(), "type": self.kind.to_json(),
@@ -54,6 +60,9 @@ struct EntitySummary: JSON.Encoding
   observation_count: Int
   updated_at: DateTime
 
+  @doc """
+  Encode the entity summary as JSON.
+  """
   fn to_json(self) -> JSON.Value
     [
       "name": self.name.to_json(), "type": self.kind.to_json(),
@@ -83,6 +92,9 @@ struct ObservationHit: JSON.Encoding
   content: String
   score: Float
 
+  @doc """
+  Encode the observation hit as JSON.
+  """
   fn to_json(self) -> JSON.Value
     ["content": self.content.to_json(), "score": self.score.to_json()]
   end
@@ -99,6 +111,9 @@ struct SearchResult: JSON.Encoding
   observations: List<ObservationHit>
   score: Float
 
+  @doc """
+  Encode the search result as JSON.
+  """
   fn to_json(self) -> JSON.Value
     [
       "name": self.name.to_json(), "type": self.kind.to_json(),
@@ -107,19 +122,6 @@ struct SearchResult: JSON.Encoding
     ]
   end
 end
-
-# RRF constant and per-strategy candidate depth for hybrid search.
-# Observations are finer grained than entity names, so the semantic
-# side looks deeper.
-const RRF_K: Int = 60
-const SEMANTIC_CANDIDATES: Int = 60
-const FUZZY_CANDIDATES: Int = 20
-
-# Matching observations returned per entity.
-const HITS_PER_ENTITY: Int = 5
-
-# Names the near-duplicate guard reports.
-const SIMILAR_LIMIT: Int = 5
 
 @doc """
 Data-access layer over the `entities` and `observations` tables.
@@ -136,7 +138,35 @@ observation rows and bind as pgvector text literals through
 """
 struct EntityStore
   @doc """
-  Inserts a new entity with its observations and returns it with the
+  The Reciprocal Rank Fusion constant `k` for hybrid search.
+  """
+  const RRF_K: Int = 60
+
+  @doc """
+  The number of observations the semantic side of hybrid search
+  ranks. Observations are finer grained than entity names, so this
+  side looks deeper than the fuzzy side.
+  """
+  const SEMANTIC_CANDIDATES: Int = 60
+
+  @doc """
+  The number of entity names the fuzzy side of hybrid search ranks.
+  """
+  const FUZZY_CANDIDATES: Int = 20
+
+  @doc """
+  The largest number of matching observations a search returns for
+  each entity.
+  """
+  const HITS_PER_ENTITY: Int = 5
+
+  @doc """
+  The largest number of names the near-duplicate guard reports.
+  """
+  const SIMILAR_LIMIT: Int = 5
+
+  @doc """
+  Insert a new entity with its observations and return it with the
   inserted `(id, content)` rows, which the caller embeds. Unless
   `confirm` is set, a name close to an existing one fails with
   `Duplicate` naming the matches.
@@ -185,7 +215,7 @@ struct EntityStore
   end
 
   @doc """
-  Looks up a single entity by name.
+  Find one entity by name.
   """
   fn find(conn: Connection, name: String)
     -> (Connection, Result<Option<Entity>, Error>)
@@ -199,7 +229,7 @@ struct EntityStore
   end
 
   @doc """
-  Returns one page of entity summaries, most observations first.
+  Return one page of entity summaries, most observations first.
   `limit` and `offset` are validated by the router, so they
   interpolate as plain integers.
   """
@@ -220,7 +250,7 @@ struct EntityStore
   end
 
   @doc """
-  Returns every entity, oldest first, for `GET /graph`.
+  Return every entity, oldest first, for `GET /graph`.
   """
   fn all(conn: Connection) -> (Connection, Result<List<Entity>, Error>)
     (conn, outcome) = conn.query("#{select_sql()} GROUP BY e.id ORDER BY e.id")
@@ -228,7 +258,7 @@ struct EntityStore
   end
 
   @doc """
-  Deletes an entity by name, returning `true` when a row was removed.
+  Delete an entity by name. Return `true` when a row was removed.
   Observations, events, and relations cascade in the database.
   """
   fn remove(conn: Connection, name: String) -> (Connection, Result<Bool, Error>)
@@ -237,14 +267,14 @@ struct EntityStore
       [Value.string(name)],
     )
 
-    (conn, changed(outcome))
+    (conn, Database.Query.changed(outcome))
   end
 
   @doc """
-  Renames an entity and touches its `updated_at`. Relations and
+  Rename an entity and touch its `updated_at`. Relations and
   events reference ids, so they follow. Observation and event
   embeddings carry the old name in their text, so they clear and the
-  backfill recomputes them. Returns the entity, or `None` for an
+  backfill recomputes them. Return the entity, or `None` for an
   unknown name. A taken name fails with `Duplicate`.
   """
   fn rename(conn: Connection, name: String, new_name: String)
@@ -286,14 +316,14 @@ struct EntityStore
   end
 
   @doc """
-  Folds `source` into `into` and deletes `source`, in one transaction.
+  Fold `source` into `into` and delete `source`, in one transaction.
   Events move as they are. Observations move with their timestamps,
   except ones `into` already holds word for word. Relations rewire to
   `into`, except ones that would become self-loops or duplicate an
   existing relation. Moved events and observations clear their
-  embeddings, since the text carries the entity name. Fails with
+  embeddings, since the text carries the entity name. Fail with
   `Validation` when the names match and `NotFound` when either is
-  unknown. Returns the target entity.
+  unknown. Return the target entity.
   """
   fn merge(conn: Connection, source: String, into: String)
     -> (Connection, Result<Entity, Error>)
@@ -347,9 +377,9 @@ struct EntityStore
   end
 
   @doc """
-  Appends observations an entity does not already hold (the unique
-  `(entity_id, content)` constraint deduplicates) and touches the
-  entity's `updated_at`. Returns the updated entity with the inserted
+  Append observations an entity does not already hold (the unique
+  `(entity_id, content)` constraint deduplicates) and touch the
+  entity's `updated_at`. Return the updated entity with the inserted
   `(id, content)` rows, or `None` for an unknown name.
   """
   fn add_observations(
@@ -390,8 +420,8 @@ struct EntityStore
   end
 
   @doc """
-  Removes every observation matching one of the given strings and
-  touches the entity's `updated_at`. Returns the updated entity, or
+  Remove every observation matching one of the given strings and
+  touch the entity's `updated_at`. Return the updated entity, or
   `None` for an unknown name.
   """
   fn remove_observations(
@@ -431,9 +461,9 @@ struct EntityStore
   end
 
   @doc """
-  Stores freshly computed embeddings on observation rows by id, in one
+  Store freshly computed embeddings on observation rows by id, in one
   statement. `ids` and `vectors` pair up by position. Rows deleted
-  mid-flight are skipped. Returns how many rows updated.
+  mid-flight are skipped. Return the number of updated rows.
   """
   fn set_observation_embeddings(
     conn: Connection,
@@ -441,12 +471,12 @@ struct EntityStore
     vectors: List<String>,
   ) -> (Connection, Result<Int, Error>)
 
-    pairs: List<Json> = List.new()
+    pairs: List<JSONValue> = List.new()
 
     for i in Range{start: 0, stop: ids.length() - 1}
       id = ids.get(i).or(0)
       vector = vectors.get(i).or("")
-      pair: Json = ["id": id.to_json(), "embedding": vector.to_json()]
+      pair: JSONValue = ["id": id.to_json(), "embedding": vector.to_json()]
       pairs = pairs.append(pair)
     end
 
@@ -455,13 +485,13 @@ struct EntityStore
       SET embedding = v.embedding::vector
       FROM jsonb_to_recordset($1::jsonb) AS v(id bigint, embedding text)
       WHERE o.id = v.id
-      """, [Value.string(JSON.encode(Json.Array(pairs)))])
+      """, [Value.string(JSON.encode(JSONValue.Array(pairs)))])
 
-    (conn, affected_rows(outcome))
+    (conn, Database.Query.affected_rows(outcome))
   end
 
   @doc """
-  Returns up to `limit` observations with no embedding yet, oldest
+  Return up to `limit` observations with no embedding yet, oldest
   first, with their entity's name and type. The backfill drains this.
   """
   fn unembedded(conn: Connection, limit: Int)
@@ -480,8 +510,9 @@ struct EntityStore
   end
 
   @doc """
-  Returns existing names close to `name`: trigram-similar or equal
-  ignoring case, closest first. Feeds the near-duplicate guard.
+  Return existing names close to `name`, closest first. A close name
+  is trigram-similar or equal ignoring case. The near-duplicate guard
+  uses the result.
   """
   fn similar_names(conn: Connection, name: String)
     -> (Connection, Result<List<String>, Error>)
@@ -490,20 +521,20 @@ struct EntityStore
       SELECT name FROM entities
       WHERE name % $1 OR lower(name) = lower($1)
       ORDER BY similarity(name, $1) DESC
-      LIMIT #{SIMILAR_LIMIT}
+      LIMIT #{EntityStore.SIMILAR_LIMIT}
       """, [Value.string(name)])
 
     (conn, names_from(outcome))
   end
 
   @doc """
-  Hybrid search. With a query embedding, observations rank by cosine
-  distance and entity names by trigram similarity. Both lists fuse by
-  Reciprocal Rank Fusion and group by entity, where an entity's score
-  is its best observation plus its name match. Each hit carries up to
-  `HITS_PER_ENTITY` matching observations. Without an embedding
-  (embedder down), trigram ranking runs alone. `limit` counts
-  entities.
+  Run a hybrid search. With a query embedding, observations rank by
+  cosine distance and entity names by trigram similarity. Both lists
+  fuse by Reciprocal Rank Fusion and group by entity, where an
+  entity's score is its best observation plus its name match. Each
+  hit carries up to `EntityStore.HITS_PER_ENTITY` matching
+  observations. Without an embedding (embedder down), trigram ranking
+  runs alone. `limit` counts entities.
   """
   fn search(
     conn: Connection,
@@ -536,10 +567,10 @@ struct EntityStore
       FROM observations o
       WHERE o.embedding IS NOT NULL
       ORDER BY o.embedding <=> $1::vector
-      LIMIT #{SEMANTIC_CANDIDATES}
+      LIMIT #{EntityStore.SEMANTIC_CANDIDATES}
     ), hits AS (
       SELECT entity_id, content,
-        (1.0 / (#{RRF_K} + rank))::float8 AS score,
+        (1.0 / (#{EntityStore.RRF_K} + rank))::float8 AS score,
         ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY rank) AS entity_rank
       FROM semantic
     ), scored AS (
@@ -551,11 +582,11 @@ struct EntityStore
       FROM entities
       WHERE name % $2
       ORDER BY similarity(name, $2) DESC
-      LIMIT #{FUZZY_CANDIDATES}
+      LIMIT #{EntityStore.FUZZY_CANDIDATES}
     ), ranked AS (
       SELECT id,
         (COALESCE(s.score, 0) +
-         COALESCE(1.0 / (#{RRF_K} + f.rank), 0))::float8 AS score
+         COALESCE(1.0 / (#{EntityStore.RRF_K} + f.rank), 0))::float8 AS score
       FROM scored s
       FULL OUTER JOIN fuzzy f USING (id)
     )
@@ -566,7 +597,7 @@ struct EntityStore
           ORDER BY h.score DESC
         )
         FROM hits h
-        WHERE h.entity_id = e.id AND h.entity_rank <= #{HITS_PER_ENTITY}
+        WHERE h.entity_id = e.id AND h.entity_rank <= #{EntityStore.HITS_PER_ENTITY}
       ), '[]')::text,
       r.score
     FROM ranked r
@@ -702,9 +733,9 @@ struct EntityStore
   end
 
   @doc """
-  Bumps an entity's `updated_at`, returning its id or `None` for an
-  unknown name. Doubles as the existence check for mutations, here
-  and in `EventStore`.
+  Touch an entity's `updated_at`. Return its id, or `None` for an
+  unknown name. Mutations here and in `EventStore` also use this
+  function as the existence check.
   """
   fn touch(conn: Connection, name: String)
     -> (Connection, Result<Option<Int>, Error>)
@@ -715,6 +746,17 @@ struct EntityStore
     )
 
     (conn, first_id(outcome))
+  end
+
+  @doc """
+  Unwrap a store outcome where `None` means the named entity is
+  unknown. Fail with `NotFound` in that case.
+  """
+  fn required<T>(outcome: Result<Option<T>, Error>, name: String) -> T ! Error
+    match try outcome
+      Option.Some(value) -> value
+      Option.None -> fail Error.NotFound("no entity named #{name}")
+    end
   end
 
   # Resolves a name to its id, or `NotFound` for an unknown name.
@@ -742,7 +784,7 @@ struct EntityStore
     -> (Connection, Result<(), Error>)
 
     (conn, outcome) = conn.execute(sql, params)
-    (conn, done(outcome))
+    (conn, Database.Query.done(outcome))
   end
 
   # The id an INSERT ... RETURNING id produced. A unique violation
@@ -755,7 +797,7 @@ struct EntityStore
     qr = outcome rescue e -> fail Error.from_postgres(e, duplicate)
 
     match qr.rows.get(0)
-      Option.Some(row) -> int_at(row, 0)
+      Option.Some(row) -> Database.Row.int_at(row, 0)
       Option.None -> fail Error.Database("insert returned no row")
     end
   end
@@ -768,15 +810,15 @@ struct EntityStore
   ) -> Option<Int> ! Error
 
     qr = outcome rescue e -> fail Error.from_postgres(e, duplicate)
-    qr.rows.get(0).map(row -> int_at(row, 0))
+    qr.rows.get(0).map(row -> Database.Row.int_at(row, 0))
   end
 
   # The id in the first row, or `None` when there is no row.
   priv fn first_id(outcome: Result<QueryResult, Postgres.Error>)
     -> Option<Int> ! Error
 
-    qr = try db_result(outcome)
-    qr.rows.get(0).map(row -> int_at(row, 0))
+    qr = try Database.Query.result(outcome)
+    qr.rows.get(0).map(row -> Database.Row.int_at(row, 0))
   end
 
   # The id in the first row, or `NotFound` when there is no row.
@@ -785,10 +827,10 @@ struct EntityStore
     name: String,
   ) -> Int ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
 
     match qr.rows.get(0)
-      Option.Some(row) -> int_at(row, 0)
+      Option.Some(row) -> Database.Row.int_at(row, 0)
       Option.None -> fail Error.NotFound("no entity named #{name}")
     end
   end
@@ -806,39 +848,41 @@ struct EntityStore
   priv fn inserted_rows(outcome: Result<QueryResult, Postgres.Error>)
     -> List<(Int, String)> ! Error
 
-    qr = try db_result(outcome)
-    qr.rows.map(row -> (int_at(row, 0), text_at(row, 1)))
+    qr = try Database.Query.result(outcome)
+    qr.rows.map(row -> (
+      Database.Row.int_at(row, 0), Database.Row.text_at(row, 1)
+    ))
   end
 
   priv fn names_from(outcome: Result<QueryResult, Postgres.Error>)
     -> List<String> ! Error
 
-    qr = try db_result(outcome)
-    qr.rows.map(row -> text_at(row, 0))
+    qr = try Database.Query.result(outcome)
+    qr.rows.map(row -> Database.Row.text_at(row, 0))
   end
 
   priv fn pending_from(outcome: Result<QueryResult, Postgres.Error>)
     -> List<PendingObservation> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
 
     qr.rows.map(row -> PendingObservation{
-      content: text_at(row, 3),
-      id: int_at(row, 0),
-      kind: text_at(row, 2),
-      name: text_at(row, 1),
+      content: Database.Row.text_at(row, 3),
+      id: Database.Row.int_at(row, 0),
+      kind: Database.Row.text_at(row, 2),
+      name: Database.Row.text_at(row, 1),
     })
   end
 
   priv fn results_from(outcome: Result<QueryResult, Postgres.Error>)
     -> List<SearchResult> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
 
     qr.rows.map(row -> SearchResult{
-      kind: text_at(row, 1),
-      name: text_at(row, 0),
-      observations: JsonUtil.decode_hits(text_at(row, 2)),
+      kind: Database.Row.text_at(row, 1),
+      name: Database.Row.text_at(row, 0),
+      observations: JsonUtil.decode_hits(Database.Row.text_at(row, 2)),
       score: row.get(3).map(v -> v.float_or(0.0)).or(0.0),
     })
   end
@@ -846,7 +890,7 @@ struct EntityStore
   priv fn first_entity(outcome: Result<QueryResult, Postgres.Error>)
     -> Option<Entity> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
 
     match qr.rows.get(0)
       Option.None -> Option.None
@@ -859,7 +903,7 @@ struct EntityStore
   priv fn entities_from(outcome: Result<QueryResult, Postgres.Error>)
     -> List<Entity> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
     entities: List<Entity> = List.new()
 
     for row in qr.rows
@@ -872,7 +916,7 @@ struct EntityStore
   priv fn summaries_from(outcome: Result<QueryResult, Postgres.Error>)
     -> List<EntitySummary> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
     summaries: List<EntitySummary> = List.new()
 
     for row in qr.rows
@@ -884,22 +928,24 @@ struct EntityStore
 
   priv fn row_to_entity(row: List<Value>) -> Entity ! Error
     Entity{
-      created_at: try db_time(text_at(row, 4)),
-      id: int_at(row, 0),
-      kind: text_at(row, 2),
-      name: text_at(row, 1),
-      observations: try JsonUtil.decode_observations(text_at(row, 3)),
-      updated_at: try db_time(text_at(row, 5)),
+      created_at: try Database.Row.time(Database.Row.text_at(row, 4)),
+      id: Database.Row.int_at(row, 0),
+      kind: Database.Row.text_at(row, 2),
+      name: Database.Row.text_at(row, 1),
+      observations: try JsonUtil.decode_observations(
+        Database.Row.text_at(row, 3),
+      ),
+      updated_at: try Database.Row.time(Database.Row.text_at(row, 5)),
     }
   end
 
   priv fn row_to_summary(row: List<Value>) -> EntitySummary ! Error
     EntitySummary{
-      created_at: try db_time(text_at(row, 3)),
-      kind: text_at(row, 1),
-      name: text_at(row, 0),
-      observation_count: int_at(row, 2),
-      updated_at: try db_time(text_at(row, 4)),
+      created_at: try Database.Row.time(Database.Row.text_at(row, 3)),
+      kind: Database.Row.text_at(row, 1),
+      name: Database.Row.text_at(row, 0),
+      observation_count: Database.Row.int_at(row, 2),
+      updated_at: try Database.Row.time(Database.Row.text_at(row, 4)),
     }
   end
 

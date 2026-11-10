@@ -77,7 +77,7 @@ struct Exporter
   ref: Option<Ref<Msg, Reply>>
 
   @doc """
-  True when finished spans reach a collector.
+  Report whether finished spans reach a collector.
   """
   fn enabled?(self) -> Bool
     match self.ref
@@ -87,7 +87,7 @@ struct Exporter
   end
 
   @doc """
-  Drains and exports the queued spans now and waits for the export to
+  Drain and export the queued spans now, and wait for the export to
   finish. A no-op exporter has nothing to flush and returns at once.
   """
   fn flush(self, timeout_ms: Int = 5000) ! Exporter.Error
@@ -105,15 +105,15 @@ struct Exporter
   end
 
   @doc """
-  An exporter that ships nothing.
+  Build an exporter that ships nothing.
   """
   fn noop -> Exporter
     Exporter{ref: Option.None}
   end
 
   @doc """
-  Spawns an exporter process for `config`, or returns a no-op when
-  `config` names neither an exporter nor an endpoint.
+  Spawn an exporter process for `config`. If `config` names neither an
+  exporter nor an endpoint, return a no-op exporter.
   """
   fn start(config: Config) -> Exporter
     exporter =
@@ -138,7 +138,7 @@ struct Exporter
   end
 
   @doc """
-  Terminates the exporter process. Spans still queued in the runtime
+  Stop the exporter process. Spans still queued in the runtime
   are not exported, so call `flush` first when they matter.
   """
   fn stop(self)

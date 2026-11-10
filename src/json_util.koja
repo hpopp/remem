@@ -1,4 +1,4 @@
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 
 @doc """
 Helpers for reading `JSON.Value` trees: request-body parsing for the
@@ -6,7 +6,7 @@ router and decoding of JSON-shaped columns from the stores.
 """
 struct JsonUtil
   @doc """
-  Parses a `POST /entities` body: `name` and `type` are required
+  Parse a `POST /entities` body. `name` and `type` are required
   non-empty strings, `observations` an optional array of strings.
   """
   fn parse_entity(body: String) -> (String, String, List<String>) ! Error
@@ -27,7 +27,7 @@ struct JsonUtil
   end
 
   @doc """
-  Parses an observations body: `observations` is a required,
+  Parse an observations body. `observations` is a required,
   non-empty array of strings.
   """
   fn parse_observations(body: String) -> List<String> ! Error
@@ -50,7 +50,7 @@ struct JsonUtil
   end
 
   @doc """
-  Parses an event body. `content` is a required non-empty string and
+  Parse an event body. `content` is a required non-empty string and
   `occurred_at` an optional RFC 3339 timestamp.
   """
   fn parse_event(body: String) -> (String, Option<DateTime>) ! Error
@@ -61,16 +61,17 @@ struct JsonUtil
   end
 
   @doc """
-  Reads an optional `occurred_at` field as a `DateTime`. Absent reads
-  as `None`. Present but not RFC 3339 fails with `Validation`. Shared
-  by the REST body parser and the MCP tool.
+  Read an optional `occurred_at` field as a `DateTime`. An absent
+  field reads as `None`. A field that is not RFC 3339 fails with
+  `Validation`. The REST body parser and the MCP tool share this
+  function.
   """
-  fn occurred_at(root: Json) -> Option<DateTime> ! Error
+  fn occurred_at(root: JSONValue) -> Option<DateTime> ! Error
     match field(root, "occurred_at")
       Option.None ->
         Option.None
 
-      Option.Some(Json.String(text)) ->
+      Option.Some(JSONValue.String(text)) ->
         parsed = DateTime.parse(text)
           rescue _ -> fail Error.Validation("occurred_at must be RFC 3339, got '#{text}'")
         Option.Some(parsed.to_utc())
@@ -81,7 +82,7 @@ struct JsonUtil
   end
 
   @doc """
-  Parses a relation body: `from`, `to`, and `type` are required
+  Parse a relation body. `from`, `to`, and `type` are required
   non-empty strings.
   """
   fn parse_relation(body: String) -> (String, String, String) ! Error
@@ -93,15 +94,15 @@ struct JsonUtil
   end
 
   @doc """
-  Encodes a list of strings as JSON array text, for binding as a
+  Encode a list of strings as JSON array text, for binding as a
   `$n::jsonb` parameter.
   """
   fn encode_string_list(items: List<String>) -> String
-    JSON.encode(Json.Array(items.map(item -> item.to_json())))
+    JSON.encode(JSONValue.Array(items.map(item -> item.to_json())))
   end
 
   @doc """
-  Decodes the `json_agg` observation column from a store query into
+  Decode the `json_agg` observation column from a store query into
   observation values. The column is built by the store's own SQL, so
   malformed text, a non-array root, or an unreadable timestamp is a
   bug and fails with `Error.Database`.
@@ -112,7 +113,7 @@ struct JsonUtil
 
     items =
       match decoded
-        Json.Array(list) -> list
+        JSONValue.Array(list) -> list
         _ -> fail Error.Database("observations column is not an array")
       end
 
@@ -122,8 +123,8 @@ struct JsonUtil
       observations = observations.append(
         Observation{
           content: field_string(item, "content"),
-          created_at: try db_time(field_string(item, "created_at")),
-          updated_at: try db_time(field_string(item, "updated_at")),
+          created_at: try Database.Row.time(field_string(item, "created_at")),
+          updated_at: try Database.Row.time(field_string(item, "updated_at")),
         },
       )
     end
@@ -132,7 +133,7 @@ struct JsonUtil
   end
 
   @doc """
-  Decodes the matching-observations column from a search query into
+  Decode the matching-observations column from a search query into
   hits. Malformed text gives an empty list.
   """
   fn decode_hits(text: String) -> List<ObservationHit>
@@ -145,7 +146,7 @@ struct JsonUtil
       end
 
     match decoded
-      Json.Array(items) ->
+      JSONValue.Array(items) ->
         for item in items
           hits = hits.append(
             ObservationHit{
@@ -163,8 +164,8 @@ struct JsonUtil
   end
 
   @doc """
-  Reads a request body's optional `confirm` flag. Absent or non-bool
-  reads as `false`.
+  Read a request body's optional `confirm` flag. An absent or
+  non-bool flag reads as `false`.
   """
   fn parse_confirm(body: String) -> Bool
     match JSON.decode(body)
@@ -174,7 +175,7 @@ struct JsonUtil
   end
 
   @doc """
-  Parses a body with one required non-empty string field.
+  Parse a body with one required non-empty string field.
   """
   fn parse_string_field(body: String, key: String) -> String ! Error
     root = try decode(body)
@@ -182,7 +183,7 @@ struct JsonUtil
   end
 
   @doc """
-  Removes duplicate strings, keeping first occurrences in order.
+  Remove duplicate strings. Keep the first occurrences in order.
   """
   fn distinct(items: List<String>) -> List<String>
     seen: List<String> = List.new()
@@ -197,65 +198,65 @@ struct JsonUtil
   end
 
   @doc """
-  Returns an object field's value, or `None` for a missing key or a
+  Return an object field's value, or `None` for a missing key or a
   non-object root.
   """
-  fn get(root: Json, key: String) -> Option<Json>
+  fn get(root: JSONValue, key: String) -> Option<JSONValue>
     field(root, key)
   end
 
   @doc """
-  Returns an object field's string value, or `None` when the field is
+  Return an object field's string value, or `None` when the field is
   missing or not a string.
   """
-  fn get_string(root: Json, key: String) -> Option<String>
+  fn get_string(root: JSONValue, key: String) -> Option<String>
     match field(root, key)
-      Option.Some(Json.String(text)) -> Option.Some(text)
+      Option.Some(JSONValue.String(text)) -> Option.Some(text)
       _ -> Option.None
     end
   end
 
   @doc """
-  Returns an object field's integer value, or `None` when the field
+  Return an object field's integer value, or `None` when the field
   is missing or not an integer.
   """
-  fn get_int(root: Json, key: String) -> Option<Int>
+  fn get_int(root: JSONValue, key: String) -> Option<Int>
     match field(root, key)
-      Option.Some(Json.Int(number)) -> Option.Some(number)
+      Option.Some(JSONValue.Int(number)) -> Option.Some(number)
       _ -> Option.None
     end
   end
 
   @doc """
-  Returns an object field's boolean value, or `None` when the field
+  Return an object field's boolean value, or `None` when the field
   is missing or not a boolean.
   """
-  fn get_bool(root: Json, key: String) -> Option<Bool>
+  fn get_bool(root: JSONValue, key: String) -> Option<Bool>
     match field(root, key)
-      Option.Some(Json.Bool(flag)) -> Option.Some(flag)
+      Option.Some(JSONValue.Bool(flag)) -> Option.Some(flag)
       _ -> Option.None
     end
   end
 
   @doc """
-  Returns an object field's value as a list of strings, or `None`
+  Return an object field's value as a list of strings, or `None`
   when the field is missing or not an all-string array.
   """
-  fn get_string_list(root: Json, key: String) -> Option<List<String>>
+  fn get_string_list(root: JSONValue, key: String) -> Option<List<String>>
     match field(root, key)
       Option.Some(value) -> string_list(value)
       Option.None -> Option.None
     end
   end
 
-  priv fn decode(body: String) -> Json ! Error
+  priv fn decode(body: String) -> JSONValue ! Error
     JSON.decode(body)
       rescue e -> fail Error.Validation("malformed JSON body: " <> e)
   end
 
-  priv fn field(root: Json, key: String) -> Option<Json>
+  priv fn field(root: JSONValue, key: String) -> Option<JSONValue>
     match root
-      Json.Object(entries) ->
+      JSONValue.Object(entries) ->
         for entry in entries
           (entry_key, entry_value) = entry
 
@@ -271,38 +272,38 @@ struct JsonUtil
     end
   end
 
-  priv fn field_string(root: Json, key: String) -> String
+  priv fn field_string(root: JSONValue, key: String) -> String
     match field(root, key)
-      Option.Some(Json.String(text)) -> text
+      Option.Some(JSONValue.String(text)) -> text
       _ -> ""
     end
   end
 
-  priv fn field_float(root: Json, key: String) -> Float
+  priv fn field_float(root: JSONValue, key: String) -> Float
     match field(root, key)
-      Option.Some(Json.Float(f)) -> f
-      Option.Some(Json.Int(i)) -> "#{i}".to_float() rescue _ -> 0.0
+      Option.Some(JSONValue.Float(f)) -> f
+      Option.Some(JSONValue.Int(i)) -> "#{i}".to_float() rescue _ -> 0.0
       _ -> 0.0
     end
   end
 
-  priv fn required_string(root: Json, key: String) -> String ! Error
+  priv fn required_string(root: JSONValue, key: String) -> String ! Error
     match field(root, key)
-      Option.Some(Json.String(text)) when not text.empty?() -> text
+      Option.Some(JSONValue.String(text)) when not text.empty?() -> text
       Option.Some(_) ->
         fail Error.Validation("#{key} must be a non-empty string")
       Option.None -> fail Error.Validation("#{key} is required")
     end
   end
 
-  priv fn string_list(value: Json) -> Option<List<String>>
+  priv fn string_list(value: JSONValue) -> Option<List<String>>
     match value
-      Json.Array(items) ->
+      JSONValue.Array(items) ->
         strings: List<String> = List.new()
 
         for item in items
           match item
-            Json.String(text) -> strings = strings.append(text)
+            JSONValue.String(text) -> strings = strings.append(text)
             _ -> return Option.None
           end
         end

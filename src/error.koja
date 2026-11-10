@@ -12,7 +12,7 @@ enum Error
   Validation(String)
 
   @doc """
-  Returns a human-readable description of the error.
+  Return a human-readable description of the error.
   """
   fn message(self) -> String
     match self
@@ -26,7 +26,7 @@ enum Error
   end
 
   @doc """
-  Wraps a driver error. A unique violation (SQLSTATE 23505) becomes
+  Wrap a driver error. A unique violation (SQLSTATE 23505) becomes
   `Duplicate` with the given description, everything else `Database`.
   """
   fn from_postgres(e: Postgres.Error, duplicate: String) -> Error
@@ -39,5 +39,20 @@ enum Error
       _ ->
         Error.Database(e.message())
     end
+  end
+
+  @doc """
+  If `outcome` is an `Err`, set the span status to `Error` with the
+  error's message. Return `outcome` unchanged in both cases.
+  """
+  fn mark_span<T>(span: Trace.Span, outcome: Result<T, Error>)
+    -> Result<T, Error>
+
+    match outcome
+      Result.Err(e) -> span.status(Trace.Status.Error(e.message()))
+      Result.Ok(_) -> ()
+    end
+
+    outcome
   end
 end

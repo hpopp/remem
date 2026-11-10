@@ -1,5 +1,5 @@
 alias HTTP.Response
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 alias Postgres.Connection
 
 @doc """
@@ -9,8 +9,15 @@ The tools that read and write entities. `search_memory`,
 arguments, runs the store, and answers with a `ToolResult`.
 """
 struct EntityTools
-  fn search(arguments: Json, id: Json, conn: Connection, embedder: Embedder)
-    -> (Response, Connection)
+  @doc """
+  Search for entities that match a query.
+  """
+  fn search(
+    arguments: JSONValue,
+    id: JSONValue,
+    conn: Connection,
+    embedder: Embedder,
+  ) -> (Response, Connection)
 
     query =
       match JsonUtil.get_string(arguments, "query")
@@ -18,13 +25,13 @@ struct EntityTools
         _ -> return (ToolResult.err(id, "query is required"), conn)
       end
 
-    limit = JsonUtil.get_int(arguments, "limit").or(MCP_DEFAULT_SEARCH_LIMIT)
+    limit = JsonUtil.get_int(arguments, "limit").or(MCP.DEFAULT_SEARCH_LIMIT)
 
-    if limit < 1 or limit > MCP_MAX_SEARCH_LIMIT
+    if limit < 1 or limit > MCP.MAX_SEARCH_LIMIT
       return (
         ToolResult.err(
           id,
-          "limit must be between 1 and #{MCP_MAX_SEARCH_LIMIT}",
+          "limit must be between 1 and #{MCP.MAX_SEARCH_LIMIT}",
         ), conn
       )
     end
@@ -50,7 +57,12 @@ struct EntityTools
     (ToolResult.render(id, search_payload(query, found)), conn)
   end
 
-  fn get(arguments: Json, id: Json, conn: Connection) -> (Response, Connection)
+  @doc """
+  Fetch one entity with its relations and recent events.
+  """
+  fn get(arguments: JSONValue, id: JSONValue, conn: Connection)
+    -> (Response, Connection)
+
     name =
       match JsonUtil.get_string(arguments, "name")
         Option.Some(text) when not text.empty?() -> text
@@ -60,7 +72,7 @@ struct EntityTools
     (conn, found) = EntityStore.find(conn, name)
 
     entity =
-      match required(found, name)
+      match EntityStore.required(found, name)
         Result.Err(e) -> return (ToolResult.err(id, e.message()), conn)
         Result.Ok(present) -> present
       end
@@ -73,12 +85,19 @@ struct EntityTools
         Result.Ok(list) -> list
       end
 
-    (conn, events) = EventStore.recent(conn, name, RECENT_EVENTS)
+    (conn, events) = EventStore.recent(conn, name, EventStore.RECENT_EVENTS)
     (ToolResult.render(id, entity_payload(entity, relation_list, events)), conn)
   end
 
-  fn create(arguments: Json, id: Json, conn: Connection, embedder: Embedder)
-    -> (Response, Connection)
+  @doc """
+  Create an entity.
+  """
+  fn create(
+    arguments: JSONValue,
+    id: JSONValue,
+    conn: Connection,
+    embedder: Embedder,
+  ) -> (Response, Connection)
 
     name =
       match JsonUtil.get_string(arguments, "name")
@@ -112,12 +131,15 @@ struct EntityTools
 
       Result.Ok(pair) ->
         (entity, rows) = pair
-        conn = embed_rows(conn, embedder, entity, rows)
+        conn = Embedding.embed_observations(conn, embedder, entity, rows)
         (ToolResult.ok(id, entity.to_json()), conn)
     end
   end
 
-  fn rename(arguments: Json, id: Json, conn: Connection)
+  @doc """
+  Rename an entity.
+  """
+  fn rename(arguments: JSONValue, id: JSONValue, conn: Connection)
     -> (Response, Connection)
 
     name =
@@ -133,10 +155,13 @@ struct EntityTools
       end
 
     (conn, renamed) = EntityStore.rename(conn, name, new_name)
-    (ToolResult.render(id, required(renamed, name)), conn)
+    (ToolResult.render(id, EntityStore.required(renamed, name)), conn)
   end
 
-  fn merge(arguments: Json, id: Json, conn: Connection)
+  @doc """
+  Merge two entities.
+  """
+  fn merge(arguments: JSONValue, id: JSONValue, conn: Connection)
     -> (Response, Connection)
 
     source =
@@ -155,14 +180,21 @@ struct EntityTools
     (ToolResult.render(id, merged), conn)
   end
 
-  fn list(arguments: Json, id: Json, conn: Connection) -> (Response, Connection)
-    limit = JsonUtil.get_int(arguments, "limit").or(DEFAULT_PAGE_LIMIT)
+  @doc """
+  Fetch a list of entity summaries.
+  """
+  fn list(arguments: JSONValue, id: JSONValue, conn: Connection)
+    -> (Response, Connection)
+
+    limit = JsonUtil.get_int(arguments, "limit").or(Params.DEFAULT_PAGE_LIMIT)
     offset = JsonUtil.get_int(arguments, "offset").or(0)
 
-    if limit < 1 or limit > MAX_PAGE_LIMIT
+    if limit < 1 or limit > Params.MAX_PAGE_LIMIT
       return (
-        ToolResult.err(id, "limit must be between 1 and #{MAX_PAGE_LIMIT}"),
-        conn
+        ToolResult.err(
+          id,
+          "limit must be between 1 and #{Params.MAX_PAGE_LIMIT}",
+        ), conn
       )
     end
 
@@ -174,7 +206,10 @@ struct EntityTools
     (ToolResult.render(id, list_payload(listed)), conn)
   end
 
-  fn delete(arguments: Json, id: Json, conn: Connection)
+  @doc """
+  Delete an entity.
+  """
+  fn delete(arguments: JSONValue, id: JSONValue, conn: Connection)
     -> (Response, Connection)
 
     name =
@@ -198,12 +233,12 @@ struct EntityTools
   priv fn search_payload(
     query: String,
     found: Result<List<SearchResult>, Error>,
-  ) -> Json ! Error
+  ) -> JSONValue ! Error
 
     results = try found
-    payload: Json = [
+    payload: JSONValue = [
       "query": query.to_json(),
-      "results": Json.Array(results.map(r -> r.to_json()))
+      "results": JSONValue.Array(results.map(r -> r.to_json()))
     ]
     payload
   end
@@ -212,24 +247,26 @@ struct EntityTools
     entity: Entity,
     relations: List<Relation>,
     events: Result<Option<List<Event>>, Error>,
-  ) -> Json ! Error
+  ) -> JSONValue ! Error
 
     # The entity was found a moment ago, so `None` means it vanished
     # mid-read. An empty list is the honest answer.
     recent = try events
-    payload: Json = [
+    payload: JSONValue = [
       "entity": entity.to_json(),
-      "relations": Json.Array(relations.map(r -> r.to_json())),
-      "events": Json.Array(recent.or(List.new()).map(e -> e.to_json()))
+      "relations": JSONValue.Array(relations.map(r -> r.to_json())),
+      "events": JSONValue.Array(recent.or(List.new()).map(e -> e.to_json()))
     ]
     payload
   end
 
   priv fn list_payload(listed: Result<List<EntitySummary>, Error>)
-    -> Json ! Error
+    -> JSONValue ! Error
 
     summaries = try listed
-    payload: Json = ["entities": Json.Array(summaries.map(s -> s.to_json()))]
+    payload: JSONValue = [
+      "entities": JSONValue.Array(summaries.map(s -> s.to_json()))
+    ]
     payload
   end
 end

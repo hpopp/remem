@@ -1,11 +1,8 @@
 alias Trail.Conn
 alias HTTP.Status
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 alias Pooler.Pool
 alias Postgres.Connection
-
-const DEFAULT_SEARCH_LIMIT: Int = 10
-const MAX_SEARCH_LIMIT: Int = 100
 
 @doc """
 The hybrid search endpoint. Semantic ranking over observations merges
@@ -17,6 +14,20 @@ struct SearchController
   embedder: Embedder
   pool: Pool<Connection>
 
+  @doc """
+  The number of results `GET /search` returns when the request sets
+  no `limit`.
+  """
+  const DEFAULT_LIMIT: Int = 10
+
+  @doc """
+  The largest `limit` that `GET /search` accepts.
+  """
+  const MAX_LIMIT: Int = 100
+
+  @doc """
+  Search for entities that match the `q` query parameter.
+  """
   fn search(self, c: Conn) -> Conn
     self.do_search(c) rescue e -> Render.from_error(c, e)
   end
@@ -28,17 +39,21 @@ struct SearchController
         _ -> fail Error.Validation("q is required")
       end
 
-    limit = try Params.int(c, "limit", DEFAULT_SEARCH_LIMIT)
+    limit = try Params.int(c, "limit", SearchController.DEFAULT_LIMIT)
 
-    if limit < 1 or limit > MAX_SEARCH_LIMIT
-      fail Error.Validation("limit must be between 1 and #{MAX_SEARCH_LIMIT}")
+    if limit < 1 or limit > SearchController.MAX_LIMIT
+      fail Error.Validation("limit must be between 1 and #{SearchController.MAX_LIMIT}")
     end
 
     embedder = self.embedder
-    results = try with_db(self.pool, db -> search_db(db, embedder, q, limit))
+    results = try Database.with_connection(
+      self.pool,
+      db -> search_db(db, embedder, q, limit),
+    )
 
-    body: Json = [
-      "query": q.to_json(), "results": Json.Array(results.map(r -> r.to_json()))
+    body: JSONValue = [
+      "query": q.to_json(),
+      "results": JSONValue.Array(results.map(r -> r.to_json()))
     ]
     Render.json(c, Status.ok(), body)
   end

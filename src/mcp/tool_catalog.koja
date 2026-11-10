@@ -1,4 +1,4 @@
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 
 @doc """
 The MCP tool catalog, with every tool's name, description, and input
@@ -7,7 +7,10 @@ to search before writing, to keep durable facts in observations and
 session details in events, and to keep the graph curated.
 """
 struct ToolCatalog
-  fn tools -> Json
+  @doc """
+  Build the list of tools that `tools/list` returns.
+  """
+  fn tools -> JSONValue
     search_description = "Search the memory graph with a natural " <>
       "language query. Ranking is hybrid: semantic similarity over " <>
       "individual observations plus fuzzy entity name matching. Each " <>
@@ -62,7 +65,7 @@ struct ToolCatalog
       "two entities. Use an active verb phrase for the type, like " <>
       "wrote or depends_on."
 
-    Json.Array([
+    JSONValue.Array([
       tool(
         "search_memory",
         search_description,
@@ -216,8 +219,10 @@ struct ToolCatalog
     ])
   end
 
-  priv fn tool(name: String, description: String, schema: Json) -> Json
-    entry: Json = [
+  priv fn tool(name: String, description: String, schema: JSONValue)
+    -> JSONValue
+
+    entry: JSONValue = [
       "name": name.to_json(), "description": description.to_json(),
       "inputSchema": schema
     ]
@@ -225,41 +230,41 @@ struct ToolCatalog
   end
 
   priv fn object_schema(
-    properties: List<(String, Json)>,
+    properties: List<(String, JSONValue)>,
     required: List<String>,
-  ) -> Json
+  ) -> JSONValue
 
-    schema: Json = [
-      "type": "object".to_json(), "properties": Json.Object(properties),
-      "required": Json.Array(required.map(r -> r.to_json()))
+    schema: JSONValue = [
+      "type": "object".to_json(), "properties": JSONValue.Object(properties),
+      "required": JSONValue.Array(required.map(r -> r.to_json()))
     ]
     schema
   end
 
-  priv fn string_prop(description: String) -> Json
-    prop: Json = [
+  priv fn string_prop(description: String) -> JSONValue
+    prop: JSONValue = [
       "type": "string".to_json(), "description": description.to_json()
     ]
     prop
   end
 
-  priv fn int_prop(description: String) -> Json
-    prop: Json = [
+  priv fn int_prop(description: String) -> JSONValue
+    prop: JSONValue = [
       "type": "integer".to_json(), "description": description.to_json()
     ]
     prop
   end
 
-  priv fn bool_prop(description: String) -> Json
-    prop: Json = [
+  priv fn bool_prop(description: String) -> JSONValue
+    prop: JSONValue = [
       "type": "boolean".to_json(), "description": description.to_json()
     ]
     prop
   end
 
-  priv fn string_array_prop(description: String) -> Json
-    items: Json = ["type": "string".to_json()]
-    prop: Json = [
+  priv fn string_array_prop(description: String) -> JSONValue
+    items: JSONValue = ["type": "string".to_json()]
+    prop: JSONValue = [
       "type": "array".to_json(), "items": items,
       "description": description.to_json()
     ]

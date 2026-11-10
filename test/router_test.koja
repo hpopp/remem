@@ -13,7 +13,7 @@ answer without a database connection.
 """
 struct RouterTest
   test "auth middleware rejects requests before any pool checkout"
-    router = build_router(
+    router = Routes.build(
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
@@ -33,7 +33,7 @@ struct RouterTest
   end
 
   test "404 answers in the error shape without a pool checkout"
-    router = build_router(
+    router = Routes.build(
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
@@ -48,7 +48,7 @@ struct RouterTest
   end
 
   test "405 lists the allowed methods in the error shape"
-    router = build_router(
+    router = Routes.build(
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
@@ -64,7 +64,7 @@ struct RouterTest
   end
 
   test "400 answers in the error shape for a malformed path"
-    router = build_router(
+    router = Routes.build(
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
@@ -79,7 +79,7 @@ struct RouterTest
   end
 
   test "GET /mcp answers 405 and points at POST"
-    router = build_router(
+    router = Routes.build(
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
@@ -94,7 +94,7 @@ struct RouterTest
   end
 
   test "GET /health stays exempt from auth and needs no database"
-    router = build_router(
+    router = Routes.build(
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
@@ -108,7 +108,7 @@ struct RouterTest
   end
 
   test "DELETE /events/:id rejects a non-integer id before pool checkout"
-    router = build_router(
+    router = Routes.build(
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),
@@ -123,7 +123,7 @@ struct RouterTest
   end
 
   test "POST /entities/:name/events rejects malformed occurred_at before pool checkout"
-    router = build_router(
+    router = Routes.build(
       broken_pool(),
       test_embedder(),
       Option.Some("test-key"),

@@ -14,6 +14,9 @@ struct Relation: JSON.Encoding
   to: String
   updated_at: DateTime
 
+  @doc """
+  Encode the relation as JSON.
+  """
   fn to_json(self) -> JSON.Value
     [
       "from": self.from.to_json(), "to": self.to.to_json(),
@@ -31,7 +34,7 @@ API deals only in names.
 """
 struct RelationStore
   @doc """
-  Creates a relation between two entities by name. Fails with
+  Create a relation between two entities by name. Fail with
   `NotFound` when either entity is missing and `Duplicate` when the
   relation already exists.
   """
@@ -62,7 +65,7 @@ struct RelationStore
   end
 
   @doc """
-  Deletes a relation, returning `true` when a row was removed.
+  Delete a relation. Return `true` when a row was removed.
   """
   fn remove(conn: Connection, from: String, to: String, kind: String)
     -> (Connection, Result<Bool, Error>)
@@ -74,11 +77,11 @@ struct RelationStore
         AND f.name = $1 AND t.name = $2 AND r.type = $3
       """, [Value.string(from), Value.string(to), Value.string(kind)])
 
-    (conn, changed(outcome))
+    (conn, Database.Query.changed(outcome))
   end
 
   @doc """
-  Returns every relation, oldest first, for `GET /graph`.
+  Return every relation, oldest first, for `GET /graph`.
   """
   fn all(conn: Connection) -> (Connection, Result<List<Relation>, Error>)
     (conn, outcome) = conn.query(select_sql() <> " ORDER BY r.id")
@@ -86,7 +89,7 @@ struct RelationStore
   end
 
   @doc """
-  Returns every relation touching the named entity, oldest first.
+  Return every relation touching the named entity, oldest first.
   """
   fn for_entity(conn: Connection, name: String)
     -> (Connection, Result<List<Relation>, Error>)
@@ -125,8 +128,8 @@ struct RelationStore
     kind: String,
   ) -> Relation ! Error
 
-    qr = try db_result(outcome)
-    found = qr.rows.get(0).map(row -> int_at(row, 0)).or(0)
+    qr = try Database.Query.result(outcome)
+    found = qr.rows.get(0).map(row -> Database.Row.int_at(row, 0)).or(0)
 
     # Same-name self relations select one entity row, not two.
     expected = from == to ? 1 : 2
@@ -143,7 +146,7 @@ struct RelationStore
   priv fn relations_from(outcome: Result<QueryResult, Postgres.Error>)
     -> List<Relation> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
     relations: List<Relation> = List.new()
 
     for row in qr.rows
@@ -162,7 +165,7 @@ struct RelationStore
     kind: String,
   ) -> Option<Relation> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
 
     match qr.rows.get(0)
       Option.None ->
@@ -170,22 +173,22 @@ struct RelationStore
 
       Option.Some(row) ->
         Option.Some(Relation{
-          created_at: try db_time(text_at(row, 0)),
+          created_at: try Database.Row.time(Database.Row.text_at(row, 0)),
           from: from,
           kind: kind,
           to: to,
-          updated_at: try db_time(text_at(row, 1)),
+          updated_at: try Database.Row.time(Database.Row.text_at(row, 1)),
         })
     end
   end
 
   priv fn row_to_relation(row: List<Value>) -> Relation ! Error
     Relation{
-      created_at: try db_time(text_at(row, 3)),
-      from: text_at(row, 0),
-      kind: text_at(row, 2),
-      to: text_at(row, 1),
-      updated_at: try db_time(text_at(row, 4)),
+      created_at: try Database.Row.time(Database.Row.text_at(row, 3)),
+      from: Database.Row.text_at(row, 0),
+      kind: Database.Row.text_at(row, 2),
+      to: Database.Row.text_at(row, 1),
+      updated_at: try Database.Row.time(Database.Row.text_at(row, 4)),
     }
   end
 

@@ -1,10 +1,7 @@
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 alias Postgres.Connection
 alias Postgres.QueryResult
 alias Postgres.Value
-
-# Events an entity read carries, and the default page for a list.
-const RECENT_EVENTS: Int = 10
 
 @doc """
 One thing that happened to an entity at a point in time, such as a
@@ -19,6 +16,9 @@ struct Event: JSON.Encoding
   occurred_at: DateTime
   updated_at: DateTime
 
+  @doc """
+  Encode the event as JSON.
+  """
   fn to_json(self) -> JSON.Value
     [
       "id": self.id.to_json(), "content": self.content.to_json(),
@@ -50,8 +50,14 @@ it alongside the outcome. Event mutations touch the owning entity's
 """
 struct EventStore
   @doc """
-  Records an event on the named entity and touches the entity. When
-  `occurred_at` is `None` the database stamps now. Returns the event
+  The number of events that an entity read carries. It is also the
+  default page size for an event list.
+  """
+  const RECENT_EVENTS: Int = 10
+
+  @doc """
+  Record an event on the named entity and touch the entity. When
+  `occurred_at` is `None` the database stamps now. Return the event
   with its entity, which the caller embeds, or `None` for an unknown
   name.
   """
@@ -102,7 +108,7 @@ struct EventStore
   end
 
   @doc """
-  Returns up to `limit` of the named entity's events, newest
+  Return up to `limit` of the named entity's events, newest
   `occurred_at` first, or `None` for an unknown name. `limit` is
   validated by the caller.
   """
@@ -140,8 +146,8 @@ struct EventStore
   end
 
   @doc """
-  Deletes an event by id and touches its entity, returning `true`
-  when a row was removed.
+  Delete an event by id and touch its entity. Return `true` when a
+  row was removed.
   """
   fn remove(conn: Connection, id: Int) -> (Connection, Result<Bool, Error>)
     (conn, outcome) = conn.execute("""
@@ -152,23 +158,23 @@ struct EventStore
       WHERE id IN (SELECT entity_id FROM removed)
       """, [Value.int(id)])
 
-    (conn, changed(outcome))
+    (conn, Database.Query.changed(outcome))
   end
 
   @doc """
-  Stores freshly computed embeddings on event rows by id, in one
+  Store freshly computed embeddings on event rows by id, in one
   statement. `ids` and `vectors` pair up by position. Rows deleted
-  mid-flight are skipped. Returns how many rows updated.
+  mid-flight are skipped. Return the number of updated rows.
   """
   fn set_embeddings(conn: Connection, ids: List<Int>, vectors: List<String>)
     -> (Connection, Result<Int, Error>)
 
-    pairs: List<Json> = List.new()
+    pairs: List<JSONValue> = List.new()
 
     for i in Range{start: 0, stop: ids.length() - 1}
       id = ids.get(i).or(0)
       vector = vectors.get(i).or("")
-      pair: Json = ["id": id.to_json(), "embedding": vector.to_json()]
+      pair: JSONValue = ["id": id.to_json(), "embedding": vector.to_json()]
       pairs = pairs.append(pair)
     end
 
@@ -177,13 +183,13 @@ struct EventStore
       SET embedding = p.embedding::vector
       FROM jsonb_to_recordset($1::jsonb) AS p(id bigint, embedding text)
       WHERE v.id = p.id
-      """, [Value.string(JSON.encode(Json.Array(pairs)))])
+      """, [Value.string(JSON.encode(JSONValue.Array(pairs)))])
 
-    (conn, affected_rows(outcome))
+    (conn, Database.Query.affected_rows(outcome))
   end
 
   @doc """
-  Returns up to `limit` events with no embedding yet, oldest first,
+  Return up to `limit` events with no embedding yet, oldest first,
   with their entity's name and type. The backfill drains this.
   """
   fn unembedded(conn: Connection, limit: Int)
@@ -202,7 +208,7 @@ struct EventStore
   end
 
   @doc """
-  Clears every event embedding an entity holds, so the backfill
+  Clear every event embedding an entity holds, so the backfill
   recomputes them under a new name.
   """
   fn clear_embeddings(conn: Connection, entity_id: Int)
@@ -213,7 +219,7 @@ struct EventStore
       [Value.int(entity_id)],
     )
 
-    (conn, done(outcome))
+    (conn, Database.Query.done(outcome))
   end
 
   # Resolves a name to its id without touching the entity, for reads.
@@ -232,15 +238,15 @@ struct EventStore
   priv fn first_id(outcome: Result<QueryResult, Postgres.Error>)
     -> Option<Int> ! Error
 
-    qr = try db_result(outcome)
-    qr.rows.get(0).map(row -> int_at(row, 0))
+    qr = try Database.Query.result(outcome)
+    qr.rows.get(0).map(row -> Database.Row.int_at(row, 0))
   end
 
   # The event an INSERT ... RETURNING produced.
   priv fn inserted_event(outcome: Result<QueryResult, Postgres.Error>)
     -> Event ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
 
     match qr.rows.get(0)
       Option.Some(row) -> try row_to_event(row)
@@ -263,7 +269,7 @@ struct EventStore
   priv fn events_from(outcome: Result<QueryResult, Postgres.Error>)
     -> List<Event> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
     events: List<Event> = List.new()
 
     for row in qr.rows
@@ -276,17 +282,17 @@ struct EventStore
   priv fn pending_from(outcome: Result<QueryResult, Postgres.Error>)
     -> List<PendingEvent> ! Error
 
-    qr = try db_result(outcome)
+    qr = try Database.Query.result(outcome)
     pending: List<PendingEvent> = List.new()
 
     for row in qr.rows
       pending = pending.append(
         PendingEvent{
-          content: text_at(row, 3),
-          id: int_at(row, 0),
-          kind: text_at(row, 2),
-          name: text_at(row, 1),
-          occurred_at: try db_time(text_at(row, 4)),
+          content: Database.Row.text_at(row, 3),
+          id: Database.Row.int_at(row, 0),
+          kind: Database.Row.text_at(row, 2),
+          name: Database.Row.text_at(row, 1),
+          occurred_at: try Database.Row.time(Database.Row.text_at(row, 4)),
         },
       )
     end
@@ -297,11 +303,11 @@ struct EventStore
   # Column order: id, content, occurred_at, created_at, updated_at.
   priv fn row_to_event(row: List<Value>) -> Event ! Error
     Event{
-      content: text_at(row, 1),
-      created_at: try db_time(text_at(row, 3)),
-      id: int_at(row, 0),
-      occurred_at: try db_time(text_at(row, 2)),
-      updated_at: try db_time(text_at(row, 4)),
+      content: Database.Row.text_at(row, 1),
+      created_at: try Database.Row.time(Database.Row.text_at(row, 3)),
+      id: Database.Row.int_at(row, 0),
+      occurred_at: try Database.Row.time(Database.Row.text_at(row, 2)),
+      updated_at: try Database.Row.time(Database.Row.text_at(row, 4)),
     }
   end
 end

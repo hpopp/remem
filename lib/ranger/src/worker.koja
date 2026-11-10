@@ -6,9 +6,6 @@ alias Net.TCPSocket
 alias Process.Step
 alias Process.StopReason
 
-# Bytes pulled per socket read.
-priv const READ_CHUNK: Int = 8192
-
 @doc """
 A one-shot process that owns a single client connection. Spawn one
 per accepted socket:
@@ -29,16 +26,28 @@ struct Worker: Process<Worker, (), ()>
   client: TCPSocket
   config: Config
 
+  # Bytes pulled per socket read.
+  priv const READ_CHUNK: Int = 8192
+
+  @doc """
+  Use `config` as the process state.
+  """
   fn start(config: Worker) -> Self ! StopReason
     config
   end
 
+  @doc """
+  Ignore the message. The worker does all its work in `run`.
+  """
   fn handle(self, msg: (), from: Option<ReplyTo<()>>) -> Step<Self>
     Step.Continue(self)
   end
 
-  # Serves requests iteratively. Keep-alive connections are
-  # long-lived, so this must not grow the stack per request.
+  @doc """
+  Serve requests from the client until the connection ends or the
+  request budget is spent. The loop is iterative, so a long
+  keep-alive connection does not grow the stack.
+  """
   fn run(self) -> StopReason
     buffered: Binary = <<>>
     budget = self.config.max_requests_per_connection
@@ -132,7 +141,7 @@ struct Worker: Process<Worker, (), ()>
     buffer = buffered
 
     loop
-      match frame_request(
+      match Frame.parse(
         buffer,
         self.config.max_header_bytes,
         self.config.max_body_bytes,
@@ -144,7 +153,7 @@ struct Worker: Process<Worker, (), ()>
           return Frame.TooLarge
 
         Frame.Incomplete ->
-          match self.client.read(READ_CHUNK)
+          match self.client.read(Worker.READ_CHUNK)
             Result.Ok(chunk) when chunk.byte_size() > 0 ->
               buffer = buffer <> chunk
             _ -> return Frame.Incomplete
@@ -171,51 +180,49 @@ enum Frame
   Complete((Binary, Binary))
   Incomplete
   TooLarge
-end
 
-@doc """
-Splits `buffer` into one complete request and the leftover bytes.
-`Incomplete` asks the caller to read more, `TooLarge` means the
-headers overran `max_header_bytes` or the declared body overran
-`max_body_bytes`. Content-Length is a byte count, so framing works
-on bytes and the split lands exactly where the body ends.
-"""
-fn frame_request(buffer: Binary, max_header_bytes: Int, max_body_bytes: Int)
-  -> Frame
+  @doc """
+  Split `buffer` into one complete request and the leftover bytes.
+  `Incomplete` asks the caller to read more, `TooLarge` means the
+  headers overran `max_header_bytes` or the declared body overran
+  `max_body_bytes`. Content-Length is a byte count, so framing works
+  on bytes and the split lands exactly where the body ends.
+  """
+  fn parse(buffer: Binary, max_header_bytes: Int, max_body_bytes: Int) -> Frame
+    header_end =
+      match buffer.find(<<13, 10, 13, 10>>, 0)
+        Option.Some(index) ->
+          index
 
-  header_end =
-    match buffer.find(<<13, 10, 13, 10>>, 0)
-      Option.Some(index) ->
-        index
+        Option.None ->
+          # Headers still incomplete. A buffer already past the header
+          # cap can never complete them.
+          return buffer.byte_size() > max_header_bytes
+            ? Frame.TooLarge
+            : Frame.Incomplete
+      end
 
-      Option.None ->
-        # Headers still incomplete. A buffer already past the header
-        # cap can never complete them.
-        return buffer.byte_size() > max_header_bytes
-          ? Frame.TooLarge
-          : Frame.Incomplete
+    length = content_length(buffer.slice(Range{start: 0, stop: header_end - 1}))
+
+    if header_end > max_header_bytes or length > max_body_bytes
+      return Frame.TooLarge
     end
 
-  length = content_length(buffer.slice(Range{start: 0, stop: header_end - 1}))
+    total = header_end + 4 + length
+    size = buffer.byte_size()
 
-  if header_end > max_header_bytes or length > max_body_bytes
-    return Frame.TooLarge
+    if size < total
+      return Frame.Incomplete
+    end
+
+    if size == total
+      return Frame.Complete((buffer, <<>>))
+    end
+
+    request = buffer.slice(Range{start: 0, stop: total - 1})
+    leftover = buffer.slice(Range{start: total, stop: size - 1})
+    Frame.Complete((request, leftover))
   end
-
-  total = header_end + 4 + length
-  size = buffer.byte_size()
-
-  if size < total
-    return Frame.Incomplete
-  end
-
-  if size == total
-    return Frame.Complete((buffer, <<>>))
-  end
-
-  request = buffer.slice(Range{start: 0, stop: total - 1})
-  leftover = buffer.slice(Range{start: total, stop: size - 1})
-  Frame.Complete((request, leftover))
 end
 
 # Reads the Content-Length header out of the header bytes. Headers

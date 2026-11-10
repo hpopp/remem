@@ -1,0 +1,46 @@
+alias Postgres.QueryResult
+
+@doc """
+Readers for a driver outcome, shared by every store. A store fn
+threads the `Connection` and so cannot use `try`. It runs the query
+and hands the outcome to a `! Error` fn from here, which does.
+"""
+struct Database.Query
+  @doc """
+  Unwrap a driver outcome. Wrap a driver error as `Error.Database`.
+  """
+  fn result(outcome: Result<QueryResult, Postgres.Error>) -> QueryResult ! Error
+    outcome rescue e -> fail Error.Database(e.message())
+  end
+
+  @doc """
+  Report whether a DELETE or UPDATE changed at least one row.
+  """
+  fn changed(outcome: Result<QueryResult, Postgres.Error>) -> Bool ! Error
+    qr = try result(outcome)
+    affected(qr.tag) > 0
+  end
+
+  @doc """
+  Return the row count of an UPDATE or DELETE.
+  """
+  fn affected_rows(outcome: Result<QueryResult, Postgres.Error>) -> Int ! Error
+    qr = try result(outcome)
+    affected(qr.tag)
+  end
+
+  @doc """
+  Check that a statement succeeded. The result does not matter.
+  """
+  fn done(outcome: Result<QueryResult, Postgres.Error>) ! Error
+    _ = try result(outcome)
+  end
+
+  # Reads the row count out of an `UPDATE n` or `DELETE n` command tag.
+  priv fn affected(tag: String) -> Int
+    match tag.split(" ").get(1)
+      Option.None -> 0
+      Option.Some(text) -> text.to_int() rescue _ -> 0
+    end
+  end
+end

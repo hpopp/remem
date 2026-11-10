@@ -1,5 +1,5 @@
 alias HTTP.Response
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 alias Postgres.Connection
 
 @doc """
@@ -7,7 +7,10 @@ The `create_relation` and `delete_relation` tools. Both take the
 same `{from, to, type}` arguments.
 """
 struct RelationTools
-  fn create(arguments: Json, id: Json, conn: Connection)
+  @doc """
+  Create a relation between two entities.
+  """
+  fn create(arguments: JSONValue, id: JSONValue, conn: Connection)
     -> (Response, Connection)
 
     (from, to, kind) =
@@ -20,7 +23,10 @@ struct RelationTools
     (ToolResult.render(id, created), conn)
   end
 
-  fn delete(arguments: Json, id: Json, conn: Connection)
+  @doc """
+  Delete a relation.
+  """
+  fn delete(arguments: JSONValue, id: JSONValue, conn: Connection)
     -> (Response, Connection)
 
     (from, to, kind) =
@@ -41,7 +47,7 @@ struct RelationTools
     )
   end
 
-  priv fn args(arguments: Json) -> (String, String, String) ! String
+  priv fn args(arguments: JSONValue) -> (String, String, String) ! String
     from =
       match JsonUtil.get_string(arguments, "from")
         Option.Some(text) when not text.empty?() -> text

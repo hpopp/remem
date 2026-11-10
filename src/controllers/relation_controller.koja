@@ -10,10 +10,16 @@ Relation endpoints. Both take the same `{from, to, type}` body.
 struct RelationController
   pool: Pool<Connection>
 
+  @doc """
+  Create a relation between two entities.
+  """
   fn create(self, c: Conn) -> Conn
     self.do_create(c) rescue e -> Render.from_error(c, e)
   end
 
+  @doc """
+  Delete a relation.
+  """
   fn delete(self, c: Conn) -> Conn
     self.do_delete(c) rescue e -> Render.from_error(c, e)
   end
@@ -21,7 +27,7 @@ struct RelationController
   priv fn do_create(self, c: Conn) -> Conn ! Error
     (from, to, kind) = try JsonUtil.parse_relation(c.body)
 
-    relation = try with_db(
+    relation = try Database.with_connection(
       self.pool,
       db -> RelationStore.create(db, from, to, kind),
     )
@@ -31,7 +37,7 @@ struct RelationController
   priv fn do_delete(self, c: Conn) -> Conn ! Error
     (from, to, kind) = try JsonUtil.parse_relation(c.body)
 
-    deleted = try with_db(
+    deleted = try Database.with_connection(
       self.pool,
       db -> RelationStore.remove(db, from, to, kind),
     )

@@ -1,5 +1,5 @@
 alias HTTP.Response
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 alias Postgres.Connection
 
 @doc """
@@ -8,8 +8,15 @@ are addressed by integer id, so `remove_event` takes an id where the
 observation tools take content.
 """
 struct EventTools
-  fn add(arguments: Json, id: Json, conn: Connection, embedder: Embedder)
-    -> (Response, Connection)
+  @doc """
+  Add an event to an entity.
+  """
+  fn add(
+    arguments: JSONValue,
+    id: JSONValue,
+    conn: Connection,
+    embedder: Embedder,
+  ) -> (Response, Connection)
 
     name =
       match JsonUtil.get_string(arguments, "name")
@@ -31,18 +38,21 @@ struct EventTools
 
     (conn, added) = EventStore.add(conn, name, content, occurred_at)
 
-    match required(added, name)
+    match EntityStore.required(added, name)
       Result.Err(e) ->
         (ToolResult.err(id, e.message()), conn)
 
       Result.Ok(pair) ->
         (event, entity) = pair
-        conn = embed_event(conn, embedder, entity, event)
+        conn = Embedding.embed_event(conn, embedder, entity, event)
         (ToolResult.ok(id, event.to_json()), conn)
     end
   end
 
-  fn recent(arguments: Json, id: Json, conn: Connection)
+  @doc """
+  Fetch the recent events of an entity.
+  """
+  fn recent(arguments: JSONValue, id: JSONValue, conn: Connection)
     -> (Response, Connection)
 
     name =
@@ -51,13 +61,13 @@ struct EventTools
         _ -> return (ToolResult.err(id, "name is required"), conn)
       end
 
-    limit = JsonUtil.get_int(arguments, "limit").or(RECENT_EVENTS)
+    limit = JsonUtil.get_int(arguments, "limit").or(EventStore.RECENT_EVENTS)
 
-    if limit < 1 or limit > MCP_MAX_SEARCH_LIMIT
+    if limit < 1 or limit > MCP.MAX_SEARCH_LIMIT
       return (
         ToolResult.err(
           id,
-          "limit must be between 1 and #{MCP_MAX_SEARCH_LIMIT}",
+          "limit must be between 1 and #{MCP.MAX_SEARCH_LIMIT}",
         ), conn
       )
     end
@@ -66,7 +76,10 @@ struct EventTools
     (ToolResult.render(id, recent_payload(name, found)), conn)
   end
 
-  fn remove(arguments: Json, id: Json, conn: Connection)
+  @doc """
+  Remove an event by id.
+  """
+  fn remove(arguments: JSONValue, id: JSONValue, conn: Connection)
     -> (Response, Connection)
 
     event_id =
@@ -90,11 +103,12 @@ struct EventTools
   priv fn recent_payload(
     name: String,
     found: Result<Option<List<Event>>, Error>,
-  ) -> Json ! Error
+  ) -> JSONValue ! Error
 
-    events = try required(found, name)
-    payload: Json = [
-      "name": name.to_json(), "events": Json.Array(events.map(e -> e.to_json()))
+    events = try EntityStore.required(found, name)
+    payload: JSONValue = [
+      "name": name.to_json(),
+      "events": JSONValue.Array(events.map(e -> e.to_json()))
     ]
     payload
   end

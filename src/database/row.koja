@@ -1,0 +1,34 @@
+alias Postgres.Value
+
+@doc """
+Readers for the columns of one result row.
+"""
+struct Database.Row
+  @doc """
+  Read a `timestamptz::text` column into a `DateTime` in UTC. Postgres
+  writes `2026-09-26 01:04:40.964351+00`, which `DateTime.parse` accepts
+  as is (space separator, fraction, bare `+HH` offset). Postgres always
+  emits a readable value, so a parse failure is a bug and surfaces as
+  `Error.Database` rather than as a blank field.
+  """
+  fn time(text: String) -> DateTime ! Error
+    parsed = DateTime.parse(text)
+      rescue _ -> fail Error.Database("unreadable timestamp: #{text}")
+
+    parsed.to_utc()
+  end
+
+  @doc """
+  Read a text column, or an empty string for a null or missing one.
+  """
+  fn text_at(row: List<Value>, index: Int) -> String
+    row.get(index).map(v -> v.string_or("")).or("")
+  end
+
+  @doc """
+  Read an integer column, or zero for a null or missing one.
+  """
+  fn int_at(row: List<Value>, index: Int) -> Int
+    row.get(index).map(v -> v.int_or(0)).or(0)
+  end
+end

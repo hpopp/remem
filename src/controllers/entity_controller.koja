@@ -1,74 +1,100 @@
 alias Trail.Conn
 alias HTTP.Status
-alias JSON.Value as Json
+alias JSON.Value as JSONValue
 alias Pooler.Pool
 alias Postgres.Connection
 
 @doc """
 Entity endpoints. Holds exactly the dependencies these handlers use,
 captured when the router is built. Each handler parses and validates
-before touching the pool, runs its database phase through `with_db`
-(which always checks the connection back in), and renders one
-response at the surface.
+before touching the pool, runs its database phase through
+`Database.with_connection` (which always checks the connection back
+in), and renders one response at the surface.
 """
 struct EntityController
   embedder: Embedder
   pool: Pool<Connection>
 
+  @doc """
+  Fetch a list of entities.
+  """
   fn list(self, c: Conn) -> Conn
     self.do_list(c) rescue e -> Render.from_error(c, e)
   end
 
+  @doc """
+  Fetch one entity.
+  """
   fn show(self, c: Conn) -> Conn
     self.do_show(c) rescue e -> Render.from_error(c, e)
   end
 
+  @doc """
+  Create an entity.
+  """
   fn create(self, c: Conn) -> Conn
     self.do_create(c) rescue e -> Render.from_error(c, e)
   end
 
+  @doc """
+  Rename an entity.
+  """
   fn rename(self, c: Conn) -> Conn
     self.do_rename(c) rescue e -> Render.from_error(c, e)
   end
 
+  @doc """
+  Merge two entities.
+  """
   fn merge(self, c: Conn) -> Conn
     self.do_merge(c) rescue e -> Render.from_error(c, e)
   end
 
+  @doc """
+  Delete an entity.
+  """
   fn delete(self, c: Conn) -> Conn
     self.do_delete(c) rescue e -> Render.from_error(c, e)
   end
 
+  @doc """
+  Add observations to an entity.
+  """
   fn add_observations(self, c: Conn) -> Conn
     self.do_add_observations(c) rescue e -> Render.from_error(c, e)
   end
 
+  @doc """
+  Remove observations from an entity.
+  """
   fn remove_observations(self, c: Conn) -> Conn
     self.do_remove_observations(c) rescue e -> Render.from_error(c, e)
   end
 
   priv fn do_list(self, c: Conn) -> Conn ! Error
     (limit, offset) = try Params.page(c)
-    summaries = try with_db(
+    summaries = try Database.with_connection(
       self.pool,
       db -> EntityStore.summaries(db, limit, offset),
     )
 
-    body: Json = ["entities": Json.Array(summaries.map(s -> s.to_json()))]
+    body: JSONValue = [
+      "entities": JSONValue.Array(summaries.map(s -> s.to_json()))
+    ]
     Render.json(c, Status.ok(), body)
   end
 
   priv fn do_show(self, c: Conn) -> Conn ! Error
     name = Params.name(c)
-    (entity, relations, events) = try with_db(
+    (entity, relations, events) = try Database.with_connection(
       self.pool,
       db -> show_db(db, name),
     )
 
-    body: Json = [
+    body: JSONValue = [
       "entity": entity.to_json(),
-      "relations": Json.Array(relations.map(r -> r.to_json())),
-      "events": Json.Array(events.map(e -> e.to_json()))
+      "relations": JSONValue.Array(relations.map(r -> r.to_json())),
+      "events": JSONValue.Array(events.map(e -> e.to_json()))
     ]
     Render.json(c, Status.ok(), body)
   end
@@ -79,7 +105,7 @@ struct EntityController
     confirm = JsonUtil.parse_confirm(c.body)
     embedder = self.embedder
 
-    entity = try with_db(
+    entity = try Database.with_connection(
       self.pool,
       db -> create_db(db, embedder, name, kind, observations, confirm),
     )
@@ -90,7 +116,10 @@ struct EntityController
     name = Params.name(c)
     new_name = try JsonUtil.parse_string_field(c.body, "name")
 
-    entity = try with_db(self.pool, db -> rename_db(db, name, new_name))
+    entity = try Database.with_connection(
+      self.pool,
+      db -> rename_db(db, name, new_name),
+    )
     Render.json(c, Status.ok(), entity)
   end
 
@@ -98,13 +127,19 @@ struct EntityController
     source = Params.name(c)
     into = try JsonUtil.parse_string_field(c.body, "into")
 
-    entity = try with_db(self.pool, db -> EntityStore.merge(db, source, into))
+    entity = try Database.with_connection(
+      self.pool,
+      db -> EntityStore.merge(db, source, into),
+    )
     Render.json(c, Status.ok(), entity)
   end
 
   priv fn do_delete(self, c: Conn) -> Conn ! Error
     name = Params.name(c)
-    deleted = try with_db(self.pool, db -> EntityStore.remove(db, name))
+    deleted = try Database.with_connection(
+      self.pool,
+      db -> EntityStore.remove(db, name),
+    )
 
     if not deleted
       fail Error.NotFound("no entity named #{name}")
@@ -118,7 +153,7 @@ struct EntityController
     observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
     embedder = self.embedder
 
-    entity = try with_db(
+    entity = try Database.with_connection(
       self.pool,
       db -> add_db(db, embedder, name, observations),
     )
@@ -129,7 +164,10 @@ struct EntityController
     name = Params.name(c)
     observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
 
-    entity = try with_db(self.pool, db -> remove_db(db, name, observations))
+    entity = try Database.with_connection(
+      self.pool,
+      db -> remove_db(db, name, observations),
+    )
     Render.json(c, Status.ok(), entity)
   end
 end
@@ -142,7 +180,7 @@ priv fn show_db(db: Connection, name: String)
   (db, found) = EntityStore.find(db, name)
 
   entity =
-    match required(found, name)
+    match EntityStore.required(found, name)
       Result.Err(e) -> return (db, Result.Err(e))
       Result.Ok(present) -> present
     end
@@ -155,7 +193,7 @@ priv fn show_db(db: Connection, name: String)
       Result.Ok(list) -> list
     end
 
-  (db, events) = EventStore.recent(db, name, RECENT_EVENTS)
+  (db, events) = EventStore.recent(db, name, EventStore.RECENT_EVENTS)
 
   match events
     Result.Err(e) ->
@@ -186,7 +224,7 @@ priv fn create_db(
 
     Result.Ok(pair) ->
       (entity, rows) = pair
-      db = embed_rows(db, embedder, entity, rows)
+      db = Embedding.embed_observations(db, embedder, entity, rows)
       (db, Result.Ok(entity))
   end
 end
@@ -196,7 +234,7 @@ priv fn rename_db(db: Connection, name: String, new_name: String)
   -> (Connection, Result<Entity, Error>)
 
   (db, renamed) = EntityStore.rename(db, name, new_name)
-  (db, required(renamed, name))
+  (db, EntityStore.required(renamed, name))
 end
 
 # Adds observations, then embeds the new rows best-effort. A missing
@@ -210,13 +248,13 @@ priv fn add_db(
 
   (db, updated) = EntityStore.add_observations(db, name, observations)
 
-  match required(updated, name)
+  match EntityStore.required(updated, name)
     Result.Err(e) ->
       (db, Result.Err(e))
 
     Result.Ok(pair) ->
       (entity, rows) = pair
-      db = embed_rows(db, embedder, entity, rows)
+      db = Embedding.embed_observations(db, embedder, entity, rows)
       (db, Result.Ok(entity))
   end
 end
@@ -227,5 +265,5 @@ priv fn remove_db(db: Connection, name: String, observations: List<String>)
   -> (Connection, Result<Entity, Error>)
 
   (db, updated) = EntityStore.remove_observations(db, name, observations)
-  (db, required(updated, name))
+  (db, EntityStore.required(updated, name))
 end

@@ -20,6 +20,11 @@ requests render the same JSON error body as routed failures and log
 one warning each.
 """
 struct Server
+  @doc """
+  Build the worker config that dispatches each request through
+  `router`. If `exporter` is enabled, open a server span for each
+  request except health probes.
+  """
   fn config(router: Router, exporter: Exporter) -> RangerConfig
     handler =
       fn (request: Request) -> Response

@@ -1,0 +1,425 @@
+alias HTTP.Headers
+alias HTTP.Method
+alias HTTP.Request
+alias HTTP.Response
+alias Pooler.Error as PoolError
+alias Pooler.Lease
+alias Pooler.Pool
+alias Process.CallError
+alias URI.Error as URIError
+
+@doc """
+A handle to a running HTTP client. The client keeps connections
+open, shares them between processes, and bounds every wait.
+
+```koja
+client = try Client.start(Config{})
+
+response = try client.get("https://example.com/users/7")
+response = try client.post(url, body, headers)
+response = try client.send(request)
+
+try client.stop()
+```
+
+The handle is a small value. Copy it into every process that makes
+requests.
+
+The functions have the names and the parameter order of the one-shot
+client in `HTTP`. Each one takes a trailing `timeout` that replaces
+`Config.timeout` for that request. Every function fails with `Error`.
+
+The client keeps `Config.pool_size` connections for each origin, and
+it opens a connection when a request needs one. A request runs in the
+process that makes it. When every connection to the origin is busy,
+the request waits for at most `Config.pool_timeout`.
+
+The client sends a request a second time in one case, and never a
+third time. The case is a connection that was used before and that
+fails before the first byte of a response, for a method that is
+idempotent. The server closed that connection while it was idle.
+
+The client speaks HTTP/1.1. It does not follow redirects, so a 3xx is
+a response.
+
+`config` and `directory` belong to the client. Do not set them.
+"""
+struct Client
+  config: Config
+  directory: Ref<Directory.Msg, Directory.Reply>
+
+  @doc """
+  The default time `stop` waits for the client to stop, 5 seconds.
+  """
+  const DEFAULT_STOP_TIMEOUT: Duration = Duration{
+    unit: Duration.Unit.Seconds,
+    value: 5,
+  }
+
+  @doc """
+  Sends a DELETE request to the given URL. See `send` for the timeout
+  and the errors.
+  """
+  fn delete(
+    self,
+    url: String,
+    headers: Headers,
+    timeout: Option<Duration> = Option.None,
+  ) -> Response ! Error
+
+    try self.request(Method.Delete, url, headers, "", timeout)
+  end
+
+  @doc """
+  Sends a GET request to the given URL. See `send` for the timeout
+  and the errors.
+  """
+  fn get(self, url: String, timeout: Option<Duration> = Option.None)
+    -> Response ! Error
+
+    try self.request(Method.Get, url, Headers.new(), "", timeout)
+  end
+
+  @doc """
+  Sends a HEAD request to the given URL. The response has no body.
+  See `send` for the timeout and the errors.
+  """
+  fn head(self, url: String, timeout: Option<Duration> = Option.None)
+    -> Response ! Error
+
+    try self.request(Method.Head, url, Headers.new(), "", timeout)
+  end
+
+  @doc """
+  Sends an OPTIONS request to the given URL. See `send` for the
+  timeout and the errors.
+  """
+  fn options(self, url: String, timeout: Option<Duration> = Option.None)
+    -> Response ! Error
+
+    try self.request(Method.Options, url, Headers.new(), "", timeout)
+  end
+
+  @doc """
+  Sends a PATCH request to the given URL with a body. See `send` for
+  the timeout and the errors.
+  """
+  fn patch(
+    self,
+    url: String,
+    body: Binary | String,
+    headers: Headers,
+    timeout: Option<Duration> = Option.None,
+  ) -> Response ! Error
+
+    try self.request(Method.Patch, url, headers, body, timeout)
+  end
+
+  @doc """
+  Sends a POST request to the given URL with a body. See `send` for
+  the timeout and the errors.
+  """
+  fn post(
+    self,
+    url: String,
+    body: Binary | String,
+    headers: Headers,
+    timeout: Option<Duration> = Option.None,
+  ) -> Response ! Error
+
+    try self.request(Method.Post, url, headers, body, timeout)
+  end
+
+  @doc """
+  Sends a PUT request to the given URL with a body. See `send` for
+  the timeout and the errors.
+  """
+  fn put(
+    self,
+    url: String,
+    body: Binary | String,
+    headers: Headers,
+    timeout: Option<Duration> = Option.None,
+  ) -> Response ! Error
+
+    try self.request(Method.Put, url, headers, body, timeout)
+  end
+
+  @doc """
+  Builds a request from its parts and sends it. A `String` body is
+  sent as its UTF-8 bytes. A URL that does not parse fails with
+  `Error.InvalidUrl`. See `send` for the timeout and the errors.
+  """
+  fn request(
+    self,
+    method: Method,
+    url: String,
+    headers: Headers,
+    body: Binary | String,
+    timeout: Option<Duration> = Option.None,
+  ) -> Response ! Error
+
+    uri = URI.parse(url)
+      rescue e -> fail Error.InvalidUrl(uri_error_message(e, url))
+
+    message = Request{
+      body: body_bytes(body),
+      headers: headers,
+      method: method,
+      uri: uri,
+    }
+
+    try self.send(message, timeout)
+  end
+
+  @doc """
+  Sends a request that the caller built and returns the response.
+  The scheme, the host, and the port of `request.uri` name the origin.
+  The path and the query are the request target.
+
+  `timeout` bounds the whole request, from the wait for a connection
+  to the last byte of the response. `Option.None` means
+  `Config.timeout`. It does not bound the DNS lookup. A request that
+  passes the limit fails with `Error.Timeout`.
+
+  The client drops a 1xx response and returns the response that
+  follows it. A 101 is the exception, and the client returns it and
+  closes the connection.
+
+  A header `Connection: close` on the request closes the connection
+  after the response.
+  """
+  fn send(self, request: Request, timeout: Option<Duration> = Option.None)
+    -> Response ! Error
+
+    origin = try Origin.from_uri(request.uri)
+    deadline = Instant.now().plus(timeout.or(self.config.timeout))
+    pool = try self.route(origin, deadline)
+
+    match self.attempt(pool, origin, request, deadline, false)
+      Result.Ok(response) ->
+        response
+
+      Result.Err(Failure.Final(error)) ->
+        fail error
+
+      # The server closed the connection while it was idle. Send the
+      # request one more time, on a new connection.
+      Result.Err(Failure.Unanswered(error)) ->
+        if not idempotent?(request.method)
+          fail error
+        end
+
+        self.attempt(pool, origin, request, deadline, true)
+          rescue failure -> fail failure_error(failure)
+    end
+  end
+
+  @doc """
+  Starts a client. It spawns the client's process as a child of the
+  caller. Fails with `Error.InvalidConfig` when `pool_size` or
+  `max_header_bytes` is below 1, when `max_body_bytes` is negative, or
+  when `connect_timeout`, `pool_timeout`, or `timeout` is zero.
+  """
+  fn start(config: Config = Config{}) -> Client ! Error
+    try check_config(config)
+    Client{config: config, directory: spawn Directory.start(config)}
+  end
+
+  @doc """
+  Stops the client and closes every idle connection. A request that
+  is in progress keeps its connection and can still finish. A request
+  after `stop` fails with `Error.Stopped`. Returns at once when the
+  client already stopped. Fails with `Error.Timeout` when the client
+  does not stop in `timeout`.
+  """
+  fn stop(self, timeout: Duration = Client.DEFAULT_STOP_TIMEOUT) ! Error
+    match self.directory.call(Directory.Msg.Stop, wait_ms(timeout))
+      Result.Ok(_) -> ()
+      Result.Err(CallError.Timeout) -> fail Error.Timeout
+      Result.Err(CallError.ProcessDown) -> ()
+    end
+  end
+
+  # Runs the request one time on one slot of the pool, and gives the
+  # slot back in every case. With `fresh`, it opens a new connection
+  # and does not use the one in the slot.
+  #
+  # `Unanswered` comes back only for a connection that was used
+  # before. A new connection that fails is `Final`.
+  priv fn attempt(
+    self,
+    pool: Pool<Slot>,
+    origin: Origin,
+    request: Request,
+    deadline: Instant,
+    fresh: Bool,
+  ) -> Response ! Failure
+
+    lease = self.checkout(pool, deadline) rescue e -> fail Failure.Final(e)
+    reused = false
+
+    connection =
+      match lease.resource.connection
+        Option.Some(idle) when not fresh
+          and not expired?(idle, self.config.idle_timeout) ->
+          reused = true
+          idle
+
+        _ ->
+          close_slot(lease.resource)
+
+          match open(origin, self.config, deadline)
+            Result.Ok(opened) ->
+              opened
+
+            Result.Err(error) ->
+              lease.resource = Slot{}
+              pool.checkin(lease)
+              fail Failure.Final(error)
+          end
+      end
+
+    match exchange(connection, request, self.config, deadline)
+      Result.Ok(done) ->
+        (response, reusable) = done
+
+        if reusable and pool.ref.alive?()
+          kept = Connection{
+            idle_since: Instant.now(),
+            socket: connection.socket,
+          }
+          lease.resource = Slot{connection: Option.Some(kept)}
+        else
+          discard(connection.socket)
+          lease.resource = Slot{}
+        end
+
+        pool.checkin(lease)
+        response
+
+      Result.Err(failure) ->
+        discard(connection.socket)
+        lease.resource = Slot{}
+        pool.checkin(lease)
+
+        if reused
+          fail failure
+        end
+
+        fail Failure.Final(failure_error(failure))
+    end
+  end
+
+  # Borrows a slot. Waits for the shorter of `Config.pool_timeout`
+  # and the time that the request has left.
+  priv fn checkout(self, pool: Pool<Slot>, deadline: Instant)
+    -> Lease<Slot> ! Error
+
+    left = try remaining(deadline)
+    limit = self.config.pool_timeout
+    wait = left.to_nanoseconds() < limit.to_nanoseconds() ? left : limit
+
+    pool.checkout(wait_ms(wait)) rescue e -> fail checkout_error(e, deadline)
+  end
+
+  # Asks the directory for the pool of `origin`.
+  priv fn route(self, origin: Origin, deadline: Instant) -> Pool<Slot> ! Error
+    left = try remaining(deadline)
+
+    match self.directory.call(Directory.Msg.Route(origin), wait_ms(left))
+      Result.Ok(Directory.Reply.Routed(pool)) -> pool
+      Result.Ok(Directory.Reply.Stopped) -> fail Error.Stopped
+      Result.Err(CallError.Timeout) -> fail Error.Timeout
+      Result.Err(CallError.ProcessDown) -> fail Error.Stopped
+    end
+  end
+end
+
+priv fn body_bytes(body: Binary | String) -> Binary
+  match body
+    bytes: Binary -> bytes
+    text: String -> text.to_binary()
+  end
+end
+
+# Fails with `Error.InvalidConfig` for a field that no client can run
+# with.
+priv fn check_config(config: Config) ! Error
+  if config.pool_size < 1
+    fail Error.InvalidConfig("pool_size must be at least 1")
+  end
+
+  if config.max_body_bytes < 0
+    fail Error.InvalidConfig("max_body_bytes must not be negative")
+  end
+
+  if config.max_header_bytes < 1
+    fail Error.InvalidConfig("max_header_bytes must be at least 1")
+  end
+
+  if config.connect_timeout.zero?()
+    fail Error.InvalidConfig("connect_timeout must be more than zero")
+  end
+
+  if config.pool_timeout.zero?()
+    fail Error.InvalidConfig("pool_timeout must be more than zero")
+  end
+
+  if config.timeout.zero?()
+    fail Error.InvalidConfig("timeout must be more than zero")
+  end
+end
+
+# Maps a checkout that failed. A wait that ended because the request
+# has no time left is `Error.Timeout`, not `Error.PoolTimeout`. The
+# pool stops only when the client stops, so a pool that is down is
+# `Error.Stopped`.
+priv fn checkout_error(e: PoolError, deadline: Instant) -> Error
+  match e
+    PoolError.Timeout -> past?(deadline) ? Error.Timeout : Error.PoolTimeout
+    _ -> Error.Stopped
+  end
+end
+
+priv fn failure_error(failure: Failure) -> Error
+  match failure
+    Failure.Final(error) -> error
+    Failure.Unanswered(error) -> error
+  end
+end
+
+# Says whether a server can get the request two times with the same
+# effect as one time.
+priv fn idempotent?(method: Method) -> Bool
+  match method
+    Method.Delete -> true
+    Method.Get -> true
+    Method.Head -> true
+    Method.Options -> true
+    Method.Put -> true
+    Method.Query -> true
+    Method.Trace -> true
+    _ -> false
+  end
+end
+
+priv fn uri_error_message(error: URIError, url: String) -> String
+  match error
+    URIError.InvalidPercentEncoding(part) ->
+      "invalid percent encoding '#{part}' in URL: #{url}"
+
+    URIError.InvalidURI(part) ->
+      "invalid URI component '#{part}' in URL: #{url}"
+
+    URIError.InvalidUTF8 ->
+      "URL is not valid UTF-8: " <> url
+  end
+end
+
+# Returns `wait` in milliseconds for a `call`, and never less than
+# one.
+priv fn wait_ms(wait: Duration) -> Int
+  ms = wait.to_milliseconds()
+  ms < 1 ? 1 : ms
+end

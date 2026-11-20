@@ -1,0 +1,102 @@
+alias Pooler.Config as PoolConfig
+alias Pooler.Pool
+alias Process.Step
+alias Process.StopReason
+
+# The directory's message contract, public only because
+# `Client.directory` names it. `Route` asks for the pool of an origin.
+# `Stop` asks the directory to stop every pool and exit.
+@doc false
+enum Directory.Msg
+  Route(Origin)
+  Stop
+end
+
+# The directory's reply contract, public only because
+# `Client.directory` names it. `Routed` answers a route. `Stopped`
+# answers a stop.
+@doc false
+enum Directory.Reply
+  Routed(Pool<Slot>)
+  Stopped
+end
+
+# The process behind a `Client` handle. Never part of the public
+# surface. `Client.start` spawns it and the `Ref` is the only line in.
+#
+# It holds one pool for each origin that a request has named, and it
+# starts the pool on the first request to that origin. A pool lends
+# slots, not connections, so a new pool is ready at once and opens no
+# socket.
+priv struct Directory: Process<Config, Directory.Msg, Directory.Reply>
+  config: Config
+  pools: Map<String, Pool<Slot>> = [:]
+
+  fn start(config: Config) -> Self ! StopReason
+    Directory{config: config}
+  end
+
+  fn handle(self, msg: Directory.Msg, from: Option<ReplyTo<Directory.Reply>>)
+    -> Step<Self>
+
+    match msg
+      Directory.Msg.Route(origin) -> Step.Continue(self.route(origin, from))
+      Directory.Msg.Stop -> self.stop(from)
+    end
+  end
+
+  # Starts the pool of an origin. Each slot starts empty, and the
+  # pool closes the connection of a slot that it destroys.
+  priv fn open_pool(self) -> Pool<Slot>
+    pool_config = PoolConfig{
+      create: fn () -> Result<Slot, String> Result.Ok(Slot{}) end,
+      destroy: Option.Some(fn (slot: Slot) -> () close_slot(slot) end),
+      size: self.config.pool_size,
+    }
+
+    # `Client.start` checked `pool_size`, the one field that a pool can
+    # reject.
+    match Pool.start(pool_config)
+      Result.Ok(pool) -> pool
+      Result.Err(_) -> Kernel.panic("scout: the pool rejected its config")
+    end
+  end
+
+  # Answers with the pool of `origin`, and starts the pool on the
+  # first request to that origin.
+  priv fn route(self, origin: Origin, from: Option<ReplyTo<Directory.Reply>>)
+    -> Self
+
+    key = origin.key()
+
+    pool =
+      match self.pools.get(key)
+        Option.Some(known) ->
+          known
+
+        Option.None ->
+          started = self.open_pool()
+          self.pools = self.pools.put(key, started)
+          started
+      end
+
+    _ = ReplyTo.reply(from, Directory.Reply.Routed(pool))
+    self
+  end
+
+  # Stops every pool, which closes each idle connection, then
+  # acknowledges and exits. A connection that a request holds stays
+  # with that request.
+  priv fn stop(self, from: Option<ReplyTo<Directory.Reply>>) -> Step<Self>
+    for entry in self.pools
+      (_, pool) = entry
+
+      match pool.stop()
+        _ -> ()
+      end
+    end
+
+    _ = ReplyTo.reply(from, Directory.Reply.Stopped)
+    Step.Done(StopReason.Normal)
+  end
+end

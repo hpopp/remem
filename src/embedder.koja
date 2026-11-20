@@ -1,6 +1,7 @@
 alias HTTP.Headers
 alias JSON.Value as JSONValue
 alias OpenTelemetry.Propagation
+alias Scout.Client
 alias Trace.Attribute
 
 @doc """
@@ -8,12 +9,16 @@ Client for a TEI-protocol embedding server (nomic-embed-text,
 768 dimensions). Vectors come back as pgvector text literals
 (`[0.1,0.2,...]`), ready to bind as `$n::vector` parameters.
 
+Requests go through `client`, which keeps connections to the server
+open and puts a time limit on each request.
+
 Each request runs in a `Client` span under the calling process's
 context and carries the span as a `traceparent` header. A call outside
 a sampled trace, such as the backfill, records nothing. Best-effort
 embedding failures are logged as warnings.
 """
 struct Embedder
+  client: Client
   url: String
 
   # TEI rejects batches above its default `max-client-batch-size`.
@@ -77,15 +82,23 @@ struct Embedder
       .set("Content-Type", "application/json")
       .set(Propagation.HEADER, Propagation.header(Trace.current()))
 
-    response = HTTP.post(self.url <> "/embed", JSON.encode(payload), headers)
+    response = self.client.post(
+      self.url <> "/embed",
+      JSON.encode(payload),
+      headers,
+    )
       rescue e -> fail Error.Embedding(e.message())
 
     if response.status.code != 200
+      detail = response.text() rescue _ -> "(body is not valid UTF-8)"
       fail Error.Embedding("embedding server returned #{response.status.code}: " <>
-        response.body)
+        detail)
     end
 
-    decoded = JSON.decode(response.body)
+    text = response.text()
+      rescue _ -> fail Error.Embedding("malformed response: body is not valid UTF-8")
+
+    decoded = JSON.decode(text)
       rescue e -> fail Error.Embedding("malformed response: " <> e)
 
     vectors = try vector_literals(decoded)

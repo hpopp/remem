@@ -1,4 +1,3 @@
-alias HTTP.Headers
 alias HTTP.Response
 alias HTTP.Status
 alias JSON.Value as JSONValue
@@ -30,13 +29,7 @@ struct RPC
   Build the empty 202 response that answers a notification.
   """
   fn accepted -> Response
-    headers = Headers.new().set("Content-Length", "0")
-    Response{
-      body: "",
-      headers: headers,
-      status: Status.new(202, "Accepted"),
-      version: "HTTP/1.1",
-    }
+    Response.new(Status.new(202), "")
   end
 
   @doc """
@@ -48,17 +41,9 @@ struct RPC
   end
 
   priv fn http_json(body: JSONValue) -> Response
-    text = JSON.encode(body)
-    headers =
-      Headers.new()
-      .set("Content-Type", "application/json")
-      .set("Content-Length", "#{text.byte_length()}")
-    Response{
-      body: text,
-      headers: headers,
-      status: Status.ok(),
-      version: "HTTP/1.1",
-    }
+    response = Response.new(Status.ok(), JSON.encode(body))
+    response.headers = response.headers.set("Content-Type", "application/json")
+    response
   end
 end
 

@@ -36,11 +36,8 @@ struct Routes
         if exempt or authorized?(c, api_key)
           c
         else
-          Render.failure(
-            c,
-            Status.new(401, "Unauthorized"),
-            "missing or invalid API key",
-          ).halt()
+          Render.failure(c, Status.unauthorized(), "missing or invalid API key")
+            .halt()
         end
       end
 

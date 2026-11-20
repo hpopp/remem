@@ -9,8 +9,7 @@ struct JsonUtil
   Parse a `POST /entities` body. `name` and `type` are required
   non-empty strings, `observations` an optional array of strings.
   """
-  fn parse_entity(body: String) -> (String, String, List<String>) ! Error
-    root = try decode(body)
+  fn parse_entity(root: JSONValue) -> (String, String, List<String>) ! Error
     name = try required_string(root, "name")
     kind = try required_string(root, "type")
 
@@ -30,9 +29,7 @@ struct JsonUtil
   Parse an observations body. `observations` is a required,
   non-empty array of strings.
   """
-  fn parse_observations(body: String) -> List<String> ! Error
-    root = try decode(body)
-
+  fn parse_observations(root: JSONValue) -> List<String> ! Error
     observations =
       match field(root, "observations")
         Option.None -> fail Error.Validation("observations is required")
@@ -53,8 +50,7 @@ struct JsonUtil
   Parse an event body. `content` is a required non-empty string and
   `occurred_at` an optional RFC 3339 timestamp.
   """
-  fn parse_event(body: String) -> (String, Option<DateTime>) ! Error
-    root = try decode(body)
+  fn parse_event(root: JSONValue) -> (String, Option<DateTime>) ! Error
     content = try required_string(root, "content")
     occurred_at = try JsonUtil.occurred_at(root)
     (content, occurred_at)
@@ -85,8 +81,7 @@ struct JsonUtil
   Parse a relation body. `from`, `to`, and `type` are required
   non-empty strings.
   """
-  fn parse_relation(body: String) -> (String, String, String) ! Error
-    root = try decode(body)
+  fn parse_relation(root: JSONValue) -> (String, String, String) ! Error
     from = try required_string(root, "from")
     to = try required_string(root, "to")
     kind = try required_string(root, "type")
@@ -167,18 +162,14 @@ struct JsonUtil
   Read a request body's optional `confirm` flag. An absent or
   non-bool flag reads as `false`.
   """
-  fn parse_confirm(body: String) -> Bool
-    match JSON.decode(body)
-      Result.Err(_) -> false
-      Result.Ok(root) -> get_bool(root, "confirm").or(false)
-    end
+  fn parse_confirm(root: JSONValue) -> Bool
+    get_bool(root, "confirm").or(false)
   end
 
   @doc """
   Parse a body with one required non-empty string field.
   """
-  fn parse_string_field(body: String, key: String) -> String ! Error
-    root = try decode(body)
+  fn parse_string_field(root: JSONValue, key: String) -> String ! Error
     try required_string(root, key)
   end
 
@@ -247,11 +238,6 @@ struct JsonUtil
       Option.Some(value) -> string_list(value)
       Option.None -> Option.None
     end
-  end
-
-  priv fn decode(body: String) -> JSONValue ! Error
-    JSON.decode(body)
-      rescue e -> fail Error.Validation("malformed JSON body: " <> e)
   end
 
   priv fn field(root: JSONValue, key: String) -> Option<JSONValue>

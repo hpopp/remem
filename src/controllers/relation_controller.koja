@@ -25,7 +25,8 @@ struct RelationController
   end
 
   priv fn do_create(self, c: Conn) -> Conn ! Error
-    (from, to, kind) = try JsonUtil.parse_relation(c.body)
+    root = try Params.body(c)
+    (from, to, kind) = try JsonUtil.parse_relation(root)
 
     relation = try Database.with_connection(
       self.pool,
@@ -35,7 +36,8 @@ struct RelationController
   end
 
   priv fn do_delete(self, c: Conn) -> Conn ! Error
-    (from, to, kind) = try JsonUtil.parse_relation(c.body)
+    root = try Params.body(c)
+    (from, to, kind) = try JsonUtil.parse_relation(root)
 
     deleted = try Database.with_connection(
       self.pool,

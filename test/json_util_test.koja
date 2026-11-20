@@ -1,9 +1,11 @@
 struct JsonUtilTest
   test "parse_entity reads name, type, and observations"
-    body = "{\"name\": \"Koja\", \"type\": \"language\", " <>
-      "\"observations\": [\"compiled\", \"friendly\"]}"
+    root: JSON.Value = [
+      "name": "Koja", "type": "language",
+      "observations": ["compiled", "friendly"]
+    ]
 
-    (name, kind, observations) = JsonUtil.parse_entity(body)
+    (name, kind, observations) = JsonUtil.parse_entity(root)
       rescue e -> fail "expected Ok, got: #{e.message()}"
 
     assert name == "Koja"
@@ -13,7 +15,7 @@ struct JsonUtilTest
 
   test "parse_entity defaults observations to empty"
     (_, _, observations) = JsonUtil.parse_entity(
-      "{\"name\": \"Koja\", \"type\": \"language\"}",
+      ["name": "Koja", "type": "language"],
     )
       rescue e -> fail "expected Ok, got: #{e.message()}"
 
@@ -21,7 +23,7 @@ struct JsonUtilTest
   end
 
   test "parse_entity rejects a missing name"
-    match JsonUtil.parse_entity("{\"type\": \"language\"}")
+    match JsonUtil.parse_entity(["type": "language"])
       Result.Err(Error.Validation(_)) -> ()
       Result.Err(e) -> fail "wrong error: #{e.message()}"
       Result.Ok(_) -> fail "expected an error"
@@ -29,17 +31,9 @@ struct JsonUtilTest
   end
 
   test "parse_entity rejects non-string observations"
-    body = "{\"name\": \"x\", \"type\": \"y\", \"observations\": [1, 2]}"
+    root: JSON.Value = ["name": "x", "type": "y", "observations": [1, 2]]
 
-    match JsonUtil.parse_entity(body)
-      Result.Err(Error.Validation(_)) -> ()
-      Result.Err(e) -> fail "wrong error: #{e.message()}"
-      Result.Ok(_) -> fail "expected an error"
-    end
-  end
-
-  test "parse_entity rejects malformed JSON"
-    match JsonUtil.parse_entity("{nope")
+    match JsonUtil.parse_entity(root)
       Result.Err(Error.Validation(_)) -> ()
       Result.Err(e) -> fail "wrong error: #{e.message()}"
       Result.Ok(_) -> fail "expected an error"
@@ -47,7 +41,7 @@ struct JsonUtilTest
   end
 
   test "parse_observations requires a non-empty array"
-    match JsonUtil.parse_observations("{\"observations\": []}")
+    match JsonUtil.parse_observations(["observations": []])
       Result.Err(Error.Validation(_)) -> ()
       Result.Err(e) -> fail "wrong error: #{e.message()}"
       Result.Ok(_) -> fail "expected an error"
@@ -56,7 +50,7 @@ struct JsonUtilTest
 
   test "parse_relation reads from, to, and type"
     (from, to, kind) = JsonUtil.parse_relation(
-      "{\"from\": \"a\", \"to\": \"b\", \"type\": \"knows\"}",
+      ["from": "a", "to": "b", "type": "knows"],
     )
       rescue e -> fail "expected Ok, got: #{e.message()}"
 

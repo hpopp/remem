@@ -1,0 +1,129 @@
+alias HTTP.Method
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+alias IO.Reader.Options as ReaderOptions
+alias Net.IPAddress
+alias Net.Socket.Address as SocketAddress
+alias Net.TCPListener
+alias Net.TCPSocket
+alias Test.require
+
+priv enum JournalMsg
+  # Keep one note.
+  Note(String)
+  # Reply with every note, oldest first.
+  Notes
+end
+
+# Keeps the notes that the `Config` hooks of a test send, so the test
+# can read what the worker reported.
+priv struct Journal: Process<(), JournalMsg, List<String>>
+  notes: List<String> = []
+
+  fn start(config: ()) -> Self ! Process.StopReason
+    Journal{}
+  end
+
+  fn handle(self, msg: JournalMsg, from: Option<ReplyTo<List<String>>>)
+    -> Process.Step<Self>
+
+    match msg
+      JournalMsg.Note(note) ->
+        self.notes = self.notes.append(note)
+        Process.Step.Continue(self)
+
+      JournalMsg.Notes ->
+        ReplyTo.reply(from, self.notes)
+        Process.Step.Continue(self)
+    end
+  end
+end
+
+# Closes the client and the listener of a test.
+priv fn close_connection(listener: TCPListener, client: TCPSocket)
+  match client.close()
+    _ -> ()
+  end
+
+  match listener.close()
+    _ -> ()
+  end
+end
+
+# A handler that answers with the request body, and with the request
+# path in `X-Path`.
+priv fn echo(request: Request) -> Response
+  response = Response.new(Status.ok(), request.body)
+  response.headers = response.headers.set("X-Path", request.uri.path)
+  response
+end
+
+# Fails unless the worker closed the connection.
+priv fn expect_closed(client: TCPSocket) ! Test.Failure
+  match client.read(1, ReaderOptions{timeout: patience()})
+    Result.Ok(chunk) ->
+      assert chunk.byte_size() == 0, "the worker sent bytes after its response"
+    Result.Err(error) -> fail "the worker did not close: #{error}"
+  end
+end
+
+# Binds a loopback listener on `port`, connects a client, and starts
+# a worker with `config` on the accepted socket.
+priv fn open_connection(port: Int, config: Config)
+  -> (TCPListener, TCPSocket) ! Test.Failure
+
+  addr = SocketAddress{ip: IPAddress.LOOPBACK, port: port}
+  listener = try require(TCPListener.bind_addr(addr))
+  client = try require(TCPSocket.connect_addr(addr, patience()))
+  accepted = try require(listener.accept(patience()))
+  _ = spawn Worker.start(Worker{client: accepted, config: config})
+  (listener, client)
+end
+
+# A limit long enough that only a broken test reaches it.
+priv fn patience -> Option<Duration>
+  Option.Some(Duration.new(5, Duration.Unit.Seconds))
+end
+
+# Reads one response to a `method` request from the client. `buffered`
+# holds the bytes that an earlier read took past its response. Returns
+# the response and the bytes after it.
+priv fn read_response(client: TCPSocket, method: Method, buffered: Binary)
+  -> (Response, Binary) ! Test.Failure
+
+  body: Binary = <<>>
+  parser = Response.Parser.new(method).feed(buffered)
+  response: Option<Response> = Option.None
+
+  loop
+    (parser, event) = try require(parser.next())
+
+    match event
+      Option.Some(Response.Parser.Event.Response(received)) ->
+        response = Option.Some(received)
+
+      Option.Some(Response.Parser.Event.Data(piece)) ->
+        body = body <> piece
+
+      Option.Some(Response.Parser.Event.End) ->
+        break
+
+      Option.None ->
+        chunk = try require(
+          client.read(8192, ReaderOptions{timeout: patience()}),
+        )
+
+        if chunk.byte_size() == 0
+          fail "the worker closed inside its response"
+        end
+
+        parser = parser.feed(chunk)
+    end
+  end
+
+  # The parser returns `End` only after a `Response`.
+  received = response.unwrap()
+  received.body = body
+  (received, parser.rest())
+end

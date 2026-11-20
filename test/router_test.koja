@@ -1,10 +1,12 @@
 alias HTTP.Headers
 alias HTTP.Method
 alias HTTP.Request
+alias HTTP.Response
 alias Pooler.Config as PoolConfig
 alias Pooler.Pool
 alias Postgres.Config as DbConfig
 alias Postgres.Connection
+alias Scout.Client
 
 @doc """
 Route table tests. The auth, rejection, and health tests run against
@@ -21,8 +23,10 @@ struct RouterTest
 
     response = router.dispatch(request(Method.Post, "/entities", ""))
 
+    text = try body_text(response)
+
     assert response.status.code == 401, "a missing key should answer 401"
-    assert response.body.contains?("missing or invalid API key"), "401 body should name the API key error"
+    assert text.contains?("missing or invalid API key"), "401 body should name the API key error"
 
     wrong = Headers.new().set("Authorization", "Bearer wrong-key")
     response = router.dispatch(
@@ -43,8 +47,10 @@ struct RouterTest
       request_with_headers(Method.Get, "/.env", "", bearer()),
     )
 
+    text = try body_text(response)
+
     assert response.status.code == 404
-    assert response.body.contains?("no such route"), "404 body should say no such route"
+    assert text.contains?("no such route"), "404 body should say no such route"
   end
 
   test "405 lists the allowed methods in the error shape"
@@ -58,9 +64,11 @@ struct RouterTest
       request_with_headers(Method.Put, "/entities", "{}", bearer()),
     )
 
+    text = try body_text(response)
+
     assert response.status.code == 405
     assert response.headers.get("Allow") == Option.Some("GET, POST")
-    assert response.body.contains?("PUT is not supported"), "405 body should name the method"
+    assert text.contains?("PUT is not supported"), "405 body should name the method"
   end
 
   test "400 answers in the error shape for a malformed path"
@@ -71,11 +79,13 @@ struct RouterTest
     )
 
     response = router.dispatch(
-      request_with_headers(Method.Get, "/entities/%zz", "", bearer()),
+      request_with_headers(Method.Get, "/entities/%ff", "", bearer()),
     )
 
+    text = try body_text(response)
+
     assert response.status.code == 400
-    assert response.body.contains?("malformed encoding"), "400 body should name the encoding error"
+    assert text.contains?("malformed encoding"), "400 body should name the encoding error"
   end
 
   test "GET /mcp answers 405 and points at POST"
@@ -89,8 +99,10 @@ struct RouterTest
       request_with_headers(Method.Get, "/mcp", "", bearer()),
     )
 
+    text = try body_text(response)
+
     assert response.status.code == 405
-    assert response.body.contains?("POST JSON-RPC messages to /mcp"), "GET /mcp should point clients at POST"
+    assert text.contains?("POST JSON-RPC messages to /mcp"), "GET /mcp should point clients at POST"
   end
 
   test "GET /health stays exempt from auth and needs no database"
@@ -103,8 +115,10 @@ struct RouterTest
     # No Authorization header at all.
     response = router.dispatch(request(Method.Get, "/health", ""))
 
+    text = try body_text(response)
+
     assert response.status.code == 200
-    assert response.body.contains?("ok"), "health body should report ok"
+    assert text.contains?("ok"), "health body should report ok"
   end
 
   test "DELETE /events/:id rejects a non-integer id before pool checkout"
@@ -118,8 +132,10 @@ struct RouterTest
       request_with_headers(Method.Delete, "/events/abc", "", bearer()),
     )
 
+    text = try body_text(response)
+
     assert response.status.code == 400
-    assert response.body.contains?("id must be an integer"), "400 body should name the id error"
+    assert text.contains?("id must be an integer"), "400 body should name the id error"
   end
 
   test "POST /entities/:name/events rejects malformed occurred_at before pool checkout"
@@ -134,8 +150,61 @@ struct RouterTest
       request_with_headers(Method.Post, "/entities/x/events", body, bearer()),
     )
 
+    text = try body_text(response)
+
     assert response.status.code == 400
-    assert response.body.contains?("occurred_at must be RFC 3339"), "400 body should name the occurred_at error"
+    assert text.contains?("occurred_at must be RFC 3339"), "400 body should name the occurred_at error"
+  end
+
+  test "a body that is not JSON answers 400 before pool checkout"
+    router = Routes.build(
+      broken_pool(),
+      test_embedder(),
+      Option.Some("test-key"),
+    )
+
+    response = router.dispatch(
+      request_with_headers(Method.Post, "/entities", "{nope", bearer()),
+    )
+
+    text = try body_text(response)
+
+    assert response.status.code == 400
+    assert text.contains?("malformed JSON body"), "400 body should name the JSON error"
+  end
+
+  test "a body that is not UTF-8 answers 400 before pool checkout"
+    router = Routes.build(
+      broken_pool(),
+      test_embedder(),
+      Option.Some("test-key"),
+    )
+
+    upload = request_with_headers(Method.Post, "/entities", "", bearer())
+    upload.body = <<255, 0, 254>>
+    response = router.dispatch(upload)
+
+    text = try body_text(response)
+
+    assert response.status.code == 400
+    assert text.contains?("request body is not valid UTF-8"), "400 body should name the UTF-8 error"
+  end
+
+  test "POST /mcp answers a JSON-RPC parse error before pool checkout"
+    router = Routes.build(
+      broken_pool(),
+      test_embedder(),
+      Option.Some("test-key"),
+    )
+
+    response = router.dispatch(
+      request_with_headers(Method.Post, "/mcp", "{nope", bearer()),
+    )
+
+    text = try body_text(response)
+
+    assert response.status.code == 200
+    assert text.contains?("-32700"), "the reply should carry the parse error code"
   end
 
   test "search log prune deletes at most the sweep bound"
@@ -182,12 +251,23 @@ struct RouterTest
   ) -> Request
 
     Request{
-      body: body,
+      body: body.to_binary(),
       headers: headers,
       method: method,
-      path: path,
-      version: "HTTP/1.1",
+      uri: URI{
+        fragment: Option.None,
+        host: Option.None,
+        path: path,
+        port: Option.None,
+        query: Option.None,
+        scheme: Option.None,
+        userinfo: Option.None,
+      },
     }
+  end
+
+  priv fn body_text(response: Response) -> String ! Test.Failure
+    response.text() rescue _ -> fail "response body is not UTF-8"
   end
 
   priv fn bearer -> Headers
@@ -211,7 +291,7 @@ struct RouterTest
   end
 
   priv fn test_embedder -> Embedder
-    Embedder{url: "http://127.0.0.1:1"}
+    Embedder{client: Client.start().unwrap(), url: "http://127.0.0.1:1"}
   end
 
   priv fn connect -> Connection ! Test.Failure

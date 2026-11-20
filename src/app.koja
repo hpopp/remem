@@ -1,19 +1,24 @@
+alias HTTP.Headers
 alias Net.TCPServer
 alias Net.TCPServer.Config as TCPServerConfig
 alias Net.TCPServer.Event as TCPEvent
 alias OpenTelemetry.Config as ExporterConfig
+alias OpenTelemetry.Export
+alias OpenTelemetry.Export.Error as ExportError
 alias OpenTelemetry.Exporter
 alias Process.Lifecycle
 alias Process.Step
 alias Process.StopReason
 alias Ranger.Config as RangerConfig
 alias Ranger.Worker
+alias Scout.Client
 
 @doc """
 The remem entry process. `start` loads config from the environment,
 configures logging for this process and every process spawned below
-it, brings the database up through `Database`, starts the trace
-exporter, builds the route table once, spawns the search log sweeper
+it, brings the database up through `Database`, starts the one HTTP
+client that the embedder and the trace exporter share, starts the
+trace exporter, builds the route table once, spawns the search log sweeper
 and the embedding backfill, and spawns a `Net.TCPServer` acceptor that
 delivers connected sockets as `TCPEvent.Connected` messages. Each
 connection is handed to a one-shot `Ranger.Worker`, so requests are
@@ -46,16 +51,20 @@ struct App: Process<List<String>, TCPEvent, String>
     settings = Config.load()
     Log.configure(Logging.config(settings))
     pool = try Database.start(settings.database)
+    client = try start_client()
 
     exporter = Exporter.start(
       ExporterConfig{
-        endpoint: settings.tracing.endpoint,
+        exporter: settings.tracing.endpoint.map(endpoint -> trace_exporter(
+          client,
+          endpoint,
+        )),
         service_name: settings.tracing.service_name,
         service_version: Option.Some(App.VERSION),
       },
     )
 
-    embedder = Embedder{url: settings.embedding_url}
+    embedder = Embedder{client: client, url: settings.embedding_url}
     router = Routes.build(pool, embedder, settings.api_key)
 
     _cleaner = spawn Cleaner.start(
@@ -111,6 +120,43 @@ struct App: Process<List<String>, TCPEvent, String>
       Lifecycle.Shutdown ->
         Log.info("Received SIGTERM, shutting down.")
         Step.Done(StopReason.Shutdown)
+    end
+  end
+
+  # One export request through `client`. A closure cannot spell an
+  # error channel, so the closure in `trace_exporter` calls this.
+  priv fn export(client: Client, url: String, payload: String) ! ExportError
+    headers = Headers.new().set("Content-Type", "application/json")
+
+    response = client.post(url, payload, headers)
+      rescue e -> fail ExportError.Transport(e.message())
+
+    if not response.status.ok?()
+      fail ExportError.Rejected(response.status.code)
+    end
+  end
+
+  # The HTTP client that the embedder and the trace exporter share.
+  priv fn start_client -> Client ! StopReason
+    match Client.start()
+      Result.Ok(client) ->
+        client
+
+      Result.Err(e) ->
+        Log.error("The HTTP client did not start. #{e.message()}")
+        fail StopReason.Shutdown
+    end
+  end
+
+  # An exporter that POSTs each batch of spans to the collector at
+  # `endpoint` through `client`.
+  priv fn trace_exporter(client: Client, endpoint: String)
+    -> fn (String) -> Result<(), ExportError>
+
+    url = Export.traces_url(endpoint)
+
+    fn (payload: String) -> Result<(), ExportError>
+      export(client, url, payload)
     end
   end
 

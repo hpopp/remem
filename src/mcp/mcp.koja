@@ -38,22 +38,13 @@ struct MCP
   const MAX_SEARCH_LIMIT: Int = 100
 
   @doc """
-  Handle one JSON-RPC message. Notifications get 202 with no body.
+  Handle one decoded JSON-RPC message. Notifications get 202 with no
+  body.
   A `tools/call` runs in its own span under the calling process's
   context and logs through the calling process's `Log` configuration.
   """
-  fn handle(body: String, conn: Connection, embedder: Embedder)
+  fn handle(root: JSONValue, conn: Connection, embedder: Embedder)
     -> (Response, Connection)
-
-    root =
-      match JSON.decode(body)
-        Result.Ok(value) -> value
-        Result.Err(_) ->
-          return (
-            RPC.error(JSONValue.Null, -32700, "malformed JSON-RPC message"),
-            conn
-          )
-      end
 
     method = JsonUtil.get_string(root, "method").or("")
 
@@ -70,6 +61,14 @@ struct MCP
       "tools/call" -> call_tool(root, id, conn, embedder)
       _ -> (RPC.error(id, -32601, "no such method #{method}"), conn)
     end
+  end
+
+  @doc """
+  Build the JSON-RPC parse error that answers a body that is not
+  JSON. The caller decodes the body, so `handle` never sees one.
+  """
+  fn malformed -> Response
+    RPC.error(JSONValue.Null, -32700, "malformed JSON-RPC message")
   end
 
   # Names the tool in the log and the trace, then dispatches it. The

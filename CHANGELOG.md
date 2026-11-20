@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A request body can use chunked transfer encoding. Before, remem
+  did not read a chunked body.
+- Access log lines and the server span carry a `url.query` attribute
+  when the request has a query. `url.path` and the span name stay
+  the path alone.
+
+### Changed
+
+- A request that takes longer than 30 seconds to arrive answers 408,
+  and the connection closes. Before, remem waited with no limit.
+- A connection with no request in progress closes after 60 seconds.
+  Before, it stayed open with no limit.
+- A request head larger than 16 KiB answers 431. Before, the answer
+  was 413.
+- A request with an unknown method answers 501. Before, the answer
+  was 400.
+- An HTTP/1.1 request with no `Host` header answers 400.
+- The `error` field of a 413 response is `Content Too Large`, the
+  current name of the status. Before, it was `Payload Too Large`.
+- A request body that is not valid UTF-8 answers 400 with the
+  message `request body is not valid UTF-8`. Before, the message was
+  `malformed request`.
+- A request target with percent-encoding that is not valid, such as
+  `/%zz`, answers 400 with the message `malformed request`, and the
+  connection closes. Before, the message was
+  `malformed encoding in path or query`.
+- `POST /mcp` with a body that is not JSON answers the JSON-RPC
+  parse error without a database connection. Before, it answered 503
+  while the database was down.
+- The response to a `HEAD` request has no body.
+- remem keeps its connections to the embedding server and to the
+  trace collector open between requests. Before, each request opened
+  a new connection.
+- A request to the embedding server or to the trace collector fails
+  after 30 seconds. Before, it waited with no limit.
+
 ## [0.7.2] - 2026-11-10
 
 ### Changed

@@ -1,0 +1,183 @@
+alias HTTP.Request
+alias IO.Reader.Options as ReaderOptions
+alias IO.Writer.Options as WriterOptions
+alias Net.IPAddress
+alias Net.Socket.Address as SocketAddress
+alias Net.TCPListener
+alias Net.TCPSocket
+alias Net.TLSConfig
+alias Test.require
+
+# One answer of the test server. The server reads one request, waits
+# for `delay_ms`, and writes `bytes`.
+priv struct Answer
+  bytes: Binary
+  delay_ms: Int = 0
+end
+
+# An answer with a 200 status and `body`, on a connection that stays
+# open.
+priv fn answer(body: String) -> Answer
+  head = "HTTP/1.1 200 OK\r\nContent-Length: #{body.byte_length()}\r\n\r\n"
+  Answer{bytes: (head <> body).to_binary()}
+end
+
+# An answer with a 200 status and `body` that asks the client to
+# close the connection.
+priv fn closing_answer(body: String) -> Answer
+  head = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: #{body.byte_length()}\r\n\r\n"
+  Answer{bytes: (head <> body).to_binary()}
+end
+
+# Waits for the server to finish its script, closes the listener, and
+# returns the requests that the server read.
+priv fn finish_server(
+  listener: TCPListener,
+  server: Ref<(), Result<List<Request>, String>>,
+) -> List<Request> ! Test.Failure
+
+  outcome = server.call((), 10000)
+
+  match listener.close()
+    _ -> ()
+  end
+
+  match outcome
+    Result.Ok(Result.Ok(requests)) -> requests
+    Result.Ok(Result.Err(reason)) -> fail "server: #{reason}"
+    Result.Err(_) -> fail "the server did not finish its script"
+  end
+end
+
+# A limit long enough that only a broken test reaches it.
+priv fn patience -> Option<Duration>
+  Option.Some(Duration.new(5, Duration.Unit.Seconds))
+end
+
+# Waits for `ms` milliseconds.
+priv fn pause(ms: Int)
+  receive
+    event: Process.Lifecycle ->
+      ()
+  after ms
+    ()
+  end
+end
+
+# Reads one request from `socket`. Returns the request and the parser,
+# which holds the bytes of a request that follows.
+priv fn read_request(socket: TCPSocket, parser: Request.Parser)
+  -> (Request, Request.Parser) ! String
+
+  body: Binary = <<>>
+  request: Option<Request> = Option.None
+
+  loop
+    (parser, event) = parser.next()
+      rescue e -> fail "server parse: " <> e.message()
+
+    match event
+      Option.Some(Request.Parser.Event.Request(head)) ->
+        request = Option.Some(head)
+
+      Option.Some(Request.Parser.Event.Data(piece)) ->
+        body = body <> piece
+
+      Option.Some(Request.Parser.Event.End) ->
+        whole = request.unwrap()
+        whole.body = body
+        return (whole, parser)
+
+      Option.None ->
+        chunk = socket.read(4096, ReaderOptions{timeout: patience()})
+          rescue _ -> fail "server read failed"
+
+        if chunk.byte_size() == 0
+          fail "the client closed before its request was complete"
+        end
+
+        parser = parser.feed(chunk)
+    end
+  end
+end
+
+# Serves `script`, which has one list of answers for each connection
+# that the server accepts, in order. The server closes a connection
+# after the last answer of its list. With `tls`, each connection
+# starts with a TLS handshake.
+#
+# A client that opens fewer connections than the script has makes the
+# server fail on its accept. A client that opens more gets no answer
+# on the extra connection.
+priv fn serve(
+  listener: TCPListener,
+  script: List<List<Answer>>,
+  tls: Option<TLSConfig>,
+) -> List<Request> ! String
+
+  seen: List<Request> = []
+
+  for answers in script
+    plain = listener.accept(patience())
+      rescue e -> fail "accept: " <> e.message()
+
+    socket =
+      match tls
+        Option.Some(config) ->
+          plain.accept_tls(config, patience())
+            rescue _ -> fail "the TLS handshake failed"
+        Option.None -> plain
+      end
+
+    parser = Request.Parser.new()
+
+    for item in answers
+      (request, parser) = try read_request(socket, parser)
+      seen = seen.append(request)
+      pause(item.delay_ms)
+
+      # A client that stopped waiting has closed, so this write can
+      # fail.
+      match socket.write_all(item.bytes, WriterOptions{})
+        _ -> ()
+      end
+    end
+
+    match socket.close()
+      _ -> ()
+    end
+  end
+
+  seen
+end
+
+# Binds a loopback listener on `port` and serves `script` from a new
+# process.
+priv fn start_server(port: Int, script: List<List<Answer>>)
+  -> (TCPListener, Ref<(), Result<List<Request>, String>>) ! Test.Failure
+
+  addr = SocketAddress{ip: IPAddress.LOOPBACK, port: port}
+  listener = try require(TCPListener.bind_addr(addr))
+
+  server = Task.async(fn () -> Result<List<Request>, String>
+    serve(listener, script, Option.None)
+  end)
+  (listener, server)
+end
+
+# Binds a loopback listener on `port` and serves `script` over TLS
+# from a new process.
+priv fn start_tls_server(
+  port: Int,
+  script: List<List<Answer>>,
+  config: TLSConfig,
+) -> (TCPListener, Ref<(), Result<List<Request>, String>>) ! Test.Failure
+
+  addr = SocketAddress{ip: IPAddress.LOOPBACK, port: port}
+  listener = try require(TCPListener.bind_addr(addr))
+
+  server = Task.async(fn () -> Result<List<Request>, String>
+    serve(listener, script, Option.Some(config))
+  end)
+  (listener, server)
+end

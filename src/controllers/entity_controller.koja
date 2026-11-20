@@ -100,9 +100,10 @@ struct EntityController
   end
 
   priv fn do_create(self, c: Conn) -> Conn ! Error
-    (name, kind, observations) = try JsonUtil.parse_entity(c.body)
+    root = try Params.body(c)
+    (name, kind, observations) = try JsonUtil.parse_entity(root)
     observations = JsonUtil.distinct(observations)
-    confirm = JsonUtil.parse_confirm(c.body)
+    confirm = JsonUtil.parse_confirm(root)
     embedder = self.embedder
 
     entity = try Database.with_connection(
@@ -114,7 +115,8 @@ struct EntityController
 
   priv fn do_rename(self, c: Conn) -> Conn ! Error
     name = Params.name(c)
-    new_name = try JsonUtil.parse_string_field(c.body, "name")
+    root = try Params.body(c)
+    new_name = try JsonUtil.parse_string_field(root, "name")
 
     entity = try Database.with_connection(
       self.pool,
@@ -125,7 +127,8 @@ struct EntityController
 
   priv fn do_merge(self, c: Conn) -> Conn ! Error
     source = Params.name(c)
-    into = try JsonUtil.parse_string_field(c.body, "into")
+    root = try Params.body(c)
+    into = try JsonUtil.parse_string_field(root, "into")
 
     entity = try Database.with_connection(
       self.pool,
@@ -150,7 +153,8 @@ struct EntityController
 
   priv fn do_add_observations(self, c: Conn) -> Conn ! Error
     name = Params.name(c)
-    observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
+    root = try Params.body(c)
+    observations = JsonUtil.distinct(try JsonUtil.parse_observations(root))
     embedder = self.embedder
 
     entity = try Database.with_connection(
@@ -162,7 +166,8 @@ struct EntityController
 
   priv fn do_remove_observations(self, c: Conn) -> Conn ! Error
     name = Params.name(c)
-    observations = JsonUtil.distinct(try JsonUtil.parse_observations(c.body))
+    root = try Params.body(c)
+    observations = JsonUtil.distinct(try JsonUtil.parse_observations(root))
 
     entity = try Database.with_connection(
       self.pool,

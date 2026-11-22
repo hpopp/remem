@@ -21,10 +21,11 @@ struct Event: JSON.Encoding
   """
   fn to_json(self) -> JSON.Value
     [
-      "id": self.id.to_json(), "content": self.content.to_json(),
-      "occurred_at": self.occurred_at.to_string().to_json(),
-      "created_at": self.created_at.to_string().to_json(),
-      "updated_at": self.updated_at.to_string().to_json()
+      "id": self.id.to_json(),
+      "content": self.content,
+      "occurred_at": self.occurred_at.to_string(),
+      "created_at": self.created_at.to_string(),
+      "updated_at": self.updated_at.to_string()
     ]
   end
 end
@@ -89,7 +90,8 @@ struct EventStore
       RETURNING id, content, occurred_at::text,
         created_at::text, updated_at::text
       """, [
-        Value.int(entity_id), Value.string(content),
+        Value.int(entity_id),
+        Value.string(content),
         Value.opt_string(occurred_at.map(at -> at.to_string()))
       ])
 
@@ -174,7 +176,7 @@ struct EventStore
     for i in Range{start: 0, stop: ids.length() - 1}
       id = ids.get(i).or(0)
       vector = vectors.get(i).or("")
-      pair: JSONValue = ["id": id.to_json(), "embedding": vector.to_json()]
+      pair: JSONValue = ["id": id.to_json(), "embedding": vector]
       pairs = pairs.append(pair)
     end
 
@@ -183,7 +185,7 @@ struct EventStore
       SET embedding = p.embedding::vector
       FROM jsonb_to_recordset($1::jsonb) AS p(id bigint, embedding text)
       WHERE v.id = p.id
-      """, [Value.string(JSON.encode(JSONValue.Array(pairs)))])
+      """, [Value.string(JSON.encode(pairs))])
 
     (conn, Database.Query.affected_rows(outcome))
   end

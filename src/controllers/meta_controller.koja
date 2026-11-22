@@ -19,7 +19,7 @@ struct MetaController
   Report that the server is up.
   """
   fn health(self, c: Conn) -> Conn
-    body: JSONValue = ["status": "ok".to_json()]
+    body: JSONValue = ["status": "ok"]
     Render.json(c, Status.ok(), body)
   end
 
@@ -56,8 +56,8 @@ struct MetaController
     )
 
     body: JSONValue = [
-      "entities": JSONValue.Array(entities.map(e -> e.to_json())),
-      "relations": JSONValue.Array(relations.map(r -> r.to_json()))
+      "entities": entities.to_json(),
+      "relations": relations.to_json()
     ]
     Render.json(c, Status.ok(), body)
   end

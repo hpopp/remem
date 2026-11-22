@@ -12,17 +12,20 @@ struct RPC
   Build a JSON-RPC success response for `id`.
   """
   fn result(id: JSONValue, result: JSONValue) -> Response
-    body: JSONValue = ["jsonrpc": "2.0".to_json(), "id": id, "result": result]
-    http_json(body)
+    http_json(["jsonrpc": "2.0", "id": id, "result": result])
   end
 
   @doc """
   Build a JSON-RPC error response with `code` and `message`.
   """
   fn error(id: JSONValue, code: Int, message: String) -> Response
-    detail: JSONValue = ["code": code.to_json(), "message": message.to_json()]
-    body: JSONValue = ["jsonrpc": "2.0".to_json(), "id": id, "error": detail]
-    http_json(body)
+    http_json(
+      [
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": ["code": code.to_json(), "message": message]
+      ],
+    )
   end
 
   @doc """
@@ -30,14 +33,6 @@ struct RPC
   """
   fn accepted -> Response
     Response.new(Status.new(202), "")
-  end
-
-  @doc """
-  Build an empty JSON object.
-  """
-  fn empty_object -> JSONValue
-    entries: List<(String, JSONValue)> = List.new()
-    JSONValue.Object(entries)
   end
 
   priv fn http_json(body: JSONValue) -> Response
@@ -107,10 +102,6 @@ struct ToolResult
   end
 
   priv fn tool_result(text: String, is_error: Bool) -> JSONValue
-    item: JSONValue = ["type": "text".to_json(), "text": text.to_json()]
-    result: JSONValue = [
-      "content": JSONValue.Array([item]), "isError": is_error.to_json()
-    ]
-    result
+    ["content": [["type": "text", "text": text]], "isError": is_error]
   end
 end

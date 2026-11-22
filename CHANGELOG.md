@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Requires Koja 0.21.0.
 - A request that takes longer than 30 seconds to arrive answers 408,
   and the connection closes. Before, remem waited with no limit.
 - A connection with no request in progress closes after 60 seconds.
@@ -38,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `POST /mcp` with a body that is not JSON answers the JSON-RPC
   parse error without a database connection. Before, it answered 503
   while the database was down.
+- An MCP tool reads an integer argument with a fraction of zero,
+  such as a `limit` of `5.0`, as that integer. Before, a tool used
+  the default for such a `limit` or `offset`, and `remove_event`
+  answered `id is required` for such an `id`.
 - The response to a `HEAD` request has no body.
 - remem keeps its connections to the embedding server and to the
   trace collector open between requests. Before, each request opened

@@ -49,7 +49,8 @@ struct Migrator
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       )
-      """}, Migration{version: 4, sql: """
+      """},
+    Migration{version: 4, sql: """
       CREATE TABLE observations (
         id bigserial PRIMARY KEY,
         entity_id bigint NOT NULL
@@ -59,7 +60,8 @@ struct Migrator
         updated_at timestamptz NOT NULL DEFAULT now(),
         UNIQUE (entity_id, content)
       )
-      """}, Migration{version: 5, sql: """
+      """},
+    Migration{version: 5, sql: """
       CREATE TABLE relations (
         id bigserial PRIMARY KEY,
         from_entity_id bigint NOT NULL
@@ -71,14 +73,17 @@ struct Migrator
         updated_at timestamptz NOT NULL DEFAULT now(),
         UNIQUE (from_entity_id, to_entity_id, type)
       )
-      """}, Migration{version: 6, sql: """
+      """},
+    Migration{version: 6, sql: """
       CREATE INDEX entities_embedding_idx ON entities
       USING hnsw (embedding vector_cosine_ops)
       WITH (m = 16, ef_construction = 64)
-      """}, Migration{version: 7, sql: """
+      """},
+    Migration{version: 7, sql: """
       CREATE INDEX entities_name_trgm_idx ON entities
       USING gin (name gin_trgm_ops)
-      """}, Migration{version: 8, sql: """
+      """},
+    Migration{version: 8, sql: """
       CREATE TABLE search_log (
         id bigserial PRIMARY KEY,
         query text NOT NULL,
@@ -88,11 +93,13 @@ struct Migrator
     Migration{
       version: 9,
       sql: "ALTER TABLE observations ADD COLUMN embedding vector(768)",
-    }, Migration{version: 10, sql: """
+    },
+    Migration{version: 10, sql: """
       CREATE INDEX observations_embedding_idx ON observations
       USING hnsw (embedding vector_cosine_ops)
       WITH (m = 16, ef_construction = 64)
-      """}, Migration{version: 11, sql: "DROP INDEX entities_embedding_idx"},
+      """},
+    Migration{version: 11, sql: "DROP INDEX entities_embedding_idx"},
     Migration{version: 12, sql: "ALTER TABLE entities DROP COLUMN embedding"},
     Migration{version: 13, sql: """
       CREATE TABLE events (
@@ -105,10 +112,12 @@ struct Migrator
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       )
-      """}, Migration{version: 14, sql: """
+      """},
+    Migration{version: 14, sql: """
       CREATE INDEX events_entity_occurred_idx ON events
       (entity_id, occurred_at DESC)
-      """}, Migration{version: 15, sql: """
+      """},
+    Migration{version: 15, sql: """
       CREATE INDEX events_embedding_idx ON events
       USING hnsw (embedding vector_cosine_ops)
       WITH (m = 16, ef_construction = 64)

@@ -19,14 +19,14 @@ struct EventTools
   ) -> (Response, Connection)
 
     name =
-      match JsonUtil.get_string(arguments, "name")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "name")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "name is required"), conn)
       end
 
     content =
-      match JsonUtil.get_string(arguments, "content")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "content")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "content is required"), conn)
       end
 
@@ -56,8 +56,8 @@ struct EventTools
     -> (Response, Connection)
 
     name =
-      match JsonUtil.get_string(arguments, "name")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "name")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "name is required"), conn)
       end
 
@@ -68,7 +68,8 @@ struct EventTools
         ToolResult.err(
           id,
           "limit must be between 1 and #{MCP.MAX_SEARCH_LIMIT}",
-        ), conn
+        ),
+        conn
       )
     end
 
@@ -96,7 +97,8 @@ struct EventTools
         removed,
         "deleted event #{event_id}",
         "no event with id #{event_id}",
-      ), conn
+      ),
+      conn
     )
   end
 
@@ -106,10 +108,6 @@ struct EventTools
   ) -> JSONValue ! Error
 
     events = try EntityStore.required(found, name)
-    payload: JSONValue = [
-      "name": name.to_json(),
-      "events": JSONValue.Array(events.map(e -> e.to_json()))
-    ]
-    payload
+    ["name": name, "events": events.to_json()]
   end
 end

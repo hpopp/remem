@@ -30,13 +30,6 @@ They would move into `ranger` if it grew a blocking `serve`.
 struct App: Process<List<String>, TCPEvent, String>
   server: RangerConfig
 
-  @doc """
-  The remem version. The startup banner, the logs, the traces, and
-  the MCP server info report it. Keep it the same as `version` in
-  `koja.toml`.
-  """
-  const VERSION: String = "0.7.2"
-
   # How often the search log sweeper ticks.
   priv const SWEEP_INTERVAL_MS: Int = 3600000
   # How often the embedding backfill looks for unembedded observations
@@ -60,7 +53,7 @@ struct App: Process<List<String>, TCPEvent, String>
           endpoint,
         )),
         service_name: settings.tracing.service_name,
-        service_version: Option.Some(App.VERSION),
+        service_version: Option.Some(PACKAGE_VERSION),
       },
     )
 
@@ -166,7 +159,7 @@ struct App: Process<List<String>, TCPEvent, String>
     auth = settings.api_key.some?() ? "required" : "off"
     tracing = settings.tracing.endpoint.or("off")
     Log.info(
-      "remem #{App.VERSION} listening on http://127.0.0.1:#{settings.port}.",
+      "remem #{PACKAGE_VERSION} listening on http://127.0.0.1:#{settings.port}.",
     )
     Log.info("Embedding server: #{settings.embedding_url}.")
     Log.info(

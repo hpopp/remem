@@ -74,9 +74,7 @@ struct Embedder
   end
 
   priv fn post(self, texts: List<String>) -> List<String> ! Error
-    payload: JSONValue = [
-      "inputs": JSONValue.Array(texts.map(t -> t.to_json()))
-    ]
+    payload: JSONValue = ["inputs": texts.to_json()]
     headers =
       Headers.new()
       .set("Content-Type", "application/json")
@@ -114,7 +112,7 @@ struct Embedder
   priv fn vector_literals(decoded: JSONValue) -> List<String> ! Error
     outer =
       match decoded
-        JSONValue.Array(items) -> items
+        array: List<JSONValue> -> array
         _ -> fail Error.Embedding("expected a JSON array response")
       end
 
@@ -123,7 +121,7 @@ struct Embedder
     for item in outer
       numbers =
         match item
-          JSONValue.Array(inner) -> inner
+          inner: List<JSONValue> -> inner
           _ -> fail Error.Embedding("expected a nested array of floats")
         end
 
@@ -139,8 +137,7 @@ struct Embedder
     for number in numbers
       part =
         match number
-          JSONValue.Float(f) -> "#{f}"
-          JSONValue.Int(i) -> "#{i}"
+          component: JSON.Number -> component.text
           _ -> fail Error.Embedding("expected numeric vector components")
         end
 

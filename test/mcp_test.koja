@@ -8,10 +8,20 @@ struct MCPTest
     encoded = JSON.encode(ToolCatalog.tools())
 
     names = [
-      "search_memory", "get_entity", "create_entity", "rename_entity",
-      "merge_entities", "list_entities", "delete_entity", "add_observations",
-      "remove_observations", "add_event", "recent_events", "remove_event",
-      "create_relation", "delete_relation"
+      "search_memory",
+      "get_entity",
+      "create_entity",
+      "rename_entity",
+      "merge_entities",
+      "list_entities",
+      "delete_entity",
+      "add_observations",
+      "remove_observations",
+      "add_event",
+      "recent_events",
+      "remove_event",
+      "create_relation",
+      "delete_relation"
     ]
 
     for name in names
@@ -51,7 +61,10 @@ struct MCPTest
     encoded = JSON.encode(event.to_json())
 
     keys = [
-      "\"id\"", "\"content\"", "\"occurred_at\"", "\"created_at\"",
+      "\"id\"",
+      "\"content\"",
+      "\"occurred_at\"",
+      "\"created_at\"",
       "\"updated_at\""
     ]
 
@@ -115,12 +128,12 @@ struct MCPTest
 
   priv fn create_call(id: Int, name: String, confirm: Bool) -> JSON.Value
     [
-      "jsonrpc": "2.0", "id": id.to_json(), "method": "tools/call",
+      "jsonrpc": "2.0",
+      "id": id.to_json(),
+      "method": "tools/call",
       "params": [
         "name": "create_entity",
-        "arguments": [
-          "name": name.to_json(), "type": "test", "confirm": confirm.to_json()
-        ]
+        "arguments": ["name": name, "type": "test", "confirm": confirm]
       ]
     ]
   end

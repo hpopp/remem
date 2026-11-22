@@ -1,7 +1,8 @@
 struct JsonUtilTest
   test "parse_entity reads name, type, and observations"
     root: JSON.Value = [
-      "name": "Koja", "type": "language",
+      "name": "Koja",
+      "type": "language",
       "observations": ["compiled", "friendly"]
     ]
 

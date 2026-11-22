@@ -14,7 +14,7 @@ struct JsonUtil
     kind = try required_string(root, "type")
 
     observations =
-      match field(root, "observations")
+      match JSON.get(root, "observations")
         Option.None -> List.new()
         Option.Some(value) ->
           try string_list(value).or_err(
@@ -31,7 +31,7 @@ struct JsonUtil
   """
   fn parse_observations(root: JSONValue) -> List<String> ! Error
     observations =
-      match field(root, "observations")
+      match JSON.get(root, "observations")
         Option.None -> fail Error.Validation("observations is required")
         Option.Some(value) ->
           try string_list(value).or_err(
@@ -63,11 +63,11 @@ struct JsonUtil
   function.
   """
   fn occurred_at(root: JSONValue) -> Option<DateTime> ! Error
-    match field(root, "occurred_at")
+    match JSON.get(root, "occurred_at")
       Option.None ->
         Option.None
 
-      Option.Some(JSONValue.String(text)) ->
+      Option.Some(text: String) ->
         parsed = DateTime.parse(text)
           rescue _ -> fail Error.Validation("occurred_at must be RFC 3339, got '#{text}'")
         Option.Some(parsed.to_utc())
@@ -89,14 +89,6 @@ struct JsonUtil
   end
 
   @doc """
-  Encode a list of strings as JSON array text, for binding as a
-  `$n::jsonb` parameter.
-  """
-  fn encode_string_list(items: List<String>) -> String
-    JSON.encode(JSONValue.Array(items.map(item -> item.to_json())))
-  end
-
-  @doc """
   Decode the `json_agg` observation column from a store query into
   observation values. The column is built by the store's own SQL, so
   malformed text, a non-array root, or an unreadable timestamp is a
@@ -108,7 +100,7 @@ struct JsonUtil
 
     items =
       match decoded
-        JSONValue.Array(list) -> list
+        array: List<JSONValue> -> array
         _ -> fail Error.Database("observations column is not an array")
       end
 
@@ -141,8 +133,8 @@ struct JsonUtil
       end
 
     match decoded
-      JSONValue.Array(items) ->
-        for item in items
+      array: List<JSONValue> ->
+        for item in array
           hits = hits.append(
             ObservationHit{
               content: field_string(item, "content"),
@@ -163,7 +155,10 @@ struct JsonUtil
   non-bool flag reads as `false`.
   """
   fn parse_confirm(root: JSONValue) -> Bool
-    get_bool(root, "confirm").or(false)
+    match JSON.get(root, "confirm")
+      Option.Some(flag: Bool) -> flag
+      _ -> false
+    end
   end
 
   @doc """
@@ -189,42 +184,13 @@ struct JsonUtil
   end
 
   @doc """
-  Return an object field's value, or `None` for a missing key or a
-  non-object root.
-  """
-  fn get(root: JSONValue, key: String) -> Option<JSONValue>
-    field(root, key)
-  end
-
-  @doc """
-  Return an object field's string value, or `None` when the field is
-  missing or not a string.
-  """
-  fn get_string(root: JSONValue, key: String) -> Option<String>
-    match field(root, key)
-      Option.Some(JSONValue.String(text)) -> Option.Some(text)
-      _ -> Option.None
-    end
-  end
-
-  @doc """
   Return an object field's integer value, or `None` when the field
-  is missing or not an integer.
+  is missing or not an integer. A number with a fraction of zero,
+  such as `5.0`, is an integer.
   """
   fn get_int(root: JSONValue, key: String) -> Option<Int>
-    match field(root, key)
-      Option.Some(JSONValue.Int(number)) -> Option.Some(number)
-      _ -> Option.None
-    end
-  end
-
-  @doc """
-  Return an object field's boolean value, or `None` when the field
-  is missing or not a boolean.
-  """
-  fn get_bool(root: JSONValue, key: String) -> Option<Bool>
-    match field(root, key)
-      Option.Some(JSONValue.Bool(flag)) -> Option.Some(flag)
+    match JSON.get(root, key)
+      Option.Some(number: JSON.Number) -> number.to_int().ok()
       _ -> Option.None
     end
   end
@@ -234,48 +200,26 @@ struct JsonUtil
   when the field is missing or not an all-string array.
   """
   fn get_string_list(root: JSONValue, key: String) -> Option<List<String>>
-    match field(root, key)
-      Option.Some(value) -> string_list(value)
-      Option.None -> Option.None
-    end
-  end
-
-  priv fn field(root: JSONValue, key: String) -> Option<JSONValue>
-    match root
-      JSONValue.Object(entries) ->
-        for entry in entries
-          (entry_key, entry_value) = entry
-
-          if entry_key == key
-            return Option.Some(entry_value)
-          end
-        end
-
-        Option.None
-
-      _ ->
-        Option.None
-    end
+    JSON.get(root, key).then(value -> string_list(value))
   end
 
   priv fn field_string(root: JSONValue, key: String) -> String
-    match field(root, key)
-      Option.Some(JSONValue.String(text)) -> text
+    match JSON.get(root, key)
+      Option.Some(text: String) -> text
       _ -> ""
     end
   end
 
   priv fn field_float(root: JSONValue, key: String) -> Float
-    match field(root, key)
-      Option.Some(JSONValue.Float(f)) -> f
-      Option.Some(JSONValue.Int(i)) -> "#{i}".to_float() rescue _ -> 0.0
+    match JSON.get(root, key)
+      Option.Some(number: JSON.Number) -> number.to_float().or(0.0)
       _ -> 0.0
     end
   end
 
   priv fn required_string(root: JSONValue, key: String) -> String ! Error
-    match field(root, key)
-      Option.Some(JSONValue.String(text)) when not text.empty?() -> text
+    match JSON.get(root, key)
+      Option.Some(text: String) when not text.empty?() -> text
       Option.Some(_) ->
         fail Error.Validation("#{key} must be a non-empty string")
       Option.None -> fail Error.Validation("#{key} is required")
@@ -284,12 +228,12 @@ struct JsonUtil
 
   priv fn string_list(value: JSONValue) -> Option<List<String>>
     match value
-      JSONValue.Array(items) ->
+      array: List<JSONValue> ->
         strings: List<String> = List.new()
 
-        for item in items
+        for item in array
           match item
-            JSONValue.String(text) -> strings = strings.append(text)
+            text: String -> strings = strings.append(text)
             _ -> return Option.None
           end
         end

@@ -78,9 +78,7 @@ struct EntityController
       db -> EntityStore.summaries(db, limit, offset),
     )
 
-    body: JSONValue = [
-      "entities": JSONValue.Array(summaries.map(s -> s.to_json()))
-    ]
+    body: JSONValue = ["entities": summaries.to_json()]
     Render.json(c, Status.ok(), body)
   end
 
@@ -93,8 +91,8 @@ struct EntityController
 
     body: JSONValue = [
       "entity": entity.to_json(),
-      "relations": JSONValue.Array(relations.map(r -> r.to_json())),
-      "events": JSONValue.Array(events.map(e -> e.to_json()))
+      "relations": relations.to_json(),
+      "events": events.to_json()
     ]
     Render.json(c, Status.ok(), body)
   end

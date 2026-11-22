@@ -20,8 +20,8 @@ struct EntityTools
   ) -> (Response, Connection)
 
     query =
-      match JsonUtil.get_string(arguments, "query")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "query")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "query is required"), conn)
       end
 
@@ -32,7 +32,8 @@ struct EntityTools
         ToolResult.err(
           id,
           "limit must be between 1 and #{MCP.MAX_SEARCH_LIMIT}",
-        ), conn
+        ),
+        conn
       )
     end
 
@@ -64,8 +65,8 @@ struct EntityTools
     -> (Response, Connection)
 
     name =
-      match JsonUtil.get_string(arguments, "name")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "name")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "name is required"), conn)
       end
 
@@ -100,14 +101,14 @@ struct EntityTools
   ) -> (Response, Connection)
 
     name =
-      match JsonUtil.get_string(arguments, "name")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "name")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "name is required"), conn)
       end
 
     kind =
-      match JsonUtil.get_string(arguments, "type")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "type")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "type is required"), conn)
       end
 
@@ -115,7 +116,7 @@ struct EntityTools
       JsonUtil.get_string_list(arguments, "observations").or(List.new()),
     )
 
-    confirm = JsonUtil.get_bool(arguments, "confirm").or(false)
+    confirm = JsonUtil.parse_confirm(arguments)
 
     (conn, created) = EntityStore.create(
       conn,
@@ -143,14 +144,14 @@ struct EntityTools
     -> (Response, Connection)
 
     name =
-      match JsonUtil.get_string(arguments, "name")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "name")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "name is required"), conn)
       end
 
     new_name =
-      match JsonUtil.get_string(arguments, "new_name")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "new_name")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "new_name is required"), conn)
       end
 
@@ -165,14 +166,14 @@ struct EntityTools
     -> (Response, Connection)
 
     source =
-      match JsonUtil.get_string(arguments, "source")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "source")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "source is required"), conn)
       end
 
     into =
-      match JsonUtil.get_string(arguments, "into")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "into")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "into is required"), conn)
       end
 
@@ -194,7 +195,8 @@ struct EntityTools
         ToolResult.err(
           id,
           "limit must be between 1 and #{Params.MAX_PAGE_LIMIT}",
-        ), conn
+        ),
+        conn
       )
     end
 
@@ -213,8 +215,8 @@ struct EntityTools
     -> (Response, Connection)
 
     name =
-      match JsonUtil.get_string(arguments, "name")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "name")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> return (ToolResult.err(id, "name is required"), conn)
       end
 
@@ -226,7 +228,8 @@ struct EntityTools
         removed,
         "deleted #{name}",
         "no entity named #{name}",
-      ), conn
+      ),
+      conn
     )
   end
 
@@ -236,11 +239,7 @@ struct EntityTools
   ) -> JSONValue ! Error
 
     results = try found
-    payload: JSONValue = [
-      "query": query.to_json(),
-      "results": JSONValue.Array(results.map(r -> r.to_json()))
-    ]
-    payload
+    ["query": query, "results": results.to_json()]
   end
 
   priv fn entity_payload(
@@ -252,21 +251,17 @@ struct EntityTools
     # The entity was found a moment ago, so `None` means it vanished
     # mid-read. An empty list is the honest answer.
     recent = try events
-    payload: JSONValue = [
+    [
       "entity": entity.to_json(),
-      "relations": JSONValue.Array(relations.map(r -> r.to_json())),
-      "events": JSONValue.Array(recent.or(List.new()).map(e -> e.to_json()))
+      "relations": relations.to_json(),
+      "events": recent.or([]).to_json()
     ]
-    payload
   end
 
   priv fn list_payload(listed: Result<List<EntitySummary>, Error>)
     -> JSONValue ! Error
 
     summaries = try listed
-    payload: JSONValue = [
-      "entities": JSONValue.Array(summaries.map(s -> s.to_json()))
-    ]
-    payload
+    ["entities": summaries.to_json()]
   end
 end

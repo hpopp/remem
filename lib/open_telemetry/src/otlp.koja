@@ -6,20 +6,16 @@ OTLP/JSON encoding for the traces signal. The input is the stdlib
 `ExportTraceServiceRequest` body, ready to POST to `/v1/traces`.
 """
 struct OTLP
-  # The instrumentation scope this package reports under.
-  priv const SCOPE_NAME: String = "open_telemetry"
-  priv const SCOPE_VERSION: String = "0.2.0"
-
   @doc """
   Encode one attribute as an OTLP `AnyValue`. Integers travel as
   decimal strings, which is how OTLP/JSON carries 64-bit values.
   """
   fn attribute(attr: Trace.Attribute) -> Value
     match attr.value
-      b: Bool -> ["boolValue": b.to_json()]
+      b: Bool -> ["boolValue": b]
       f: Float -> ["doubleValue": f.to_json()]
       i: Int -> ["intValue": "#{i}"]
-      s: String -> ["stringValue": s.to_json()]
+      s: String -> ["stringValue": s]
     end
   end
 
@@ -30,10 +26,10 @@ struct OTLP
     items: List<Value> = List.new()
 
     for (key, value) in map
-      items = items.append(["key": key.to_json(), "value": attribute(value)])
+      items = items.append(["key": key, "value": attribute(value)])
     end
 
-    Value.Array(items)
+    items
   end
 
   @doc """
@@ -53,9 +49,9 @@ struct OTLP
   """
   fn span(record: Trace.SpanRecord) -> Value
     fields: List<(String, Value)> = [
-      ("traceId", Base.encode16(record.context.trace_id()).to_json()),
-      ("spanId", Base.encode16(record.context.span_id()).to_json()),
-      ("name", record.name.to_json()),
+      ("traceId", Base.encode16(record.context.trace_id())),
+      ("spanId", Base.encode16(record.context.span_id())),
+      ("name", record.name),
       ("kind", kind_code(record.kind).to_json()),
       ("startTimeUnixNano", nanos(record.started_at)),
       ("endTimeUnixNano", nanos(record.ended_at)),
@@ -73,7 +69,7 @@ struct OTLP
       Option.None -> ()
     end
 
-    Value.Object(fields)
+    JSON.Object{entries: fields}
   end
 
   @doc """
@@ -82,7 +78,7 @@ struct OTLP
   fn status(status: Trace.Status) -> Option<Value>
     match status
       Trace.Status.Error(message) ->
-        error: Value = ["code": 2, "message": message.to_json()]
+        error: Value = ["code": 2, "message": message]
         Option.Some(error)
 
       Trace.Status.Ok ->
@@ -102,22 +98,24 @@ struct OTLP
     spans: List<Trace.SpanRecord>,
   ) -> String
 
-    scope: Value = [
-      "name": OTLP.SCOPE_NAME.to_json(), "version": OTLP.SCOPE_VERSION.to_json()
-    ]
+    scope: Value = ["name": PACKAGE_NAME, "version": PACKAGE_VERSION]
+
     scope_spans: Value = [
-      "scope": scope, "spans": Value.Array(spans.map(record -> span(record)))
+      "scope": scope,
+      "spans": spans.map(record -> span(record)).to_json()
     ]
+
     resource_spans: Value = [
       "resource": ["attributes": attributes(resource)],
-      "scopeSpans": Value.Array([scope_spans])
+      "scopeSpans": [scope_spans]
     ]
-    request: Value = ["resourceSpans": Value.Array([resource_spans])]
+
+    request: Value = ["resourceSpans": [resource_spans]]
 
     JSON.encode(request)
   end
 
   priv fn nanos(at: Timestamp) -> Value
-    "#{at.since_epoch.to_nanoseconds()}".to_json()
+    "#{at.since_epoch.to_nanoseconds()}"
   end
 end

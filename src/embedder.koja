@@ -1,6 +1,7 @@
 alias HTTP.Headers
 alias JSON.Value as JSONValue
 alias OpenTelemetry.Propagation
+alias Scout.Client
 alias Trace.Attribute
 
 @doc """
@@ -8,12 +9,16 @@ Client for a TEI-protocol embedding server (nomic-embed-text,
 768 dimensions). Vectors come back as pgvector text literals
 (`[0.1,0.2,...]`), ready to bind as `$n::vector` parameters.
 
+Requests go through `client`, which keeps connections to the server
+open and puts a time limit on each request.
+
 Each request runs in a `Client` span under the calling process's
 context and carries the span as a `traceparent` header. A call outside
 a sampled trace, such as the backfill, records nothing. Best-effort
 embedding failures are logged as warnings.
 """
 struct Embedder
+  client: Client
   url: String
 
   # TEI rejects batches above its default `max-client-batch-size`.
@@ -69,23 +74,29 @@ struct Embedder
   end
 
   priv fn post(self, texts: List<String>) -> List<String> ! Error
-    payload: JSONValue = [
-      "inputs": JSONValue.Array(texts.map(t -> t.to_json()))
-    ]
+    payload: JSONValue = ["inputs": texts.to_json()]
     headers =
       Headers.new()
       .set("Content-Type", "application/json")
       .set(Propagation.HEADER, Propagation.header(Trace.current()))
 
-    response = HTTP.post(self.url <> "/embed", JSON.encode(payload), headers)
+    response = self.client.post(
+      self.url <> "/embed",
+      JSON.encode(payload),
+      headers,
+    )
       rescue e -> fail Error.Embedding(e.message())
 
     if response.status.code != 200
+      detail = response.text() rescue _ -> "(body is not valid UTF-8)"
       fail Error.Embedding("embedding server returned #{response.status.code}: " <>
-        response.body)
+        detail)
     end
 
-    decoded = JSON.decode(response.body)
+    text = response.text()
+      rescue _ -> fail Error.Embedding("malformed response: body is not valid UTF-8")
+
+    decoded = JSON.decode(text)
       rescue e -> fail Error.Embedding("malformed response: " <> e)
 
     vectors = try vector_literals(decoded)
@@ -101,7 +112,7 @@ struct Embedder
   priv fn vector_literals(decoded: JSONValue) -> List<String> ! Error
     outer =
       match decoded
-        JSONValue.Array(items) -> items
+        array: List<JSONValue> -> array
         _ -> fail Error.Embedding("expected a JSON array response")
       end
 
@@ -110,7 +121,7 @@ struct Embedder
     for item in outer
       numbers =
         match item
-          JSONValue.Array(inner) -> inner
+          inner: List<JSONValue> -> inner
           _ -> fail Error.Embedding("expected a nested array of floats")
         end
 
@@ -126,8 +137,7 @@ struct Embedder
     for number in numbers
       part =
         match number
-          JSONValue.Float(f) -> "#{f}"
-          JSONValue.Int(i) -> "#{i}"
+          component: JSON.Number -> component.text
           _ -> fail Error.Embedding("expected numeric vector components")
         end
 

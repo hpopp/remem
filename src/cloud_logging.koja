@@ -51,8 +51,9 @@ struct CloudLogging: Log.Formatter<String>
   """
   fn format_log(self, record: Record) -> String
     fields: List<(String, Value)> = [
-      ("severity", severity(record.level).to_json()),
-      ("message", record.message.to_json()), ("time", time(record).to_json())
+      ("severity", severity(record.level)),
+      ("message", record.message),
+      ("time", time(record))
     ]
 
     fields = fields.concat(self.trace_fields(record))
@@ -73,7 +74,7 @@ struct CloudLogging: Log.Formatter<String>
       fields = fields.append((key, attribute_json(value)))
     end
 
-    JSON.encode(Value.Object(fields))
+    JSON.encode(JSON.Object{entries: fields})
   end
 
   # The trace correlation fields, empty for a record nobody traced.
@@ -87,24 +88,20 @@ struct CloudLogging: Log.Formatter<String>
     [
       (
         CloudLogging.TRACE_FIELD,
-        "projects/#{self.project_id}/traces/#{trace_id}".to_json()
+        "projects/#{self.project_id}/traces/#{trace_id}"
       ),
-      (
-        CloudLogging.SPAN_FIELD,
-        Base.encode16(record.context.span_id()).to_json()
-      ), (CloudLogging.SAMPLED_FIELD, record.context.sampled?().to_json())
+      (CloudLogging.SPAN_FIELD, Base.encode16(record.context.span_id())),
+      (CloudLogging.SAMPLED_FIELD, record.context.sampled?())
     ]
   end
 
   priv fn error_fields(self) -> List<(String, Value)>
-    context: Value = [
-      "service": self.service_name.to_json(),
-      "version": self.service_version.to_json()
-    ]
-
     [
-      ("@type", CloudLogging.REPORTED_ERROR.to_json()),
-      ("serviceContext", context)
+      ("@type", CloudLogging.REPORTED_ERROR),
+      (
+        "serviceContext",
+        ["service": self.service_name, "version": self.service_version]
+      )
     ]
   end
 end
@@ -184,7 +181,7 @@ priv fn split_http(attributes: Map<String, LogAttribute>)
 
   request.empty?()
     ? (Option.None, rest)
-    : (Option.Some(Value.Object(request)), rest)
+    : (Option.Some(JSON.Object{entries: request}.to_json()), rest)
 end
 
 # Cloud Logging wants a latency as a protobuf `Duration` string,

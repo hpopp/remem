@@ -19,7 +19,7 @@ struct MetaController
   Report that the server is up.
   """
   fn health(self, c: Conn) -> Conn
-    body: JSONValue = ["status": "ok".to_json()]
+    body: JSONValue = ["status": "ok"]
     Render.json(c, Status.ok(), body)
   end
 
@@ -56,18 +56,25 @@ struct MetaController
     )
 
     body: JSONValue = [
-      "entities": JSONValue.Array(entities.map(e -> e.to_json())),
-      "relations": JSONValue.Array(relations.map(r -> r.to_json()))
+      "entities": entities.to_json(),
+      "relations": relations.to_json()
     ]
     Render.json(c, Status.ok(), body)
   end
 
+  # A body that is not JSON gets the JSON-RPC parse error, not the
+  # REST error shape, and takes no database connection.
   priv fn do_mcp(self, c: Conn) -> Conn ! Error
+    root =
+      match Params.body(c)
+        Result.Err(_) -> return Render.http(c, MCP.malformed())
+        Result.Ok(value) -> value
+      end
+
     embedder = self.embedder
-    body = c.body
     response = try Database.with_connection(
       self.pool,
-      db -> mcp_db(db, embedder, body),
+      db -> mcp_db(db, embedder, root),
     )
     Render.http(c, response)
   end
@@ -95,9 +102,9 @@ end
 
 # Runs one MCP message. `MCP.handle` renders JSON-RPC level errors
 # itself, so the outcome only fails when the pool does.
-priv fn mcp_db(db: Connection, embedder: Embedder, body: String)
+priv fn mcp_db(db: Connection, embedder: Embedder, root: JSONValue)
   -> (Connection, Result<Response, Error>)
 
-  (response, db) = MCP.handle(body, db, embedder)
+  (response, db) = MCP.handle(root, db, embedder)
   (db, Result.Ok(response))
 end

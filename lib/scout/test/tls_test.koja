@@ -1,0 +1,112 @@
+alias Crypto.Certificate
+alias Crypto.PrivateKey
+alias HTTP.Headers
+alias HTTP.Response
+alias Net.TLSConfig
+alias Net.TLSError
+alias Test.require
+
+# A self-signed test certificate for `localhost` and its key. `koja
+# test` runs from the package root, so the paths are stable.
+const TLS_TEST_CERT_PATH: String = "test/fixtures/localhost_cert.pem"
+const TLS_TEST_KEY_PATH: String = "test/fixtures/localhost_key.pem"
+
+# The connection goes back to the pool after the first request, and
+# another process borrows it for the second. So the TLS session moves
+# from the caller to the pool process and then to a third process.
+test "two requests from two processes use one TLS connection"
+  certificate = try test_certificate()
+  server_config = TLSConfig.server(certificate, try test_key())
+  script = [[answer("one"), answer("two")]]
+  (listener, server) = try start_tls_server(23320, script, server_config)
+  config = Config{tls: TLSConfig.client().with_ca(certificate)}
+  client = try require(Client.start(config))
+  first = client.get("https://localhost:23320/a")
+
+  other = Task.async(fn () -> Result<Response, Error>
+    client.post("https://localhost:23320/b", "", Headers.new())
+  end)
+
+  second = try require(Task.await(other))
+  seen = try finish_server(listener, server)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert (try require(second)).text() == Result.Ok("two")
+  assert seen.length() == 2
+  assert seen.get(0).unwrap().uri.host == Option.Some("localhost")
+end
+
+test "stop closes an idle TLS connection"
+  certificate = try test_certificate()
+  server_config = TLSConfig.server(certificate, try test_key())
+  (listener, server) = try start_tls_server(
+    23321,
+    [[answer("one")]],
+    server_config,
+  )
+  config = Config{tls: TLSConfig.client().with_ca(certificate)}
+  client = try require(Client.start(config))
+  result = client.get("https://localhost:23321/")
+  _ = try finish_server(listener, server)
+
+  # The pool process closes the session that the caller opened.
+  try require(client.stop())
+
+  assert (try require(result)).text() == Result.Ok("one")
+end
+
+test "a certificate that the client does not trust fails with a TLSError"
+  certificate = try test_certificate()
+  server_config = TLSConfig.server(certificate, try test_key())
+  (listener, server) = try start_tls_server(
+    23322,
+    [[answer("one")]],
+    server_config,
+  )
+  client = try require(Client.start())
+  result = client.get("https://localhost:23322/")
+
+  # The handshake fails on the server too, so its script does not
+  # finish.
+  _ = server.call((), 10000)
+
+  match listener.close()
+    _ -> ()
+  end
+
+  try require(client.stop())
+
+  match result
+    Result.Err(Error.Connection(cause)) ->
+      match cause
+        tls_error: TLSError ->
+          match tls_error
+            TLSError.VerificationFailed(_) -> ()
+            _ ->
+              fail "expected a verification failure, got '#{tls_error.message()}'"
+          end
+
+        _ ->
+          fail "expected a TLSError"
+      end
+
+    Result.Err(other) ->
+      fail "expected a TLSError, got '#{other.message()}'"
+
+    Result.Ok(_) ->
+      fail "expected a TLSError, got a response"
+  end
+end
+
+priv fn test_certificate -> Certificate ! Test.Failure
+  text = try require(File.read(TLS_TEST_CERT_PATH))
+
+  Certificate.parse(text) rescue e -> fail "parse cert fixture: #{e.message()}"
+end
+
+priv fn test_key -> PrivateKey ! Test.Failure
+  text = try require(File.read(TLS_TEST_KEY_PATH))
+
+  PrivateKey.parse(text) rescue e -> fail "parse key fixture: #{e.message()}"
+end

@@ -29,20 +29,10 @@ struct CloudLoggingTest
     }
   end
 
-  priv fn field(object: Value, key: String) -> Option<Value>
-    match object
-      Value.Object(entries) ->
-        for (name, value) in entries
-          if name == key
-            return Option.Some(value)
-          end
-        end
-
-        Option.None
-
-      _ ->
-        Option.None
-    end
+  # The expected side of a comparison with `JSON.get`. A literal
+  # argument becomes the matching JSON value.
+  priv fn some(value: Value) -> Option<Value>
+    Option.Some(value)
   end
 
   priv fn render(level: Level, attributes: Map<String, LogAttribute>)
@@ -54,56 +44,55 @@ struct CloudLoggingTest
   test "format_log writes the Cloud Logging special fields"
     object = try require(render(Level.Info, Map.new()))
 
-    assert field(object, "severity") == Option.Some(Value.String("INFO"))
-    assert field(object, "message") ==
-      Option.Some(Value.String("GET /entities 200 12ms"))
-    assert field(object, "time") ==
-      Option.Some(Value.String("2026-09-23T20:00:00.123456Z"))
-    assert field(object, "httpRequest") == Option.None
-    assert field(object, "@type") == Option.None
-    assert field(object, "serviceContext") == Option.None
+    assert JSON.get(object, "severity") == some("INFO")
+    assert JSON.get(object, "message") == some("GET /entities 200 12ms")
+    assert JSON.get(object, "time") == some("2026-09-23T20:00:00.123456Z")
+    assert JSON.get(object, "httpRequest") == Option.None
+    assert JSON.get(object, "@type") == Option.None
+    assert JSON.get(object, "serviceContext") == Option.None
   end
 
   test "format_log spells warn as WARNING"
     object = try require(render(Level.Warn, Map.new()))
 
-    assert field(object, "severity") == Option.Some(Value.String("WARNING"))
+    assert JSON.get(object, "severity") == some("WARNING")
   end
 
   test "format_log maps trace to DEBUG, the lowest Cloud Logging severity"
     object = try require(render(Level.Trace, Map.new()))
 
-    assert field(object, "severity") == Option.Some(Value.String("DEBUG"))
+    assert JSON.get(object, "severity") == some("DEBUG")
   end
 
   test "format_log places other attributes at the top level"
     attributes: Map<String, LogAttribute> = [
-      "mcp.tool": "search_memory", "n": 3
+      "mcp.tool": "search_memory",
+      "n": 3
     ]
     object = try require(render(Level.Info, attributes))
 
-    assert field(object, "mcp.tool") ==
-      Option.Some(Value.String("search_memory"))
-    assert field(object, "n") == Option.Some(Value.Int(3))
+    assert JSON.get(object, "mcp.tool") == some("search_memory")
+    assert JSON.get(object, "n") == some(3)
   end
 
   test "format_log folds the HTTP attributes into httpRequest"
     attributes: Map<String, LogAttribute> = [
-      "http.request.method": "GET", "url.path": "/entities",
-      "http.response.status_code": 200, "http.server.request.duration": 12_345
+      "http.request.method": "GET",
+      "url.path": "/entities",
+      "http.response.status_code": 200,
+      "http.server.request.duration": 12_345
     ]
     object = try require(render(Level.Info, attributes))
-    request = field(object, "httpRequest").or(Value.Null)
+    request = JSON.get(object, "httpRequest").or(JSON.NULL)
 
-    assert field(request, "requestMethod") == Option.Some(Value.String("GET"))
-    assert field(request, "requestUrl") ==
-      Option.Some(Value.String("/entities"))
-    assert field(request, "status") == Option.Some(Value.Int(200))
-    assert field(request, "latency") == Option.Some(Value.String("0.012345s"))
-    assert field(object, "http.request.method") == Option.None
-    assert field(object, "url.path") == Option.None
-    assert field(object, "http.response.status_code") == Option.None
-    assert field(object, "http.server.request.duration") == Option.None
+    assert JSON.get(request, "requestMethod") == some("GET")
+    assert JSON.get(request, "requestUrl") == some("/entities")
+    assert JSON.get(request, "status") == some(200)
+    assert JSON.get(request, "latency") == some("0.012345s")
+    assert JSON.get(object, "http.request.method") == Option.None
+    assert JSON.get(object, "url.path") == Option.None
+    assert JSON.get(object, "http.response.status_code") == Option.None
+    assert JSON.get(object, "http.server.request.duration") == Option.None
   end
 
   test "format_log writes a latency above one second"
@@ -111,28 +100,31 @@ struct CloudLoggingTest
       "http.server.request.duration": 2_500_000
     ]
     object = try require(render(Level.Info, attributes))
-    request = field(object, "httpRequest").or(Value.Null)
+    request = JSON.get(object, "httpRequest").or(JSON.NULL)
 
-    assert field(request, "latency") == Option.Some(Value.String("2.500000s"))
+    assert JSON.get(request, "latency") == some("2.500000s")
   end
 
   test "format_log marks an error for Error Reporting"
     object = try require(render(Level.Error, Map.new()))
-    context = field(object, "serviceContext").or(Value.Null)
+    context = JSON.get(object, "serviceContext").or(JSON.NULL)
 
-    assert field(object, "severity") == Option.Some(Value.String("ERROR"))
-    assert field(object, "@type") ==
-      Option.Some(Value.String("type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"))
-    assert field(context, "service") == Option.Some(Value.String("remem"))
-    assert field(context, "version") == Option.Some(Value.String("0.5.0"))
+    assert JSON.get(object, "severity") == some("ERROR")
+    assert JSON.get(object, "@type") ==
+      some(
+        "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent",
+      )
+    assert JSON.get(context, "service") == some("remem")
+    assert JSON.get(context, "version") == some("0.5.0")
   end
 
   test "format_log writes no trace fields for a record nobody traced"
     object = try require(render(Level.Info, Map.new()))
 
-    assert field(object, "logging.googleapis.com/trace") == Option.None
-    assert field(object, "logging.googleapis.com/spanId") == Option.None
-    assert field(object, "logging.googleapis.com/trace_sampled") == Option.None
+    assert JSON.get(object, "logging.googleapis.com/trace") == Option.None
+    assert JSON.get(object, "logging.googleapis.com/spanId") == Option.None
+    assert JSON.get(object, "logging.googleapis.com/trace_sampled") ==
+      Option.None
   end
 
   test "format_log links a record emitted under a span to its trace"
@@ -149,11 +141,10 @@ struct CloudLoggingTest
     trace_id = Base.encode16(context.trace_id())
     span_id = Base.encode16(context.span_id())
 
-    assert field(object, "logging.googleapis.com/trace") ==
-      Option.Some(Value.String("projects/example-project/traces/#{trace_id}"))
-    assert field(object, "logging.googleapis.com/spanId") ==
-      Option.Some(Value.String(span_id))
-    assert field(object, "logging.googleapis.com/trace_sampled") ==
-      Option.Some(Value.Bool(true))
+    assert JSON.get(object, "logging.googleapis.com/trace") ==
+      some("projects/example-project/traces/#{trace_id}")
+    assert JSON.get(object, "logging.googleapis.com/spanId") == some(span_id)
+    assert JSON.get(object, "logging.googleapis.com/trace_sampled") ==
+      some(true)
   end
 end

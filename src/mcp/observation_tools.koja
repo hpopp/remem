@@ -54,8 +54,8 @@ struct ObservationTools
 
   priv fn args(arguments: JSONValue) -> (String, List<String>) ! String
     name =
-      match JsonUtil.get_string(arguments, "name")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "name")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> fail "name is required"
       end
 

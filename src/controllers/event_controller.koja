@@ -43,13 +43,14 @@ struct EventController
       db -> recent_db(db, name, limit),
     )
 
-    body: JSONValue = ["events": JSONValue.Array(events.map(e -> e.to_json()))]
+    body: JSONValue = ["events": events.to_json()]
     Render.json(c, Status.ok(), body)
   end
 
   priv fn do_create(self, c: Conn) -> Conn ! Error
     name = Params.name(c)
-    (content, occurred_at) = try JsonUtil.parse_event(c.body)
+    root = try Params.body(c)
+    (content, occurred_at) = try JsonUtil.parse_event(root)
     embedder = self.embedder
 
     event = try Database.with_connection(

@@ -1,0 +1,335 @@
+alias HTTP.Headers
+alias HTTP.Method
+alias HTTP.Parser
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+alias HTTP.Version
+alias IO.Error as IOError
+alias IO.Reader.Options as ReaderOptions
+alias IO.Writer.Options as WriterOptions
+alias Net.Socket.Error as SocketError
+alias Net.TCPSocket
+alias Net.TLSError
+
+# An open connection to an origin. `idle_since` is the time its last
+# exchange ended, or the time it opened. Public only because `Slot`
+# carries it. Not for callers to construct or change.
+@doc false
+struct Connection
+  idle_since: Instant
+  socket: TCPSocket
+end
+
+# Why one exchange on a connection failed. `Unanswered` means the
+# connection failed before the first byte of a response, which is
+# what a connection that the server closed while it was idle does.
+# `Final` is every other failure.
+priv enum Failure
+  Final(Error)
+  Unanswered(Error)
+end
+
+# One place in a pool. It holds a connection that is open and idle,
+# or nothing. The process that borrows the slot opens the connection.
+# Public only because the pool of an origin names it. Not for callers
+# to construct or change.
+@doc false
+struct Slot
+  connection: Option<Connection> = Option.None
+end
+
+# Bytes asked for in one socket read.
+priv const READ_SIZE: Int = 8192
+
+# Says whether the response to a request with `method` has no body,
+# whatever its headers declare.
+priv fn bodiless?(method: Method, status: Status) -> Bool
+  code = status.code
+
+  method == Method.Head or (code >= 100 and code < 200) or code == 204
+    or code == 304 or (method == Method.Connect and status.ok?())
+end
+
+# Closes the connection that a slot holds.
+priv fn close_slot(slot: Slot)
+  match slot.connection
+    Option.Some(connection) -> discard(connection.socket)
+    Option.None -> ()
+  end
+end
+
+# Says whether the headers ask to close the connection after the
+# message.
+priv fn closes?(headers: Headers) -> Bool
+  for value in headers.get_all("Connection")
+    for token in value.split(",")
+      if token.trim().downcase() == "close"
+        return true
+      end
+    end
+  end
+
+  false
+end
+
+# Maps a connect that failed. A connect that timed out is
+# `Error.Timeout` when the request has no time left.
+priv fn connect_cause(e: SocketError, deadline: Instant) -> Error
+  if e == SocketError.TimedOut and past?(deadline)
+    return Error.Timeout
+  end
+
+  Error.Connection(e)
+end
+
+# Returns the time left for a connect or a handshake. `limit` is the
+# earlier of the connect limit and the request deadline.
+priv fn connect_wait(limit: Instant, deadline: Instant) -> Duration ! Error
+  match remaining(limit)
+    Result.Ok(left) ->
+      left
+
+    Result.Err(_) ->
+      if past?(deadline)
+        fail Error.Timeout
+      end
+
+      fail Error.Connection(SocketError.TimedOut)
+  end
+end
+
+# Closes a socket that its owner is done with. A failed close changes
+# nothing.
+priv fn discard(socket: TCPSocket)
+  match socket.close()
+    _ -> ()
+  end
+end
+
+# Returns `Unanswered` when no byte of a response has arrived.
+priv fn early_or_final(error: Error, received: Int) -> Failure
+  if received == 0
+    return Failure.Unanswered(error)
+  end
+
+  Failure.Final(error)
+end
+
+priv fn earlier(left: Instant, right: Instant) -> Instant
+  left.nanoseconds < right.nanoseconds ? left : right
+end
+
+# Sends `request` on `connection` and reads the response. Returns the
+# response and `true` when the connection can serve another request.
+#
+# The caller closes the connection after a failure.
+priv fn exchange(
+  connection: Connection,
+  request: Request,
+  config: Config,
+  deadline: Instant,
+) -> (Response, Bool) ! Failure
+
+  socket = connection.socket
+  wait = remaining(deadline) rescue e -> fail Failure.Final(e)
+
+  socket.write_all(
+    request.serialize(),
+    WriterOptions{timeout: Option.Some(wait)},
+  )
+    rescue e -> fail write_failure(e)
+
+  body: Binary = <<>>
+  closed = false
+  complete = false
+  parser = Response.Parser.new(
+    request.method,
+    Parser.Options{max_header_bytes: config.max_header_bytes},
+  )
+  received = 0
+  response: Option<Response> = Option.None
+
+  while not complete
+    (parser, event) = parser.next()
+      rescue e -> fail early_or_final(Error.Parse(e), received)
+
+    match event
+      # A response after an interim response replaces it.
+      Option.Some(Response.Parser.Event.Response(head)) ->
+        if too_large?(request.method, head, config.max_body_bytes)
+          fail Failure.Final(Error.BodyTooLarge)
+        end
+
+        response = Option.Some(head)
+
+      Option.Some(Response.Parser.Event.Data(piece)) ->
+        if body.byte_size() + piece.byte_size() > config.max_body_bytes
+          fail Failure.Final(Error.BodyTooLarge)
+        end
+
+        body = body <> piece
+
+      Option.Some(Response.Parser.Event.End) ->
+        complete = true
+
+      Option.None ->
+        wait = remaining(deadline) rescue e -> fail Failure.Final(e)
+
+        chunk = socket.read(
+          READ_SIZE,
+          ReaderOptions{timeout: Option.Some(wait)},
+        )
+          rescue e -> fail read_failure(e, received)
+
+        if chunk.byte_size() == 0
+          closed = true
+          parser = parser.finish()
+        else
+          received += chunk.byte_size()
+          parser = parser.feed(chunk)
+        end
+    end
+  end
+
+  # The parser returns `End` only after a `Response`.
+  head = response.unwrap()
+  head.body = body
+
+  reusable = not closed and parser.rest().byte_size() == 0
+    and head.version == Version.HTTP1_1 and head.status.code != 101
+    and not closes?(request.headers) and not closes?(head.headers)
+
+  (head, reusable)
+end
+
+# Says whether `connection` has been idle for `limit` or longer.
+priv fn expired?(connection: Connection, limit: Duration) -> Bool
+  connection.idle_since.elapsed().to_nanoseconds() >= limit.to_nanoseconds()
+end
+
+# Maps a TLS handshake that failed. A handshake that timed out is
+# `Error.Timeout` when the request has no time left.
+priv fn handshake_cause(e: IOError | TLSError, deadline: Instant) -> Error
+  match e
+    io_error: IOError ->
+      if io_error == IOError.TimedOut and past?(deadline)
+        return Error.Timeout
+      end
+
+      return Error.Connection(io_error)
+
+    tls_error: TLSError ->
+      return Error.Connection(tls_error)
+  end
+end
+
+# Connects to `origin`, turns `TCP_NODELAY` on, and starts TLS when
+# the origin asks for it. `Config.connect_timeout` bounds the connect
+# and the handshake together.
+priv fn open(origin: Origin, config: Config, deadline: Instant)
+  -> Connection ! Error
+
+  limit = earlier(Instant.now().plus(config.connect_timeout), deadline)
+  wait = try connect_wait(limit, deadline)
+
+  plain = TCPSocket.connect(origin.host, origin.port, Option.Some(wait))
+    rescue e -> fail connect_cause(e, deadline)
+
+  socket =
+    match plain.set_nodelay(true)
+      Result.Ok(ready) ->
+        ready
+
+      Result.Err(cause) ->
+        discard(plain)
+        fail Error.Connection(cause)
+    end
+
+  if not origin.secure?()
+    return Connection{idle_since: Instant.now(), socket: socket}
+  end
+
+  wait =
+    match connect_wait(limit, deadline)
+      Result.Ok(left) ->
+        left
+
+      Result.Err(error) ->
+        discard(socket)
+        fail error
+    end
+
+  # The client speaks only HTTP/1.1, so it offers only that.
+  tls = config.tls.with_alpn(["http/1.1"])
+
+  match socket.upgrade_tls(origin.host, tls, Option.Some(wait))
+    Result.Ok(secure) ->
+      Connection{idle_since: Instant.now(), socket: secure}
+
+    Result.Err(cause) ->
+      discard(socket)
+      fail handshake_cause(cause, deadline)
+  end
+end
+
+priv fn past?(deadline: Instant) -> Bool
+  Instant.now().nanoseconds >= deadline.nanoseconds
+end
+
+# Maps a read that failed. Every read waits for the time that the
+# request has left, so a read that timed out is `Error.Timeout`.
+priv fn read_failure(e: IOError | TLSError, received: Int) -> Failure
+  match e
+    io_error: IOError ->
+      if io_error == IOError.TimedOut
+        return Failure.Final(Error.Timeout)
+      end
+
+      return early_or_final(Error.Connection(io_error), received)
+
+    tls_error: TLSError ->
+      return early_or_final(Error.Connection(tls_error), received)
+  end
+end
+
+# Returns the time left before `deadline`. Fails with `Error.Timeout`
+# when the deadline has passed.
+priv fn remaining(deadline: Instant) -> Duration ! Error
+  now = Instant.now()
+
+  if now.nanoseconds >= deadline.nanoseconds
+    fail Error.Timeout
+  end
+
+  deadline.since(now)
+end
+
+# Says whether a response declares a body that is larger than
+# `limit`, so the client rejects the body before its bytes arrive.
+priv fn too_large?(method: Method, response: Response, limit: Int) -> Bool
+  if bodiless?(method, response.status)
+    return false
+  end
+
+  match response.headers.content_length()
+    Option.Some(length) -> length > limit
+    Option.None -> false
+  end
+end
+
+# Maps a write that failed. No byte of a response has arrived at that
+# point, so every failure but a timeout is `Unanswered`.
+priv fn write_failure(e: IOError | TLSError) -> Failure
+  match e
+    io_error: IOError ->
+      if io_error == IOError.TimedOut
+        return Failure.Final(Error.Timeout)
+      end
+
+      return Failure.Unanswered(Error.Connection(io_error))
+
+    tls_error: TLSError ->
+      return Failure.Unanswered(Error.Connection(tls_error))
+  end
+end

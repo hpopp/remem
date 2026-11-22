@@ -43,26 +43,27 @@ struct RelationTools
         removed,
         "deleted #{from} -[#{kind}]-> #{to}",
         "no relation #{from} -[#{kind}]-> #{to}",
-      ), conn
+      ),
+      conn
     )
   end
 
   priv fn args(arguments: JSONValue) -> (String, String, String) ! String
     from =
-      match JsonUtil.get_string(arguments, "from")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "from")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> fail "from is required"
       end
 
     to =
-      match JsonUtil.get_string(arguments, "to")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "to")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> fail "to is required"
       end
 
     kind =
-      match JsonUtil.get_string(arguments, "type")
-        Option.Some(text) when not text.empty?() -> text
+      match JSON.get(arguments, "type")
+        Option.Some(text: String) when not text.empty?() -> text
         _ -> fail "type is required"
       end
 

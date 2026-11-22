@@ -39,10 +39,24 @@ struct Export
     headers = Headers.new().set("Content-Type", "application/json")
 
     response = HTTP.post(url, payload, headers)
-      rescue e -> fail Export.Error.Transport(e.message())
+      rescue e -> fail Export.Error.Transport(transport_message(e))
 
     if not response.status.ok?()
       fail Export.Error.Rejected(response.status.code)
+    end
+  end
+
+  # The message of a failed client request. The client fails with a
+  # union of four error types, and a union has no `message` function.
+  priv fn transport_message(
+    e: HTTP.Error | IO.Error | Net.Socket.Error | Net.TLSError,
+  ) -> String
+
+    match e
+      cause: HTTP.Error -> cause.message()
+      cause: IO.Error -> cause.message()
+      cause: Net.Socket.Error -> cause.message()
+      cause: Net.TLSError -> cause.message()
     end
   end
 

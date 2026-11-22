@@ -1,0 +1,56 @@
+alias HTTP.Parser
+alias IO.Error as IOError
+alias Net.Socket.Error as SocketError
+alias Net.TLSError
+
+@doc """
+Why a request failed.
+
+- `BodyTooLarge` means the response body is larger than
+  `Config.max_body_bytes`.
+- `Connection` carries the network failure. It is a `Socket.Error`
+  for the connect, and an `IO.Error` or a `TLSError` after it.
+- `InvalidConfig` names the `Config` field that `Client.start`
+  rejected.
+- `InvalidUrl` means the URL cannot be requested. No network call
+  was made.
+- `Parse` means the server sent bytes that are not an HTTP response.
+- `PoolTimeout` means every connection to the origin stayed busy for
+  `Config.pool_timeout`.
+- `Stopped` means the client was stopped.
+- `Timeout` means the request took longer than its limit.
+"""
+enum Error
+  BodyTooLarge
+  Connection(SocketError | IOError | TLSError)
+  InvalidConfig(String)
+  InvalidUrl(String)
+  Parse(Parser.Error)
+  PoolTimeout
+  Stopped
+  Timeout
+
+  @doc """
+  Returns a description of the failure.
+  """
+  fn message(self) -> String
+    match self
+      Error.BodyTooLarge -> "the response body is larger than the limit"
+      Error.Connection(cause) -> Error.cause_message(cause)
+      Error.InvalidConfig(detail) -> "invalid config: " <> detail
+      Error.InvalidUrl(detail) -> "invalid URL: " <> detail
+      Error.Parse(cause) -> "invalid response: " <> cause.message()
+      Error.PoolTimeout -> "every connection to the origin stayed busy"
+      Error.Stopped -> "the client was stopped"
+      Error.Timeout -> "request timed out"
+    end
+  end
+
+  priv fn cause_message(cause: SocketError | IOError | TLSError) -> String
+    match cause
+      socket_error: SocketError -> socket_error.message()
+      io_error: IOError -> io_error.message()
+      tls_error: TLSError -> tls_error.message()
+    end
+  end
+end

@@ -51,10 +51,7 @@ struct SearchController
       db -> search_db(db, embedder, q, limit),
     )
 
-    body: JSONValue = [
-      "query": q.to_json(),
-      "results": JSONValue.Array(results.map(r -> r.to_json()))
-    ]
+    body: JSONValue = ["query": q, "results": results.to_json()]
     Render.json(c, Status.ok(), body)
   end
 end

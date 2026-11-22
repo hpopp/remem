@@ -19,10 +19,11 @@ struct Relation: JSON.Encoding
   """
   fn to_json(self) -> JSON.Value
     [
-      "from": self.from.to_json(), "to": self.to.to_json(),
-      "type": self.kind.to_json(),
-      "created_at": self.created_at.to_string().to_json(),
-      "updated_at": self.updated_at.to_string().to_json()
+      "from": self.from,
+      "to": self.to,
+      "type": self.kind,
+      "created_at": self.created_at.to_string(),
+      "updated_at": self.updated_at.to_string()
     ]
   end
 end

@@ -46,7 +46,10 @@ struct Server
       fn (status: Status)
         match status.code
           400 -> Log.warn("Rejected an unparseable request with 400.")
+          408 -> Log.warn("Rejected a slow request with 408.")
           413 -> Log.warn("Rejected an oversized request with 413.")
+          431 -> Log.warn("Rejected an oversized request head with 431.")
+          501 -> Log.warn("Rejected an unsupported method with 501.")
           _ -> Log.warn("Rejected a request with #{status.code}.")
         end
       end
@@ -61,10 +64,10 @@ struct Server
   # caller's trace. Without one the root starts a fresh trace. The
   # root ignores whatever context this worker carries, so a keep-alive
   # connection never continues the previous request's trace. The span
-  # records the method, path, and status code, and its status follows
-  # the response code. The access line is written inside the span, so
-  # its record carries the trace. Handlers below open children through
-  # `Trace.span` and read nothing off the conn.
+  # records the method, path, query, and status code, and its status
+  # follows the response code. The access line is written inside the
+  # span, so its record carries the trace. Handlers below open children
+  # through `Trace.span` and read nothing off the conn.
   priv fn traced_dispatch(router: Router, request: Request, started: Instant)
     -> Response
 
@@ -73,11 +76,17 @@ struct Server
       .then(header -> Propagation.parse(header).ok())
 
     Trace.root(
-      "#{method} #{request.path}",
+      "#{method} #{request.uri.path}",
       Trace.RootOptions{kind: Trace.SpanKind.Server, parent: parent},
       fn (span: Trace.Span) -> Response
         span.attribute("http.request.method", Attribute.from(method))
-        span.attribute("url.path", Attribute.from(request.path))
+        span.attribute("url.path", Attribute.from(request.uri.path))
+
+        match query(request)
+          Option.Some(text) -> span.attribute("url.query", Attribute.from(text))
+          Option.None -> ()
+        end
+
         response = dispatch_logged(router, request, started)
         code = response.status.code
         span.attribute("http.response.status_code", Attribute.from(code))
@@ -93,7 +102,9 @@ struct Server
 
   # Dispatches one request and writes its access line. The line
   # carries the method, path, status, and duration as attributes,
-  # which the Cloud Logging format folds into `httpRequest`.
+  # which the Cloud Logging format folds into `httpRequest`. A request
+  # with a query also carries `url.query`, which stays a plain
+  # attribute.
   # Successful health probes are the exception, since they arrive
   # every few seconds and would drown the log. A failed probe still
   # logs so a sick database shows up.
@@ -110,16 +121,24 @@ struct Server
     code = response.status.code
     elapsed = started.elapsed()
 
+    attributes: Map<String, LogAttribute> = [
+      "http.request.method": LogAttribute.from(method),
+      "url.path": LogAttribute.from(request.uri.path),
+      "http.response.status_code": LogAttribute.from(code),
+      "http.server.request.duration": LogAttribute.from(
+        elapsed.to_microseconds(),
+      )
+    ]
+
+    match query(request)
+      Option.Some(text) ->
+        attributes = attributes.put("url.query", LogAttribute.from(text))
+      Option.None -> ()
+    end
+
     Log.info(
-      "#{method} #{request.path} #{code} #{elapsed_text(elapsed)}",
-      [
-        "http.request.method": LogAttribute.from(method),
-        "url.path": LogAttribute.from(request.path),
-        "http.response.status_code": LogAttribute.from(code),
-        "http.server.request.duration": LogAttribute.from(
-          elapsed.to_microseconds(),
-        )
-      ],
+      "#{method} #{request.uri.path} #{code} #{elapsed_text(elapsed)}",
+      attributes,
     )
 
     response
@@ -159,6 +178,15 @@ struct Server
   # True for a `GET /health`. Probes are neither traced nor, when they
   # pass, logged.
   priv fn health_probe?(request: Request) -> Bool
-    request.method == Method.Get and request.path == "/health"
+    request.method == Method.Get and request.uri.path == "/health"
+  end
+
+  # The query of the request target. `None` when the target has no
+  # query or an empty one.
+  priv fn query(request: Request) -> Option<String>
+    match request.uri.query
+      Option.Some(text) when not text.empty?() -> Option.Some(text)
+      _ -> Option.None
+    end
   end
 end

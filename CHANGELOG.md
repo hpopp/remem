@@ -2,21 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- A request body can use chunked transfer encoding. Before, remem did not read a chunked body.
+- Access log lines and the server span carry a `url.query` attribute when the request has a query. `url.path` and the span name stay the path alone.
+
+### Changed
+
+- Requires Koja 0.21.0.
+- A request that takes longer than 30 seconds to arrive answers 408, and the connection closes. Before, remem waited with no limit.
+- A connection with no request in progress closes after 60 seconds. Before, it stayed open with no limit.
+- A request head larger than 16 KiB answers 431. Before, the answer was 413.
+- A request with an unknown method answers 501. Before, the answer was 400.
+- An HTTP/1.1 request with no `Host` header answers 400.
+- The `error` field of a 413 response is `Content Too Large`, the current name of the status. Before, it was `Payload Too Large`.
+- A request body that is not valid UTF-8 answers 400 with the message `request body is not valid UTF-8`. Before, the message was `malformed request`.
+- A request target with percent-encoding that is not valid, such as `/%zz`, answers 400 with the message `malformed request`, and the connection closes. Before, the message was `malformed encoding in path or query`.
+- `POST /mcp` with a body that is not JSON answers the JSON-RPC parse error without a database connection. Before, it answered 503 while the database was down.
+- An MCP tool reads an integer argument with a fraction of zero, such as a `limit` of `5.0`, as that integer. Before, a tool used the default for such a `limit` or `offset`, and `remove_event` answered `id is required` for such an `id`.
+- The response to a `HEAD` request has no body.
+- remem keeps its connections to the embedding server and to the trace collector open between requests. Before, each request opened a new connection.
+- A request to the embedding server or to the trace collector fails after 30 seconds. Before, it waited with no limit.
 
 ## [0.7.2] - 2026-11-10
 
 ### Changed
 
-- Startup no longer waits for the ten database connections. remem
-  listens at once, and a request answers 503 until the first
-  connection is ready.
-- While the database is unreachable, remem logs one error for each
-  failed connection attempt, with `reason` and `retry_in_ms`
-  attributes. Before, a failed attempt logged nothing.
-- A `+` in a query value reads as a space, as in form encoding.
-  Before, `GET /search?q=a+b` searched for `a+b`.
+- Startup no longer waits for the ten database connections. remem listens at once, and a request answers 503 until the first connection is ready.
+- While the database is unreachable, remem logs one error for each failed connection attempt, with `reason` and `retry_in_ms` attributes. Before, a failed attempt logged nothing.
+- A `+` in a query value reads as a space, as in form encoding. Before, `GET /search?q=a+b` searched for `a+b`.
 
 ## [0.7.1] - 2026-11-06
 
@@ -28,53 +46,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Cloud Logging lines written inside a traced request carry the
-  `logging.googleapis.com/trace`, `spanId`, and `trace_sampled`
-  fields, so Logs Explorer links each line to its trace in Cloud
-  Trace.
-- `LOG_LEVEL=trace`. Cloud Logging has no severity below `DEBUG`, so
-  a trace line is sent as `DEBUG`.
+- Cloud Logging lines written inside a traced request carry the `logging.googleapis.com/trace`, `spanId`, and `trace_sampled` fields, so Logs Explorer links each line to its trace in Cloud Trace.
+- `LOG_LEVEL=trace`. Cloud Logging has no severity below `DEBUG`, so a trace line is sent as `DEBUG`.
 
 ### Changed
 
 - Requires Koja 0.20.
 - Upgraded postgres-koja to 0.5.0.
-- Tracing and logging run on the Koja stdlib `Trace` and `Log`. The
-  vendored `lib/log` is gone, and `lib/open_telemetry` now only
-  handles `traceparent` headers and the OTLP export.
-- With no `OTEL_EXPORTER_OTLP_ENDPOINT` set, no span opens and the
-  response carries no `traceparent` header. Before, an unexported
-  span still ran and the header was still set.
-- The embedder's `POST /embed` span records the error message in its
-  status when the request fails, as `db.query` spans already did.
-- Access log lines no longer start with the trace id. Cloud Logging
-  lines carry it in the trace fields instead.
+- Tracing and logging run on the Koja stdlib `Trace` and `Log`. The vendored `lib/log` is gone, and `lib/open_telemetry` now only handles `traceparent` headers and the OTLP export.
+- With no `OTEL_EXPORTER_OTLP_ENDPOINT` set, no span opens and the response carries no `traceparent` header. Before, an unexported span still ran and the header was still set.
+- The embedder's `POST /embed` span records the error message in its status when the request fails, as `db.query` spans already did.
+- Access log lines no longer start with the trace id. Cloud Logging lines carry it in the trace fields instead.
 
 ## [0.6.0] - 2026-09-25
 
 ### Added
 
-- Events, the episodic memory next to observations. Each event
-  belongs to one entity and records something that happened to it at
-  a point in time, with an integer `id`, `content`, and `occurred_at`.
-  Events are never deduplicated. They move with a merge and cascade
-  on entity delete.
-- Routes `GET /entities/:name/events?limit=`,
-  `POST /entities/:name/events`, and `DELETE /events/:id`.
+- Events, the episodic memory next to observations. Each event belongs to one entity and records something that happened to it at a point in time, with an integer `id`, `content`, and `occurred_at`. Events are never deduplicated. They move with a merge and cascade on entity delete.
+- Routes `GET /entities/:name/events?limit=`, `POST /entities/:name/events`, and `DELETE /events/:id`.
 - MCP tools `add_event`, `recent_events`, and `remove_event`.
-- `GET /entities/:name` and `get_entity` return the ten most recent
-  events under `events`, next to `relations`. Events do not appear
-  in search results yet.
+- `GET /entities/:name` and `get_entity` return the ten most recent events under `events`, next to `relations`. Events do not appear in search results yet.
 
 ### Changed
 
-- The `create_entity` and `add_observations` tool descriptions point
-  session details at `add_event`.
-- Every timestamp in a response is RFC 3339 in UTC, like
-  `2026-09-26T01:04:40.964351Z`. Before, timestamps were the
-  Postgres text shape, `2026-09-26 01:04:40.964351+00`.
-- The server span status is `Ok` for a 2xx or 3xx response. A 4xx
-  stays unset and a 5xx is still an error.
+- The `create_entity` and `add_observations` tool descriptions point session details at `add_event`.
+- Every timestamp in a response is RFC 3339 in UTC, like `2026-09-26T01:04:40.964351Z`. Before, timestamps were the Postgres text shape, `2026-09-26 01:04:40.964351+00`.
+- The server span status is `Ok` for a 2xx or 3xx response. A 4xx stays unset and a 5xx is still an error.
 
 ## [0.5.1] - 2026-09-24
 
@@ -86,31 +83,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- OpenTelemetry tracing behind `OTEL_EXPORTER_OTLP_ENDPOINT`. Each
-  request runs in a server span that continues an incoming
-  `traceparent`, with child spans for the database phase, embedding
-  requests, and MCP tool calls. Spans export as OTLP/JSON over HTTP
-  in batches. Responses carry a `traceparent` header and access log
-  lines start with the trace id when tracing is on.
-- `lib/open_telemetry`, the tracing package behind the above, with
-  W3C context propagation, closure-scoped spans, and a batching
-  exporter process.
-- `Conn.assigns` for request-scoped values, with `assign`,
-  `assigned`, and `Router.dispatch_conn`.
-- Structured logging behind `GCP_PROJECT_ID`. When it is set, every
-  log line is one Cloud Logging JSON object with `severity`,
-  `message`, and `time`. Access lines carry the method, path,
-  status, and latency in `httpRequest`, and error lines carry the
-  Error Reporting `@type` and a `serviceContext` named by
-  `GCP_SERVICE_NAME`. Without it, lines stay text. `LOG_LEVEL` sets
-  the floor.
-- `lib/log`, the logging package behind the above, with a `Logger`
-  value, leveled calls, attribute maps, and text and GCP formatters.
+- OpenTelemetry tracing behind `OTEL_EXPORTER_OTLP_ENDPOINT`. Each request runs in a server span that continues an incoming `traceparent`, with child spans for the database phase, embedding requests, and MCP tool calls. Spans export as OTLP/JSON over HTTP in batches. Responses carry a `traceparent` header and access log lines start with the trace id when tracing is on.
+- `lib/open_telemetry`, the tracing package behind the above, with W3C context propagation, closure-scoped spans, and a batching exporter process.
+- `Conn.assigns` for request-scoped values, with `assign`, `assigned`, and `Router.dispatch_conn`.
+- Structured logging behind `GCP_PROJECT_ID`. When it is set, every log line is one Cloud Logging JSON object with `severity`, `message`, and `time`. Access lines carry the method, path, status, and latency in `httpRequest`, and error lines carry the Error Reporting `@type` and a `serviceContext` named by `GCP_SERVICE_NAME`. Without it, lines stay text. `LOG_LEVEL` sets the floor.
+- `lib/log`, the logging package behind the above, with a `Logger` value, leveled calls, attribute maps, and text and GCP formatters.
 
 ### Changed
 
-- Logging goes through a `Logger` value built at startup and passed
-  to the code that logs, in place of the static `Log` struct.
+- Logging goes through a `Logger` value built at startup and passed to the code that logs, in place of the static `Log` struct.
 
 ### Fixed
 
@@ -120,14 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Requires Koja 0.19. `unless` is gone from the sources, tests use
-  `test` blocks with `assert`, and elapsed times flow through the
-  new `Duration` and `Instant` types.
+- Requires Koja 0.19. `unless` is gone from the sources, tests use `test` blocks with `assert`, and elapsed times flow through the new `Duration` and `Instant` types.
 - postgres-koja 0.4.0.
-- Access log durations pick their unit from the size, so a request
-  logs as `452µs`, `3ms`, or `1.2s`.
-- Log timestamps come from the standard library ISO 8601 renderer
-  and carry microseconds, as in `2026-09-23T13:13:57.586073Z`.
+- Access log durations pick their unit from the size, so a request logs as `452µs`, `3ms`, or `1.2s`.
+- Log timestamps come from the standard library ISO 8601 renderer and carry microseconds, as in `2026-09-23T13:13:57.586073Z`.
 
 ### Removed
 
@@ -137,11 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The database pool now drops connections that come back closed or
-  mid-transaction and refills the slot, so a Postgres restart no
-  longer leaves broken sockets in the pool until the pod restarts.
-  When Postgres is down, refills retry with backoff instead of
-  shrinking the pool.
+- The database pool now drops connections that come back closed or mid-transaction and refills the slot, so a Postgres restart no longer leaves broken sockets in the pool until the pod restarts. When Postgres is down, refills retry with backoff instead of shrinking the pool.
 
 ### Changed
 
@@ -151,37 +124,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Images built by CI no longer crash on nodes without AVX-512, via the
-  koja 0.18.3 toolchain.
+- Images built by CI no longer crash on nodes without AVX-512, via the koja 0.18.3 toolchain.
 
 ## [0.3.0] - 2026-09-02
 
 ### Added
 
-- `merge_entities` folds one entity into another, moving observations
-  and relations, via MCP and `POST /entities/:name/merge`.
-- `rename_entity` renames an entity in place, via MCP and
-  `PATCH /entities/:name`.
-- `list_entities` returns every entity with its observation count and
-  no observations, via MCP and `GET /entities`.
-- `create_entity` refuses names close to an existing entity unless
-  `confirm` is true.
-- A background backfill embeds observations that have no embedding
-  yet, at boot and once a minute after.
+- `merge_entities` folds one entity into another, moving observations and relations, via MCP and `POST /entities/:name/merge`.
+- `rename_entity` renames an entity in place, via MCP and `PATCH /entities/:name`.
+- `list_entities` returns every entity with its observation count and no observations, via MCP and `GET /entities`.
+- `create_entity` refuses names close to an existing entity unless `confirm` is true.
+- A background backfill embeds observations that have no embedding yet, at boot and once a minute after.
 
 ### Changed
 
-- Search ranks individual observations instead of whole entities and
-  returns each entity with only the observations that matched.
-- `GET /entities` returns entities without their observations and
-  includes an observation count.
-- Adding observations embeds only the new rows, so large entities no
-  longer re-embed everything on every write.
+- Search ranks individual observations instead of whole entities and returns each entity with only the observations that matched.
+- `GET /entities` returns entities without their observations and includes an observation count.
+- Adding observations embeds only the new rows, so large entities no longer re-embed everything on every write.
 
 ### Fixed
 
-- Entities with more than about 8K tokens of observations no longer
-  lose their newest facts from semantic search.
+- Entities with more than about 8K tokens of observations no longer lose their newest facts from semantic search.
 
 ## [0.2.1] - 2026-09-02
 
@@ -191,36 +154,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- MCP `search_memory` responses no longer take over a minute to
-  render, via the koja 0.18.2 toolchain.
+- MCP `search_memory` responses no longer take over a minute to render, via the koja 0.18.2 toolchain.
 
 ## [0.2.0] - 2026-09-01
 
 ### Added
 
-- Request size caps. Headers over 16 KiB and bodies over 1 MiB get a
-  413 response.
+- Request size caps. Headers over 16 KiB and bodies over 1 MiB get a 413 response.
 - A background sweeper deletes search log rows older than 90 days.
 - Requests that match a route with the wrong method get a 405 response.
 - Keep-alive connections close after a budget of 1000 requests.
 
 ### Changed
 
-- API key auth now runs as router middleware and rejects bad
-  credentials before the server checks out a database connection.
-- The koja 0.18.1 toolchain cuts large response render times from
-  about 15 seconds to under 1 second.
-- The route table now runs on the vendored conn router, with handlers
-  split into controller modules.
-- HTTP connection handling moved into trail, a new vendored library
-  for keep-alive serving and request framing.
-- The MCP serverInfo response now reports the application version
-  instead of a hardcoded string.
+- API key auth now runs as router middleware and rejects bad credentials before the server checks out a database connection.
+- The koja 0.18.1 toolchain cuts large response render times from about 15 seconds to under 1 second.
+- The route table now runs on the vendored conn router, with handlers split into controller modules.
+- HTTP connection handling moved into trail, a new vendored library for keep-alive serving and request framing.
+- The MCP serverInfo response now reports the application version instead of a hardcoded string.
 
 ### Fixed
 
-- Large responses no longer truncate. The server now retries partial
-  socket writes until the full body sends.
+- Large responses no longer truncate. The server now retries partial socket writes until the full body sends.
 
 ## [0.1.0] - 2026-09-01
 

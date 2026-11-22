@@ -1,15 +1,27 @@
+alias HTTP.Response
 alias Postgres.Config as DbConfig
 alias Postgres.Connection
+alias Scout.Client
 
 struct MCPTest
   test "tool catalog lists every tool with a schema"
     encoded = JSON.encode(ToolCatalog.tools())
 
     names = [
-      "search_memory", "get_entity", "create_entity", "rename_entity",
-      "merge_entities", "list_entities", "delete_entity", "add_observations",
-      "remove_observations", "add_event", "recent_events", "remove_event",
-      "create_relation", "delete_relation"
+      "search_memory",
+      "get_entity",
+      "create_entity",
+      "rename_entity",
+      "merge_entities",
+      "list_entities",
+      "delete_entity",
+      "add_observations",
+      "remove_observations",
+      "add_event",
+      "recent_events",
+      "remove_event",
+      "create_relation",
+      "delete_relation"
     ]
 
     for name in names
@@ -49,7 +61,10 @@ struct MCPTest
     encoded = JSON.encode(event.to_json())
 
     keys = [
-      "\"id\"", "\"content\"", "\"occurred_at\"", "\"created_at\"",
+      "\"id\"",
+      "\"content\"",
+      "\"occurred_at\"",
+      "\"created_at\"",
       "\"updated_at\""
     ]
 
@@ -66,7 +81,8 @@ struct MCPTest
     conn = try cleanup(conn)
 
     # The embedder is never reached, since no observations are sent.
-    embedder = Embedder{url: "http://127.0.0.1:1"}
+    client = Client.start() rescue e -> fail "client: #{e.message()}"
+    embedder = Embedder{client: client, url: "http://127.0.0.1:1"}
 
     (response, conn) = MCP.handle(
       create_call(1, "itest-mcp-guard", false),
@@ -74,7 +90,8 @@ struct MCPTest
       embedder,
     )
 
-    assert response.body.contains?("\"isError\":false"), "first create should succeed: #{response.body}"
+    text = try body_text(response)
+    assert text.contains?("\"isError\":false"), "first create should succeed: #{text}"
 
     (response, conn) = MCP.handle(
       create_call(2, "Itest MCP Guard", false),
@@ -82,8 +99,9 @@ struct MCPTest
       embedder,
     )
 
-    assert response.body.contains?("\"isError\":true"), "near-duplicate create should be refused: #{response.body}"
-    assert response.body.contains?("similar entities exist"), "refusal should name the similar entities: #{response.body}"
+    text = try body_text(response)
+    assert text.contains?("\"isError\":true"), "near-duplicate create should be refused: #{text}"
+    assert text.contains?("similar entities exist"), "refusal should name the similar entities: #{text}"
 
     (response, conn) = MCP.handle(
       create_call(3, "Itest MCP Guard", true),
@@ -91,7 +109,8 @@ struct MCPTest
       embedder,
     )
 
-    assert response.body.contains?("\"isError\":false"), "confirmed create should succeed: #{response.body}"
+    text = try body_text(response)
+    assert text.contains?("\"isError\":false"), "confirmed create should succeed: #{text}"
 
     (conn, outcome) = conn.query(
       "DELETE FROM entities WHERE name ILIKE 'itest%'",
@@ -107,10 +126,20 @@ struct MCPTest
     end
   end
 
-  priv fn create_call(id: Int, name: String, confirm: Bool) -> String
-    "{\"jsonrpc\":\"2.0\",\"id\":#{id},\"method\":\"tools/call\"," <>
-      "\"params\":{\"name\":\"create_entity\",\"arguments\":" <>
-      "{\"name\":\"#{name}\",\"type\":\"test\",\"confirm\":#{confirm}}}}"
+  priv fn create_call(id: Int, name: String, confirm: Bool) -> JSON.Value
+    [
+      "jsonrpc": "2.0",
+      "id": id.to_json(),
+      "method": "tools/call",
+      "params": [
+        "name": "create_entity",
+        "arguments": ["name": name, "type": "test", "confirm": confirm]
+      ]
+    ]
+  end
+
+  priv fn body_text(response: Response) -> String ! Test.Failure
+    response.text() rescue _ -> fail "response body is not UTF-8"
   end
 
   priv fn connect -> Connection ! Test.Failure

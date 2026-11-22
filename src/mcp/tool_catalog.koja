@@ -65,14 +65,14 @@ struct ToolCatalog
       "two entities. Use an active verb phrase for the type, like " <>
       "wrote or depends_on."
 
-    JSONValue.Array([
+    [
       tool(
         "search_memory",
         search_description,
         object_schema(
           [
-            ("query", string_prop("Natural language search query")),
-            ("limit", int_prop("Max results, 1-100, default 10"))
+            "query": string_prop("Natural language search query"),
+            "limit": int_prop("Max results, 1-100, default 10")
           ],
           ["query"],
         ),
@@ -80,23 +80,17 @@ struct ToolCatalog
       tool(
         "get_entity",
         get_description,
-        object_schema([("name", string_prop("Entity name"))], ["name"]),
+        object_schema(["name": string_prop("Entity name")], ["name"]),
       ),
       tool(
         "create_entity",
         create_description,
         object_schema(
           [
-            ("name", string_prop("Unique entity name")),
-            ("type", string_prop("Entity type, like person or project")),
-            (
-              "observations",
-              string_array_prop("Initial facts about the entity")
-            ),
-            (
-              "confirm",
-              bool_prop("Create even when similar entity names exist")
-            )
+            "name": string_prop("Unique entity name"),
+            "type": string_prop("Entity type, like person or project"),
+            "observations": string_array_prop("Initial facts about the entity"),
+            "confirm": bool_prop("Create even when similar entity names exist")
           ],
           ["name", "type"],
         ),
@@ -106,8 +100,8 @@ struct ToolCatalog
         rename_description,
         object_schema(
           [
-            ("name", string_prop("Current entity name")),
-            ("new_name", string_prop("New entity name"))
+            "name": string_prop("Current entity name"),
+            "new_name": string_prop("New entity name")
           ],
           ["name", "new_name"],
         ),
@@ -117,8 +111,8 @@ struct ToolCatalog
         merge_description,
         object_schema(
           [
-            ("source", string_prop("Entity to fold in and delete")),
-            ("into", string_prop("Entity that receives the source"))
+            "source": string_prop("Entity to fold in and delete"),
+            "into": string_prop("Entity that receives the source")
           ],
           ["source", "into"],
         ),
@@ -128,24 +122,24 @@ struct ToolCatalog
         list_description,
         object_schema(
           [
-            ("limit", int_prop("Max entities, 1-1000, default 100")),
-            ("offset", int_prop("Entities to skip, default 0"))
+            "limit": int_prop("Max entities, 1-1000, default 100"),
+            "offset": int_prop("Entities to skip, default 0")
           ],
-          List.new(),
+          [],
         ),
       ),
       tool(
         "delete_entity",
         delete_description,
-        object_schema([("name", string_prop("Entity name"))], ["name"]),
+        object_schema(["name": string_prop("Entity name")], ["name"]),
       ),
       tool(
         "add_observations",
         add_description,
         object_schema(
           [
-            ("name", string_prop("Entity name")),
-            ("observations", string_array_prop("Facts to add"))
+            "name": string_prop("Entity name"),
+            "observations": string_array_prop("Facts to add")
           ],
           ["name", "observations"],
         ),
@@ -155,8 +149,8 @@ struct ToolCatalog
         "Remove exact-match facts from an entity.",
         object_schema(
           [
-            ("name", string_prop("Entity name")),
-            ("observations", string_array_prop("Facts to remove"))
+            "name": string_prop("Entity name"),
+            "observations": string_array_prop("Facts to remove")
           ],
           ["name", "observations"],
         ),
@@ -166,11 +160,10 @@ struct ToolCatalog
         add_event_description,
         object_schema(
           [
-            ("name", string_prop("Entity name")),
-            ("content", string_prop("What happened, in a sentence or two")),
-            (
-              "occurred_at",
-              string_prop("When it happened, RFC 3339. Defaults to now.")
+            "name": string_prop("Entity name"),
+            "content": string_prop("What happened, in a sentence or two"),
+            "occurred_at": string_prop(
+              "When it happened, RFC 3339. Defaults to now.",
             )
           ],
           ["name", "content"],
@@ -181,8 +174,8 @@ struct ToolCatalog
         recent_events_description,
         object_schema(
           [
-            ("name", string_prop("Entity name")),
-            ("limit", int_prop("Max events, 1-100, default 10"))
+            "name": string_prop("Entity name"),
+            "limit": int_prop("Max events, 1-100, default 10")
           ],
           ["name"],
         ),
@@ -190,16 +183,16 @@ struct ToolCatalog
       tool(
         "remove_event",
         "Delete one event by its id.",
-        object_schema([("id", int_prop("Event id"))], ["id"]),
+        object_schema(["id": int_prop("Event id")], ["id"]),
       ),
       tool(
         "create_relation",
         relation_description,
         object_schema(
           [
-            ("from", string_prop("Source entity name")),
-            ("to", string_prop("Target entity name")),
-            ("type", string_prop("Relation type, an active verb phrase"))
+            "from": string_prop("Source entity name"),
+            "to": string_prop("Target entity name"),
+            "type": string_prop("Relation type, an active verb phrase")
           ],
           ["from", "to", "type"],
         ),
@@ -209,65 +202,41 @@ struct ToolCatalog
         "Delete a relation by its exact from, to, and type.",
         object_schema(
           [
-            ("from", string_prop("Source entity name")),
-            ("to", string_prop("Target entity name")),
-            ("type", string_prop("Relation type"))
+            "from": string_prop("Source entity name"),
+            "to": string_prop("Target entity name"),
+            "type": string_prop("Relation type")
           ],
           ["from", "to", "type"],
         ),
       )
-    ])
+    ]
   end
 
   priv fn tool(name: String, description: String, schema: JSONValue)
     -> JSONValue
 
-    entry: JSONValue = [
-      "name": name.to_json(), "description": description.to_json(),
-      "inputSchema": schema
-    ]
-    entry
+    ["name": name, "description": description, "inputSchema": schema]
   end
 
-  priv fn object_schema(
-    properties: List<(String, JSONValue)>,
-    required: List<String>,
-  ) -> JSONValue
+  priv fn object_schema(properties: JSON.Object, required: List<String>)
+    -> JSONValue
 
-    schema: JSONValue = [
-      "type": "object".to_json(), "properties": JSONValue.Object(properties),
-      "required": JSONValue.Array(required.map(r -> r.to_json()))
-    ]
-    schema
+    ["type": "object", "properties": properties, "required": required.to_json()]
   end
 
   priv fn string_prop(description: String) -> JSONValue
-    prop: JSONValue = [
-      "type": "string".to_json(), "description": description.to_json()
-    ]
-    prop
+    ["type": "string", "description": description]
   end
 
   priv fn int_prop(description: String) -> JSONValue
-    prop: JSONValue = [
-      "type": "integer".to_json(), "description": description.to_json()
-    ]
-    prop
+    ["type": "integer", "description": description]
   end
 
   priv fn bool_prop(description: String) -> JSONValue
-    prop: JSONValue = [
-      "type": "boolean".to_json(), "description": description.to_json()
-    ]
-    prop
+    ["type": "boolean", "description": description]
   end
 
   priv fn string_array_prop(description: String) -> JSONValue
-    items: JSONValue = ["type": "string".to_json()]
-    prop: JSONValue = [
-      "type": "array".to_json(), "items": items,
-      "description": description.to_json()
-    ]
-    prop
+    ["type": "array", "items": ["type": "string"], "description": description]
   end
 end

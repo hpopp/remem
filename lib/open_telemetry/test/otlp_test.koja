@@ -123,7 +123,8 @@ struct OTLPTest
 
   test "attributes encodes a map as a KeyValue list"
     attributes: Map<String, Trace.Attribute> = [
-      "http.route": "/entities", "status": 200
+      "http.route": "/entities",
+      "status": 200
     ]
     text = JSON.encode(OTLP.attributes(attributes))
 

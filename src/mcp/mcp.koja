@@ -38,38 +38,41 @@ struct MCP
   const MAX_SEARCH_LIMIT: Int = 100
 
   @doc """
-  Handle one JSON-RPC message. Notifications get 202 with no body.
+  Handle one decoded JSON-RPC message. Notifications get 202 with no
+  body.
   A `tools/call` runs in its own span under the calling process's
   context and logs through the calling process's `Log` configuration.
   """
-  fn handle(body: String, conn: Connection, embedder: Embedder)
+  fn handle(root: JSONValue, conn: Connection, embedder: Embedder)
     -> (Response, Connection)
 
-    root =
-      match JSON.decode(body)
-        Result.Ok(value) -> value
-        Result.Err(_) ->
-          return (
-            RPC.error(JSONValue.Null, -32700, "malformed JSON-RPC message"),
-            conn
-          )
+    method =
+      match JSON.get(root, "method")
+        Option.Some(text: String) -> text
+        _ -> ""
       end
 
-    method = JsonUtil.get_string(root, "method").or("")
-
     id =
-      match JsonUtil.get(root, "id")
+      match JSON.get(root, "id")
         Option.Some(value) -> value
         Option.None -> return (RPC.accepted(), conn)
       end
 
     match method
       "initialize" -> (RPC.result(id, initialize_result()), conn)
-      "ping" -> (RPC.result(id, RPC.empty_object()), conn)
+      "ping" -> (RPC.result(id, [:]), conn)
       "tools/list" -> (RPC.result(id, tools_result()), conn)
       "tools/call" -> call_tool(root, id, conn, embedder)
       _ -> (RPC.error(id, -32601, "no such method #{method}"), conn)
     end
+  end
+
+  @doc """
+  Build the JSON-RPC parse error that answers a body that is not
+  JSON. The caller decodes the body, so `handle` never sees one.
+  """
+  fn malformed -> Response
+    RPC.error(JSON.NULL, -32700, "malformed JSON-RPC message")
   end
 
   # Names the tool in the log and the trace, then dispatches it. The
@@ -82,9 +85,15 @@ struct MCP
     embedder: Embedder,
   ) -> (Response, Connection)
 
-    params = JsonUtil.get(root, "params").or(JSONValue.Null)
-    name = JsonUtil.get_string(params, "name").or("")
-    arguments = JsonUtil.get(params, "arguments").or(JSONValue.Null)
+    params = JSON.get(root, "params").or(JSON.NULL)
+
+    name =
+      match JSON.get(params, "name")
+        Option.Some(text: String) -> text
+        _ -> ""
+      end
+
+    arguments = JSON.get(params, "arguments").or(JSON.NULL)
 
     # The access log only shows POST /mcp, so name the tool here.
     Log.info("MCP tools/call #{name}.")
@@ -152,18 +161,14 @@ struct MCP
   end
 
   priv fn initialize_result -> JSONValue
-    result: JSONValue = [
-      "protocolVersion": MCP.PROTOCOL_VERSION.to_json(),
-      "capabilities": ["tools": RPC.empty_object()],
-      "serverInfo": [
-        "name": "remem".to_json(), "version": App.VERSION.to_json()
-      ]
+    [
+      "protocolVersion": MCP.PROTOCOL_VERSION,
+      "capabilities": ["tools": [:]],
+      "serverInfo": ["name": "remem", "version": PACKAGE_VERSION]
     ]
-    result
   end
 
   priv fn tools_result -> JSONValue
-    result: JSONValue = ["tools": ToolCatalog.tools()]
-    result
+    ["tools": ToolCatalog.tools()]
   end
 end

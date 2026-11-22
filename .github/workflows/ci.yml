@@ -59,7 +59,7 @@ jobs:
         run: |
           for lib in lib/*/; do
             echo "== $lib"
-            (cd "$lib" && koja test)
+            (cd "$lib" && koja deps get && koja test)
           done
 
   docker:

@@ -1,0 +1,96 @@
+alias Net.TLSConfig
+
+@doc """
+Settings for a `Client`. Every field has a default, so a call site
+names only what it changes:
+
+```koja
+client = try Client.start(Config{pool_size: 4})
+```
+
+The three timeouts are each a `Duration`. `connect_timeout` bounds
+the TCP connect and the TLS handshake together. `pool_timeout` bounds
+the wait for a free connection to an origin. `timeout` bounds the
+whole request, from that wait to the last byte of the response. A
+request can replace `timeout` with its own limit.
+
+`pool_size` is the number of connections for each origin. A
+connection that stays idle for `idle_timeout` is not used again.
+
+`max_body_bytes` caps a response body. `max_header_bytes` caps the
+head of a response.
+
+`tls` carries the trust store for `https` origins. The client sets
+the ALPN names itself.
+"""
+struct Config
+  connect_timeout: Duration = Config.DEFAULT_CONNECT_TIMEOUT
+  idle_timeout: Duration = Config.DEFAULT_IDLE_TIMEOUT
+  max_body_bytes: Int = Config.DEFAULT_MAX_BODY_BYTES
+  max_header_bytes: Int = Config.DEFAULT_MAX_HEADER_BYTES
+  pool_size: Int = Config.DEFAULT_POOL_SIZE
+  pool_timeout: Duration = Config.DEFAULT_POOL_TIMEOUT
+  timeout: Duration = Config.DEFAULT_TIMEOUT
+  tls: TLSConfig = Config.DEFAULT_TLS
+
+  @doc """
+  The default time a connect and a TLS handshake have together, 5
+  seconds.
+  """
+  const DEFAULT_CONNECT_TIMEOUT: Duration = Duration{
+    unit: Duration.Unit.Seconds,
+    value: 5,
+  }
+
+  @doc """
+  The default time a connection can stay idle and still be used, 30
+  seconds.
+  """
+  const DEFAULT_IDLE_TIMEOUT: Duration = Duration{
+    unit: Duration.Unit.Seconds,
+    value: 30,
+  }
+
+  @doc """
+  The default largest response body the client accepts, 16 MiB.
+  """
+  const DEFAULT_MAX_BODY_BYTES: Int = 16777216
+
+  @doc """
+  The default largest response head the client accepts, 16 KiB.
+  """
+  const DEFAULT_MAX_HEADER_BYTES: Int = 16384
+
+  @doc """
+  The default number of connections for each origin.
+  """
+  const DEFAULT_POOL_SIZE: Int = 10
+
+  @doc """
+  The default time a request waits for a free connection, 5 seconds.
+  """
+  const DEFAULT_POOL_TIMEOUT: Duration = Duration{
+    unit: Duration.Unit.Seconds,
+    value: 5,
+  }
+
+  @doc """
+  The default time a whole request has, 30 seconds.
+  """
+  const DEFAULT_TIMEOUT: Duration = Duration{
+    unit: Duration.Unit.Seconds,
+    value: 30,
+  }
+
+  @doc """
+  The default TLS settings, which verify the server certificate
+  against the system trust store. It is the value of
+  `TLSConfig.client()`, written out because a field default cannot
+  call a function.
+  """
+  const DEFAULT_TLS: TLSConfig = TLSConfig{
+    identity: Option.None,
+    trust: Net.TrustStore.System,
+    verify: true,
+  }
+end

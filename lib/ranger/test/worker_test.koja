@@ -1,80 +1,330 @@
-priv const HEADER_CAP: Int = 16384
-priv const BODY_CAP: Int = 1048576
+alias HTTP.Headers
+alias HTTP.Method
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+alias Test.require
 
-@doc """
-Framing tests. The worker itself needs a live socket, so these
-exercise `Frame.parse` directly.
-"""
-struct WorkerTest
-  test "framing completes, waits, and splits pipelined bytes"
-    small = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n".to_binary()
+test "a connection serves one request after another"
+  (listener, client) = try open_connection(23201, Config{handler: &echo/1})
 
-    match Frame.parse(small, HEADER_CAP, BODY_CAP)
-      Frame.Complete(framed) ->
-        (req, leftover) = framed
-        assert req == small
-        assert leftover.byte_size() == 0, "small request should leave no leftover"
+  try require(client.write_all("GET /a HTTP/1.1\r\nHost: x\r\n\r\n"))
+  (first, rest) = try read_response(client, Method.Get, <<>>)
+  try require(client.write_all("GET /b HTTP/1.1\r\nHost: x\r\n\r\n"))
+  (second, _) = try read_response(client, Method.Get, rest)
+  close_connection(listener, client)
 
-      _ ->
-        fail "small request should frame complete"
+  assert first.status == Status.ok()
+  assert first.headers.get("X-Path") == Option.Some("/a")
+  assert first.headers.get("Connection") == Option.Some("keep-alive")
+  assert second.headers.get("X-Path") == Option.Some("/b")
+  assert second.headers.get("Connection") == Option.Some("keep-alive")
+end
+
+test "two pipelined requests in one write get two responses in order"
+  (listener, client) = try open_connection(23202, Config{handler: &echo/1})
+  pipelined = "GET /a HTTP/1.1\r\nHost: x\r\n\r\n" <>
+    "GET /b HTTP/1.1\r\nHost: x\r\n\r\n"
+
+  try require(client.write_all(pipelined))
+  (first, rest) = try read_response(client, Method.Get, <<>>)
+  (second, _) = try read_response(client, Method.Get, rest)
+  close_connection(listener, client)
+
+  assert first.headers.get("X-Path") == Option.Some("/a")
+  assert second.headers.get("X-Path") == Option.Some("/b")
+end
+
+test "Connection: close closes the connection after the response"
+  (listener, client) = try open_connection(23203, Config{handler: &echo/1})
+  request = "GET /a HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+
+  try require(client.write_all(request))
+  (response, _) = try read_response(client, Method.Get, <<>>)
+  closed = expect_closed(client)
+  close_connection(listener, client)
+
+  assert response.status == Status.ok()
+  assert response.headers.get("Connection") == Option.Some("close")
+  try closed
+end
+
+test "an HTTP/1.0 request closes the connection after the response"
+  (listener, client) = try open_connection(23204, Config{handler: &echo/1})
+
+  try require(client.write_all("GET /a HTTP/1.0\r\n\r\n"))
+  (response, _) = try read_response(client, Method.Get, <<>>)
+  closed = expect_closed(client)
+  close_connection(listener, client)
+
+  assert response.status == Status.ok()
+  assert response.headers.get("Connection") == Option.Some("close")
+  try closed
+end
+
+test "the last request of the budget closes the connection"
+  config = Config{handler: &echo/1}.with_max_requests_per_connection(2)
+  (listener, client) = try open_connection(23205, config)
+
+  try require(client.write_all("GET /a HTTP/1.1\r\nHost: x\r\n\r\n"))
+  (first, rest) = try read_response(client, Method.Get, <<>>)
+  try require(client.write_all("GET /b HTTP/1.1\r\nHost: x\r\n\r\n"))
+  (second, _) = try read_response(client, Method.Get, rest)
+  closed = expect_closed(client)
+  close_connection(listener, client)
+
+  assert first.headers.get("Connection") == Option.Some("keep-alive")
+  assert second.headers.get("Connection") == Option.Some("close")
+  try closed
+end
+
+test "a body that ends in a multibyte character splits on bytes"
+  (listener, client) = try open_connection(23206, Config{handler: &echo/1})
+  body = "héllo"
+  length = body.byte_length()
+  pipelined = "POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: #{length}\r\n\r\n" <>
+    body <> "GET /b HTTP/1.1\r\nHost: x\r\n\r\n"
+
+  try require(client.write_all(pipelined))
+  (first, rest) = try read_response(client, Method.Post, <<>>)
+  (second, _) = try read_response(client, Method.Get, rest)
+  close_connection(listener, client)
+
+  assert first.text() == Result.Ok("héllo")
+  assert second.headers.get("X-Path") == Option.Some("/b")
+end
+
+test "a body that is not UTF-8 reaches the handler"
+  (listener, client) = try open_connection(23207, Config{handler: &echo/1})
+  head = "POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\n"
+
+  try require(client.write_all(head.to_binary() <> <<255, 0, 254>>))
+  (response, _) = try read_response(client, Method.Post, <<>>)
+  close_connection(listener, client)
+
+  assert response.status == Status.ok()
+  assert response.body == <<255, 0, 254>>
+end
+
+test "a chunked body reaches the handler as one body"
+  (listener, client) = try open_connection(23208, Config{handler: &echo/1})
+  request = "POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" <>
+    "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+
+  try require(client.write_all(request))
+  (response, _) = try read_response(client, Method.Post, <<>>)
+  close_connection(listener, client)
+
+  assert response.text() == Result.Ok("hello world")
+end
+
+test "a response larger than one write arrives whole"
+  (listener, client) = try open_connection(23209, Config{handler: &large/1})
+
+  try require(client.write_all("GET /a HTTP/1.1\r\nHost: x\r\n\r\n"))
+  (response, _) = try read_response(client, Method.Get, <<>>)
+  close_connection(listener, client)
+
+  assert response.body.byte_size() == 1048576
+  assert response.body == large_body()
+end
+
+test "a malformed request gets a 400"
+  raw = "GET /a HTTP/1.1\r\nno colon here\r\n\r\n"
+  try expect_rejection(23210, capped(), raw, 400, "malformed request")
+end
+
+test "a declared body over the cap gets a 413 before the body arrives"
+  raw = "POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 9\r\n\r\n"
+  message = "request body exceeds the #{BODY_CAP} byte limit"
+  try expect_rejection(23211, capped(), raw, 413, message)
+end
+
+test "a chunked body over the cap gets a 413"
+  raw = "POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n" <>
+    "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+  message = "request body exceeds the #{BODY_CAP} byte limit"
+  try expect_rejection(23212, capped(), raw, 413, message)
+end
+
+test "a request head over the cap gets a 431"
+  raw = "GET /a HTTP/1.1\r\nX-Filler: #{filler(HEADER_CAP)}\r\n\r\n"
+  message = "request head exceeds the #{HEADER_CAP} byte limit"
+  try expect_rejection(23213, capped(), raw, 431, message)
+end
+
+test "an unknown method gets a 501"
+  raw = "BREW /a HTTP/1.1\r\nHost: x\r\n\r\n"
+  try expect_rejection(23214, capped(), raw, 501, "unsupported method")
+end
+
+test "a request that takes longer than read_timeout gets a 408"
+  config = Config{handler: &echo/1}.with_read_timeout(short_wait())
+  raw = "GET /a HTTP/1.1\r\nHost"
+  try expect_rejection(23216, config, raw, 408, "request timed out")
+end
+
+test "a body that takes longer than read_timeout gets a 408"
+  config = Config{handler: &echo/1}.with_read_timeout(short_wait())
+  raw = "POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhel"
+  try expect_rejection(23217, config, raw, 408, "request timed out")
+end
+
+test "a connection with no request closes after idle_timeout"
+  config = Config{handler: &echo/1}.with_idle_timeout(short_wait())
+  (listener, client) = try open_connection(23218, config)
+
+  closed = expect_closed(client)
+  close_connection(listener, client)
+
+  try closed
+end
+
+test "a connection closes after idle_timeout between requests"
+  config = Config{handler: &echo/1}.with_idle_timeout(short_wait())
+  (listener, client) = try open_connection(23219, config)
+
+  try require(client.write_all("GET /a HTTP/1.1\r\nHost: x\r\n\r\n"))
+  (response, rest) = try read_response(client, Method.Get, <<>>)
+  closed = expect_closed(client)
+  close_connection(listener, client)
+
+  assert response.headers.get("Connection") == Option.Some("keep-alive")
+  assert rest == <<>>
+  try closed
+end
+
+test "on_request gets the request, the response, and the elapsed time"
+  journal = spawn Journal.start(())
+
+  observe =
+    fn (request: Request, response: Response, elapsed: Duration)
+      timed = elapsed.value >= 0 ? "timed" : "not timed"
+      note = "#{request.uri.path} #{response.status.code} #{timed}"
+      journal.cast(JournalMsg.Note(note))
     end
 
-    partial = "GET /health HTTP/1.1\r\nHost".to_binary()
+  config = Config{handler: &echo/1}.with_on_request(observe)
+  (listener, client) = try open_connection(23215, config)
 
-    match Frame.parse(partial, HEADER_CAP, BODY_CAP)
-      Frame.Incomplete -> ()
-      _ -> fail "partial headers should be incomplete"
+  try require(client.write_all("GET /a HTTP/1.1\r\nHost: x\r\n\r\n"))
+  (response, _) = try read_response(client, Method.Get, <<>>)
+  notes = journal.call(JournalMsg.Notes, 5000)
+  journal.kill()
+  close_connection(listener, client)
+
+  assert response.status == Status.ok()
+  assert notes == Result.Ok(["/a 200 timed"])
+end
+
+test "the response to a HEAD request goes out with no body"
+  journal = spawn Journal.start(())
+
+  observe =
+    fn (request: Request, response: Response, elapsed: Duration)
+      journal.cast(JournalMsg.Note("#{response.body.byte_size()}"))
     end
 
-    pipelined = small <> "GET /graph".to_binary()
+  config = Config{handler: &bare/1}.with_on_request(observe)
+  (listener, client) = try open_connection(23220, config)
+  pipelined = "HEAD /a HTTP/1.1\r\nHost: x\r\n\r\n" <>
+    "GET /b HTTP/1.1\r\nHost: x\r\n\r\n"
 
-    match Frame.parse(pipelined, HEADER_CAP, BODY_CAP)
-      Frame.Complete(framed) ->
-        (req, leftover) = framed
-        assert req == small
-        assert leftover == "GET /graph".to_binary(), "pipelined bytes should stay in the leftover"
+  try require(client.write_all(pipelined))
+  (first, rest) = try read_response(client, Method.Head, <<>>)
+  (second, _) = try read_response(client, Method.Get, rest)
+  notes = journal.call(JournalMsg.Notes, 5000)
+  journal.kill()
+  close_connection(listener, client)
 
-      _ ->
-        fail "pipelined request should frame complete"
-    end
+  assert first.status == Status.ok()
+  assert first.headers.get("Content-Length") == Option.Some("5")
+  assert first.body == <<>>
+  assert second.text() == Result.Ok("hello")
+  assert notes == Result.Ok(["5", "5"])
+end
+
+# The body cap and the head cap of `capped`.
+priv const BODY_CAP: Int = 8
+priv const HEADER_CAP: Int = 128
+
+# A handler that answers "hello" and sets no `Content-Length`.
+priv fn bare(request: Request) -> Response
+  Response{
+    body: "hello".to_binary(),
+    headers: Headers.new(),
+    status: Status.ok(),
+  }
+end
+
+# Returns a config with small caps, so a short request passes them.
+priv fn capped -> Config
+  Config{handler: &echo/1}
+    .with_max_body_bytes(BODY_CAP)
+    .with_max_header_bytes(HEADER_CAP)
+end
+
+# Sends `raw` to a worker with `config`. Fails unless the worker
+# answers with `code` and `message`, tells `on_reject`, and closes.
+priv fn expect_rejection(
+  port: Int,
+  config: Config,
+  raw: String,
+  code: Int,
+  message: String,
+) ! Test.Failure
+
+  journal = spawn Journal.start(())
+
+  observe =
+    fn (status: Status) journal.cast(JournalMsg.Note("#{status.code}")) end
+
+  (listener, client) = try open_connection(port, config.with_on_reject(observe))
+
+  try require(client.write_all(raw))
+  (response, _) = try read_response(client, Method.Get, <<>>)
+  closed = expect_closed(client)
+  notes = journal.call(JournalMsg.Notes, 5000)
+  journal.kill()
+  close_connection(listener, client)
+
+  assert response.status.code == code
+  assert response.text() == Result.Ok(message)
+  assert response.headers.get("Connection") == Option.Some("close")
+  assert notes == Result.Ok(["#{code}"])
+  try closed
+end
+
+# Returns `count` bytes of text.
+priv fn filler(count: Int) -> String
+  text = ""
+
+  while text.byte_length() < count
+    text = text <> "a"
   end
 
-  test "framing splits on bytes when the body ends in a multibyte character"
-    body = "héllo"
-    request = "POST /x HTTP/1.1\r\nContent-Length: #{body.byte_length()}\r\n\r\n" <>
-      body
-    pipelined = request.to_binary() <> "GET /y".to_binary()
+  text
+end
 
-    match Frame.parse(pipelined, HEADER_CAP, BODY_CAP)
-      Frame.Complete(framed) ->
-        (req, leftover) = framed
-        assert req == request.to_binary()
-        assert leftover == "GET /y".to_binary(), "the split should land after the body"
+# A handler that answers with `large_body`.
+priv fn large(request: Request) -> Response
+  Response.new(Status.ok(), large_body())
+end
 
-      _ ->
-        fail "a complete body should frame complete"
-    end
+# Returns a 1 MiB body, which is larger than a loopback socket buffer.
+priv fn large_body -> Binary
+  body = <<120>>
+  doubled = 0
+
+  while doubled < 20
+    body = body <> body
+    doubled += 1
   end
 
-  test "framing enforces the header and body caps"
-    huge_body = "POST /entities HTTP/1.1\r\n" <>
-      "Content-Length: #{BODY_CAP + 1}\r\n\r\n"
+  body
+end
 
-    match Frame.parse(huge_body.to_binary(), HEADER_CAP, BODY_CAP)
-      Frame.TooLarge -> ()
-      _ -> fail "a body past the cap should be too large"
-    end
-
-    filler = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    headers = "GET / HTTP/1.1\r\nX-Filler: "
-
-    while headers.byte_length() <= HEADER_CAP
-      headers = headers <> filler
-    end
-
-    match Frame.parse(headers.to_binary(), HEADER_CAP, BODY_CAP)
-      Frame.TooLarge -> ()
-      _ -> fail "unterminated oversized headers should be too large"
-    end
-  end
+# A timeout short enough to keep a test fast.
+priv fn short_wait -> Duration
+  Duration.new(100, Duration.Unit.Milliseconds)
 end

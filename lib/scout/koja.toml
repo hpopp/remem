@@ -1,0 +1,14 @@
+[project]
+koja = "0.21"
+name = "scout"
+namespace = "Scout"
+version = "0.1.0"
+
+[dependencies]
+pooler = { github = "koja-lang/pooler", tag = "v0.1.0" }
+
+[index]
+categories = ["web"]
+description = "An HTTP/1.1 client that keeps connections open, shares them between processes, and bounds every wait"
+keywords = ["client", "http", "keep-alive", "pool", "web"]
+kind = "library"

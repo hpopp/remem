@@ -1,0 +1,383 @@
+alias HTTP.Headers
+alias HTTP.Method
+alias HTTP.Request
+alias HTTP.Response
+alias HTTP.Status
+alias Test.require
+
+test "get sends a request and reads the response"
+  (listener, server) = try start_server(23301, [[answer("hello")]])
+  client = try require(Client.start())
+  result = client.get("http://127.0.0.1:23301/users/7?a=1")
+  seen = try finish_server(listener, server)
+  try require(client.stop())
+  response = try require(result)
+
+  assert response.status == Status.ok()
+  assert response.text() == Result.Ok("hello")
+  assert seen.length() == 1
+
+  request = seen.get(0).unwrap()
+
+  assert request.method == Method.Get
+  assert request.uri.path == "/users/7"
+  assert request.uri.query == Option.Some("a=1")
+  assert request.uri.host == Option.Some("127.0.0.1")
+  assert request.uri.port == Option.Some(23301)
+  assert request.headers.get("Connection") == Option.None
+end
+
+test "post sends a binary body with its headers"
+  (listener, server) = try start_server(23302, [[answer("made")]])
+  client = try require(Client.start())
+  sent = <<0, 255, 1, 2>>
+  headers = Headers.new().set("X-Test", "yes")
+  result = client.post("http://127.0.0.1:23302/items", sent, headers)
+  seen = try finish_server(listener, server)
+  try require(client.stop())
+  response = try require(result)
+
+  assert response.text() == Result.Ok("made")
+
+  request = seen.get(0).unwrap()
+
+  assert request.method == Method.Post
+  assert request.body == sent
+  assert request.headers.get("Content-Length") == Option.Some("4")
+  assert request.headers.get("X-Test") == Option.Some("yes")
+end
+
+test "send takes a request that the caller built"
+  (listener, server) = try start_server(23303, [[answer("sent")]])
+  client = try require(Client.start())
+  uri = try require(URI.parse("http://127.0.0.1:23303/built"))
+  request = Request{
+    body: "ping".to_binary(),
+    headers: Headers.new(),
+    method: Method.Put,
+    uri: uri,
+  }
+  result = client.send(request)
+  seen = try finish_server(listener, server)
+  try require(client.stop())
+  response = try require(result)
+
+  assert response.text() == Result.Ok("sent")
+  assert seen.get(0).unwrap().method == Method.Put
+  assert seen.get(0).unwrap().text() == Result.Ok("ping")
+end
+
+test "two requests to one origin use one connection"
+  script = [[answer("one"), answer("two")]]
+  (listener, server) = try start_server(23304, script)
+  client = try require(Client.start())
+  first = client.get("http://127.0.0.1:23304/a")
+  second = client.post("http://127.0.0.1:23304/b", "", Headers.new())
+  seen = try finish_server(listener, server)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert (try require(second)).text() == Result.Ok("two")
+  assert seen.length() == 2
+end
+
+test "a request from another process uses the same connection"
+  script = [[answer("one"), answer("two")]]
+  (listener, server) = try start_server(23305, script)
+  client = try require(Client.start())
+  first = client.get("http://127.0.0.1:23305/a")
+
+  other = Task.async(fn () -> Result<Response, Error>
+    client.get("http://127.0.0.1:23305/b")
+  end)
+
+  second = try require(Task.await(other))
+  _ = try finish_server(listener, server)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert (try require(second)).text() == Result.Ok("two")
+end
+
+# The second request of each test below is a POST. The client does not
+# send a POST again, so the test fails if the client uses the old
+# connection.
+
+test "a response with Connection: close ends the connection"
+  script = [[closing_answer("one")], [answer("two")]]
+  (listener, server) = try start_server(23306, script)
+  client = try require(Client.start())
+  first = client.get("http://127.0.0.1:23306/")
+  second = client.post("http://127.0.0.1:23306/", "", Headers.new())
+  _ = try finish_server(listener, server)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert (try require(second)).text() == Result.Ok("two")
+end
+
+test "a request with Connection: close ends the connection"
+  script = [[answer("one")], [answer("two")]]
+  (listener, server) = try start_server(23307, script)
+  client = try require(Client.start())
+  headers = Headers.new().set("Connection", "close")
+  first = client.post("http://127.0.0.1:23307/", "", headers)
+  second = client.post("http://127.0.0.1:23307/", "", Headers.new())
+  _ = try finish_server(listener, server)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert (try require(second)).text() == Result.Ok("two")
+end
+
+test "a body with no length ends the connection"
+  streamed = Answer{bytes: "HTTP/1.1 200 OK\r\n\r\none".to_binary()}
+  (listener, server) = try start_server(23308, [[streamed], [answer("two")]])
+  client = try require(Client.start())
+  first = client.get("http://127.0.0.1:23308/")
+  second = client.post("http://127.0.0.1:23308/", "", Headers.new())
+  _ = try finish_server(listener, server)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert (try require(second)).text() == Result.Ok("two")
+end
+
+test "a connection that stays idle past idle_timeout is not used again"
+  script = [[answer("one")], [answer("two")]]
+  (listener, server) = try start_server(23309, script)
+  config = Config{idle_timeout: Duration.new(50, Duration.Unit.Milliseconds)}
+  client = try require(Client.start(config))
+  first = client.get("http://127.0.0.1:23309/")
+  pause(150)
+  second = client.post("http://127.0.0.1:23309/", "", Headers.new())
+  _ = try finish_server(listener, server)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert (try require(second)).text() == Result.Ok("two")
+end
+
+test "a GET on a connection that the server closed is sent again"
+  script = [[answer("one")], [answer("two")]]
+  (listener, server) = try start_server(23310, script)
+  client = try require(Client.start())
+  first = client.get("http://127.0.0.1:23310/")
+  # The server closes the connection after its answer.
+  pause(100)
+  second = client.get("http://127.0.0.1:23310/")
+  seen = try finish_server(listener, server)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert (try require(second)).text() == Result.Ok("two")
+  assert seen.length() == 2
+end
+
+test "a POST on a connection that the server closed fails and is not sent again"
+  (listener, server) = try start_server(23311, [[answer("one")]])
+  client = try require(Client.start())
+  first = client.get("http://127.0.0.1:23311/")
+  seen = try finish_server(listener, server)
+  second = client.post("http://127.0.0.1:23311/", "data", Headers.new())
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("one")
+  assert seen.length() == 1
+
+  match second
+    Result.Err(Error.Connection(_)) -> ()
+    Result.Err(Error.Parse(_)) -> ()
+    Result.Err(other) ->
+      fail "expected a connection failure, got '#{other.message()}'"
+    Result.Ok(_) -> fail "expected a connection failure, got a response"
+  end
+end
+
+test "a request fails with PoolTimeout when every connection stays busy"
+  slow = Answer{bytes: answer("slow").bytes, delay_ms: 400}
+  (listener, server) = try start_server(23312, [[slow]])
+  config = Config{
+    pool_size: 1,
+    pool_timeout: Duration.new(100, Duration.Unit.Milliseconds),
+  }
+  client = try require(Client.start(config))
+
+  busy = Task.async(fn () -> Result<Response, Error>
+    client.get("http://127.0.0.1:23312/slow")
+  end)
+
+  # Let the other process take the one connection.
+  pause(100)
+  blocked = client.get("http://127.0.0.1:23312/blocked")
+  first = try require(Task.await(busy))
+  seen = try finish_server(listener, server)
+  try require(client.stop())
+
+  try expect_error(blocked, Error.PoolTimeout)
+  assert (try require(first)).text() == Result.Ok("slow")
+  assert seen.length() == 1
+end
+
+test "a request fails with Timeout, and the next request gets a new connection"
+  slow = Answer{bytes: answer("slow").bytes, delay_ms: 400}
+  (listener, server) = try start_server(23313, [[slow], [answer("next")]])
+  client = try require(Client.start(Config{pool_size: 1}))
+  limit = Option.Some(Duration.new(100, Duration.Unit.Milliseconds))
+  late = client.get("http://127.0.0.1:23313/", limit)
+  next = client.post("http://127.0.0.1:23313/", "", Headers.new())
+  _ = try finish_server(listener, server)
+  try require(client.stop())
+
+  try expect_error(late, Error.Timeout)
+  assert (try require(next)).text() == Result.Ok("next")
+end
+
+test "a refused connect fails with the Socket.Error"
+  client = try require(Client.start())
+  result = client.get("http://127.0.0.1:23314/")
+  try require(client.stop())
+
+  # Which `Socket.Error` a refused connect gives is for the standard
+  # library to test.
+  match result
+    Result.Err(Error.Connection(cause)) ->
+      match cause
+        socket_error: Net.Socket.Error ->
+          assert not socket_error.message().empty?()
+        _ -> fail "expected a Socket.Error"
+      end
+
+    Result.Err(other) ->
+      fail "expected a Socket.Error, got '#{other.message()}'"
+
+    Result.Ok(_) ->
+      fail "expected a Socket.Error, got a response"
+  end
+end
+
+test "a URL that cannot be requested fails before networking"
+  client = try require(Client.start())
+
+  try expect_invalid_url(
+    client.get("http://exa mple.com/"),
+    "invalid URI component",
+  )
+  try expect_invalid_url(
+    client.get("ftp://example.com/file"),
+    "unsupported URL scheme",
+  )
+  try expect_invalid_url(client.get("http:///path"), "missing host")
+  try expect_invalid_url(client.get("/relative"), "must be absolute")
+  try require(client.stop())
+end
+
+test "a declared body past max_body_bytes fails with BodyTooLarge"
+  (listener, server) = try start_server(23315, [[answer("hello")]])
+  client = try require(Client.start(Config{max_body_bytes: 4}))
+  result = client.get("http://127.0.0.1:23315/")
+  _ = try finish_server(listener, server)
+  try require(client.stop())
+
+  try expect_error(result, Error.BodyTooLarge)
+end
+
+test "a chunked body past max_body_bytes fails with BodyTooLarge"
+  chunked = Answer{
+    bytes: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n".to_binary(),
+  }
+  (listener, server) = try start_server(23316, [[chunked]])
+  client = try require(Client.start(Config{max_body_bytes: 4}))
+  result = client.get("http://127.0.0.1:23316/")
+  _ = try finish_server(listener, server)
+  try require(client.stop())
+
+  try expect_error(result, Error.BodyTooLarge)
+end
+
+test "one client keeps connections to two origins"
+  (left_listener, left) = try start_server(
+    23317,
+    [[answer("left"), answer("left again")]],
+  )
+  (right_listener, right) = try start_server(23318, [[answer("right")]])
+  client = try require(Client.start())
+  first = client.get("http://127.0.0.1:23317/")
+  second = client.get("http://127.0.0.1:23318/")
+  third = client.post("http://127.0.0.1:23317/", "", Headers.new())
+  _ = try finish_server(left_listener, left)
+  _ = try finish_server(right_listener, right)
+  try require(client.stop())
+
+  assert (try require(first)).text() == Result.Ok("left")
+  assert (try require(second)).text() == Result.Ok("right")
+  assert (try require(third)).text() == Result.Ok("left again")
+end
+
+test "a request after stop fails with Stopped"
+  client = try require(Client.start())
+  try require(client.stop())
+
+  try expect_error(client.get("http://127.0.0.1:23319/"), Error.Stopped)
+  # A second stop returns at once.
+  try require(client.stop())
+end
+
+test "start rejects a config that no client can run with"
+  try expect_invalid_config(Config{pool_size: 0}, "pool_size")
+  try expect_invalid_config(Config{max_header_bytes: 0}, "max_header_bytes")
+  try expect_invalid_config(Config{max_body_bytes: -1}, "max_body_bytes")
+  try expect_invalid_config(Config{timeout: Duration.ZERO}, "timeout")
+end
+
+test "Error.message describes each cause"
+  assert Error.BodyTooLarge.message() ==
+    "the response body is larger than the limit"
+  assert Error.Connection(Net.Socket.Error.ConnectionRefused).message() ==
+    Net.Socket.Error.ConnectionRefused.message()
+  assert Error.Connection(IO.Error.BrokenPipe).message() ==
+    IO.Error.BrokenPipe.message()
+  assert Error.InvalidConfig("no").message() == "invalid config: no"
+  assert Error.InvalidUrl("no host").message() == "invalid URL: no host"
+  assert Error.Parse(HTTP.Parser.Error.HeadersTooLarge)
+    .message()
+    .starts_with?("invalid response: ")
+  assert Error.PoolTimeout.message() ==
+    "every connection to the origin stayed busy"
+  assert Error.Stopped.message() == "the client was stopped"
+  assert Error.Timeout.message() == "request timed out"
+end
+
+priv fn expect_error(result: Result<Response, Error>, expected: Error)
+  ! Test.Failure
+
+  match result
+    Result.Err(error) -> assert error.message() == expected.message()
+    Result.Ok(_) -> fail "expected '#{expected.message()}', got a response"
+  end
+end
+
+priv fn expect_invalid_config(config: Config, expected: String) ! Test.Failure
+  match Client.start(config)
+    Result.Err(Error.InvalidConfig(detail)) ->
+      assert detail.contains?(expected), detail
+
+    Result.Err(other) ->
+      fail "expected InvalidConfig, got '#{other.message()}'"
+
+    Result.Ok(client) ->
+      _ = client.stop()
+      fail "expected InvalidConfig, got a client"
+  end
+end
+
+priv fn expect_invalid_url(result: Result<Response, Error>, expected: String)
+  ! Test.Failure
+
+  match result
+    Result.Err(Error.InvalidUrl(detail)) ->
+      assert detail.contains?(expected), detail
+    Result.Err(other) -> fail "expected InvalidUrl, got '#{other.message()}'"
+    Result.Ok(_) -> fail "expected InvalidUrl, got a response"
+  end
+end

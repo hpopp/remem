@@ -16,9 +16,9 @@ struct Observation: JSON.Encoding
   """
   fn to_json(self) -> JSON.Value
     [
-      "content": self.content.to_json(),
-      "created_at": self.created_at.to_string().to_json(),
-      "updated_at": self.updated_at.to_string().to_json()
+      "content": self.content,
+      "created_at": self.created_at.to_string(),
+      "updated_at": self.updated_at.to_string()
     ]
   end
 end
@@ -41,10 +41,11 @@ struct Entity: JSON.Encoding
   """
   fn to_json(self) -> JSON.Value
     [
-      "name": self.name.to_json(), "type": self.kind.to_json(),
-      "observations": JSON.Value.Array(self.observations.map(o -> o.to_json())),
-      "created_at": self.created_at.to_string().to_json(),
-      "updated_at": self.updated_at.to_string().to_json()
+      "name": self.name,
+      "type": self.kind,
+      "observations": self.observations.to_json(),
+      "created_at": self.created_at.to_string(),
+      "updated_at": self.updated_at.to_string()
     ]
   end
 end
@@ -65,10 +66,11 @@ struct EntitySummary: JSON.Encoding
   """
   fn to_json(self) -> JSON.Value
     [
-      "name": self.name.to_json(), "type": self.kind.to_json(),
+      "name": self.name,
+      "type": self.kind,
       "observation_count": self.observation_count.to_json(),
-      "created_at": self.created_at.to_string().to_json(),
-      "updated_at": self.updated_at.to_string().to_json()
+      "created_at": self.created_at.to_string(),
+      "updated_at": self.updated_at.to_string()
     ]
   end
 end
@@ -96,7 +98,7 @@ struct ObservationHit: JSON.Encoding
   Encode the observation hit as JSON.
   """
   fn to_json(self) -> JSON.Value
-    ["content": self.content.to_json(), "score": self.score.to_json()]
+    ["content": self.content, "score": self.score.to_json()]
   end
 end
 
@@ -116,9 +118,10 @@ struct SearchResult: JSON.Encoding
   """
   fn to_json(self) -> JSON.Value
     [
-      "name": self.name.to_json(), "type": self.kind.to_json(),
+      "name": self.name,
+      "type": self.kind,
       "score": self.score.to_json(),
-      "observations": JSON.Value.Array(self.observations.map(o -> o.to_json()))
+      "observations": self.observations.to_json()
     ]
   end
 end
@@ -330,7 +333,8 @@ struct EntityStore
 
     if source == into
       return (
-        conn, Result.Err(Error.Validation("cannot merge an entity into itself"))
+        conn,
+        Result.Err(Error.Validation("cannot merge an entity into itself"))
       )
     end
 
@@ -449,10 +453,7 @@ struct EntityStore
       DELETE FROM observations
       WHERE entity_id = $1
         AND content IN (SELECT jsonb_array_elements_text($2::jsonb))
-      """, [
-        Value.int(entity_id),
-        Value.string(JsonUtil.encode_string_list(observations))
-      ])
+      """, [Value.int(entity_id), Value.string(JSON.encode(observations))])
 
     match deleted
       Result.Err(e) -> (conn, Result.Err(e))
@@ -476,7 +477,7 @@ struct EntityStore
     for i in Range{start: 0, stop: ids.length() - 1}
       id = ids.get(i).or(0)
       vector = vectors.get(i).or("")
-      pair: JSONValue = ["id": id.to_json(), "embedding": vector.to_json()]
+      pair: JSONValue = ["id": id.to_json(), "embedding": vector]
       pairs = pairs.append(pair)
     end
 
@@ -485,7 +486,7 @@ struct EntityStore
       SET embedding = v.embedding::vector
       FROM jsonb_to_recordset($1::jsonb) AS v(id bigint, embedding text)
       WHERE o.id = v.id
-      """, [Value.string(JSON.encode(JSONValue.Array(pairs)))])
+      """, [Value.string(JSON.encode(pairs))])
 
     (conn, Database.Query.affected_rows(outcome))
   end
@@ -656,9 +657,10 @@ struct EntityStore
             WHERE x.from_entity_id = r.from_entity_id AND x.to_entity_id = $2
               AND x.type = r.type
           )
-        """, both),
-      ("DELETE FROM entities WHERE id = $1", [Value.int(source_id)]),
-      (
+        """, both), (
+        "DELETE FROM entities WHERE id = $1",
+        [Value.int(source_id)]
+      ), (
         "UPDATE entities SET updated_at = now() WHERE id = $1",
         [Value.int(target_id)]
       )]
@@ -689,10 +691,7 @@ struct EntityStore
       SELECT $1, t.x FROM jsonb_array_elements_text($2::jsonb) AS t(x)
       ON CONFLICT (entity_id, content) DO NOTHING
       RETURNING id, content
-      """, [
-        Value.int(entity_id),
-        Value.string(JsonUtil.encode_string_list(observations))
-      ])
+      """, [Value.int(entity_id), Value.string(JSON.encode(observations))])
 
     (conn, inserted_rows(outcome))
   end
@@ -850,7 +849,8 @@ struct EntityStore
 
     qr = try Database.Query.result(outcome)
     qr.rows.map(row -> (
-      Database.Row.int_at(row, 0), Database.Row.text_at(row, 1)
+      Database.Row.int_at(row, 0),
+      Database.Row.text_at(row, 1)
     ))
   end
 

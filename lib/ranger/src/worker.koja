@@ -1,7 +1,12 @@
+alias HTTP.Method
 alias HTTP.Parser
 alias HTTP.Request
 alias HTTP.Response
 alias HTTP.Status
+alias HTTP.Version
+alias IO.Error as IOError
+alias IO.Reader.Options as ReaderOptions
+alias IO.Writer.Options as WriterOptions
 alias Net.TCPSocket
 alias Process.Step
 alias Process.StopReason
@@ -17,10 +22,24 @@ TCPEvent.Connected(client) ->
 
 Its `run` loop reads requests off the socket (HTTP keep-alive),
 dispatches each one through the configured handler, and writes the
-response, looping on partial writes until every byte is out. The
-worker exits when the client closes, a read or write fails, a
-request overruns a size cap, the request asks for
-`Connection: close`, or the per-connection request budget is spent.
+whole response. A request body arrives by length or chunked, and the
+handler gets it as bytes, so a body does not have to be UTF-8. The
+response to a `HEAD` request goes out with no body.
+
+The worker rejects a request that it cannot serve. It answers
+through `Config.error_response`, tells `Config.on_reject`, and
+closes the connection:
+
+- 400 for a request that is not valid HTTP.
+- 408 for a request that takes longer than `read_timeout` to arrive.
+- 413 for a body larger than `max_body_bytes`.
+- 431 for a request head larger than `max_header_bytes`.
+- 501 for a method that `HTTP.Method` does not have.
+
+The worker also exits when the client closes, a read or write fails,
+no request starts within `idle_timeout`, a write takes longer than
+`write_timeout`, the request asks for `Connection: close`, or the
+per-connection request budget is spent.
 """
 struct Worker: Process<Worker, (), ()>
   client: TCPSocket
@@ -49,44 +68,43 @@ struct Worker: Process<Worker, (), ()>
   keep-alive connection does not grow the stack.
   """
   fn run(self) -> StopReason
-    buffered: Binary = <<>>
+    # A response is one write, so it must not wait for more bytes. The
+    # call fails on a connection that the client already reset.
+    match self.client.set_nodelay(true)
+      Result.Ok(_) ->
+        ()
+
+      Result.Err(_) ->
+        self.close()
+        return StopReason.Normal
+    end
+
     budget = self.config.max_requests_per_connection
+    parser = Request.Parser.new(
+      Parser.Options{max_header_bytes: self.config.max_header_bytes},
+    )
 
     while budget > 0
-      match self.read_request(buffered)
-        Frame.Incomplete ->
-          self.close()
-          return StopReason.Normal
+      (parser, read) = self.read_request(parser)
 
-        Frame.TooLarge ->
-          reject = self.config.on_reject
-          reject(Status.new(413, "Payload Too Large"))
+      match read
+        Read.Closed ->
+          break
 
-          build = self.config.error_response
-          response = with_connection(
-            build(
-              Status.new(413, "Payload Too Large"),
-              "request exceeds the #{self.config.max_body_bytes} byte limit",
-            ),
-            "close",
-          )
-          _ = write_all(self.client, response.serialize())
-          self.close()
-          return StopReason.Normal
+        Read.Rejected(status, message) ->
+          self.reject(status, message)
+          break
 
-        Frame.Complete(framed) ->
-          (request, leftover) = framed
+        Read.Request(request) ->
           (response, keep) = self.respond(request)
           keep = keep and budget > 1
           response = with_connection(response, keep ? "keep-alive" : "close")
 
-          if write_all(self.client, response.serialize()) and keep
-            buffered = leftover
-            budget = budget - 1
-          else
-            self.close()
-            return StopReason.Normal
+          if not (self.send(response) and keep)
+            break
           end
+
+          budget = budget - 1
       end
     end
 
@@ -94,72 +112,10 @@ struct Worker: Process<Worker, (), ()>
     StopReason.Normal
   end
 
-  # Decodes, parses, and dispatches one framed request. Returns the
-  # response paired with whether the client wants the connection kept
-  # open. Bytes that are not UTF-8 are malformed the same way an
-  # unparseable request is.
-  priv fn respond(self, raw: Binary) -> (Response, Bool)
-    started = Instant.now()
-
-    text =
-      match raw.to_string()
-        Result.Ok(decoded) -> decoded
-        Result.Err(_) -> return self.reject_malformed()
-      end
-
-    match Parser.parse_request(text)
-      Result.Err(_) ->
-        self.reject_malformed()
-
-      Result.Ok(req) ->
-        keep = wants_keep_alive?(req)
-        handler = self.config.handler
-        response = handler(req)
-
-        elapsed = started.elapsed()
-        observe = self.config.on_request
-        observe(req, response, elapsed)
-        (response, keep)
-    end
-  end
-
-  priv fn reject_malformed(self) -> (Response, Bool)
-    reject = self.config.on_reject
-    reject(Status.bad_request())
-
-    build = self.config.error_response
-    (build(Status.bad_request(), "malformed request"), false)
-  end
-
-  # Reads from the client until `buffered` holds one complete HTTP
-  # request (headers plus `Content-Length` bytes of body). Returns
-  # the framed request paired with any bytes that arrived after it
-  # (pipelining). `Incomplete` here means the client closed or the
-  # read failed. Iterative because large bodies span many reads and
-  # must not grow the stack.
-  priv fn read_request(self, buffered: Binary) -> Frame
-    buffer = buffered
-
-    loop
-      match Frame.parse(
-        buffer,
-        self.config.max_header_bytes,
-        self.config.max_body_bytes,
-      )
-        Frame.Complete(framed) ->
-          return Frame.Complete(framed)
-
-        Frame.TooLarge ->
-          return Frame.TooLarge
-
-        Frame.Incomplete ->
-          match self.client.read(Worker.READ_CHUNK)
-            Result.Ok(chunk) when chunk.byte_size() > 0 ->
-              buffer = buffer <> chunk
-            _ -> return Frame.Incomplete
-          end
-      end
-    end
+  priv fn body_too_large(self) -> Read
+    limit = self.config.max_body_bytes
+    message = "request body exceeds the #{limit} byte limit"
+    Read.Rejected(Status.new(413), message)
   end
 
   priv fn close(self)
@@ -167,99 +123,187 @@ struct Worker: Process<Worker, (), ()>
       _ -> ()
     end
   end
-end
 
-@doc """
-The outcome of framing bytes into one HTTP request. Either a
-complete request paired with any pipelined leftover, not enough
-bytes yet, or a request over the size caps. The request stays as
-bytes until the worker decodes it, so a body that is not UTF-8
-reaches the worker instead of failing a read.
-"""
-enum Frame
-  Complete((Binary, Binary))
-  Incomplete
-  TooLarge
-
-  @doc """
-  Split `buffer` into one complete request and the leftover bytes.
-  `Incomplete` asks the caller to read more, `TooLarge` means the
-  headers overran `max_header_bytes` or the declared body overran
-  `max_body_bytes`. Content-Length is a byte count, so framing works
-  on bytes and the split lands exactly where the body ends.
-  """
-  fn parse(buffer: Binary, max_header_bytes: Int, max_body_bytes: Int) -> Frame
-    header_end =
-      match buffer.find(<<13, 10, 13, 10>>, 0)
-        Option.Some(index) ->
-          index
-
-        Option.None ->
-          # Headers still incomplete. A buffer already past the header
-          # cap can never complete them.
-          return buffer.byte_size() > max_header_bytes
-            ? Frame.TooLarge
-            : Frame.Incomplete
-      end
-
-    length = content_length(buffer.slice(Range{start: 0, stop: header_end - 1}))
-
-    if header_end > max_header_bytes or length > max_body_bytes
-      return Frame.TooLarge
-    end
-
-    total = header_end + 4 + length
-    size = buffer.byte_size()
-
-    if size < total
-      return Frame.Incomplete
-    end
-
-    if size == total
-      return Frame.Complete((buffer, <<>>))
-    end
-
-    request = buffer.slice(Range{start: 0, stop: total - 1})
-    leftover = buffer.slice(Range{start: total, stop: size - 1})
-    Frame.Complete((request, leftover))
+  # The time by which a request that starts now must be complete.
+  priv fn read_deadline(self) -> Instant
+    Instant.now().plus(self.config.read_timeout)
   end
-end
 
-# Reads the Content-Length header out of the header bytes. Headers
-# that do not decode, or carry no usable value, count as zero, and
-# the decode in `respond` then reports the request as malformed.
-priv fn content_length(header_bytes: Binary) -> Int
-  header_text =
-    match header_bytes.to_string()
-      Result.Ok(text) -> text
-      Result.Err(_) -> return 0
+  # Reads one request from the client through `parser` and joins its
+  # body. Returns the parser, which keeps the bytes that came after
+  # the request, and what the read gave. The worker holds the body, so
+  # it enforces `max_body_bytes`. A declared length over the cap is
+  # rejected before a body byte is read, and a body with no declared
+  # length is counted as its pieces arrive. Iterative because a large
+  # body spans many reads and must not grow the stack.
+  #
+  # A request starts at its first byte. Before that byte the worker
+  # waits for `idle_timeout` and then closes. After it, the request
+  # has `read_timeout` to arrive, and a request that takes longer is
+  # rejected. Bytes that an earlier read left in the parser start the
+  # request at once.
+  priv fn read_request(self, parser: Request.Parser) -> (Request.Parser, Read)
+    body: Binary = <<>>
+    deadline: Option<Instant> = Option.None
+    limit = self.config.max_body_bytes
+    request: Option<Request> = Option.None
+
+    if parser.rest().byte_size() > 0
+      deadline = Option.Some(self.read_deadline())
     end
 
-  lines = header_text.split("\r\n")
-  found = lines.filter(line -> line.downcase().starts_with?("content-length:"))
+    loop
+      event =
+        match parser.next()
+          Result.Ok((advanced, found)) ->
+            parser = advanced
+            found
 
-  match found.get(0)
-    Option.None ->
-      0
+          Result.Err(cause) ->
+            return (parser, self.rejection(cause))
+        end
 
-    Option.Some(line) ->
-      match line.split(":").get(1)
+      match event
+        Option.Some(Request.Parser.Event.Request(head)) ->
+          if head.headers.content_length().or(0) > limit
+            return (parser, self.body_too_large())
+          end
+
+          request = Option.Some(head)
+
+        Option.Some(Request.Parser.Event.Data(piece)) ->
+          if body.byte_size() + piece.byte_size() > limit
+            return (parser, self.body_too_large())
+          end
+
+          body = body <> piece
+
+        Option.Some(Request.Parser.Event.End) ->
+          break
+
         Option.None ->
-          0
+          wait =
+            match deadline
+              Option.Some(end_time) ->
+                now = Instant.now()
 
-        Option.Some(value) ->
-          match value.trim().to_int()
-            Result.Ok(n) -> n
-            Result.Err(_) -> 0
+                if now.nanoseconds >= end_time.nanoseconds
+                  return (parser, Worker.timed_out())
+                end
+
+                end_time.since(now)
+
+              Option.None ->
+                self.config.idle_timeout
+            end
+
+          match self.client.read(
+            Worker.READ_CHUNK,
+            ReaderOptions{timeout: Option.Some(wait)},
+          )
+            Result.Ok(chunk) when chunk.byte_size() > 0 ->
+              if deadline.none?()
+                deadline = Option.Some(self.read_deadline())
+              end
+
+              parser = parser.feed(chunk)
+
+            Result.Err(cause: IOError) when cause == IOError.TimedOut ->
+              # A wait for the first byte that ran out is a quiet close.
+              answer = deadline.some?() ? Worker.timed_out() : Read.Closed
+              return (parser, answer)
+
+            _ ->
+              return (parser, Read.Closed)
           end
       end
+    end
+
+    # The parser returns `End` only after a `Request`.
+    complete = request.unwrap()
+    complete.body = body
+    (parser, Read.Request(complete))
   end
+
+  # Answers a request that the worker rejects, and tells `on_reject`.
+  # The caller closes the connection after it.
+  priv fn reject(self, status: Status, message: String)
+    observe = self.config.on_reject
+    observe(status)
+
+    build = self.config.error_response
+    _ = self.send(with_connection(build(status, message), "close"))
+  end
+
+  # The answer for a request that the parser rejected. The text of a
+  # `Malformed` cause stays out of the response.
+  priv fn rejection(self, cause: Parser.Error) -> Read
+    match cause
+      Parser.Error.HeadersTooLarge ->
+        limit = self.config.max_header_bytes
+        message = "request head exceeds the #{limit} byte limit"
+        Read.Rejected(Status.new(431), message)
+
+      Parser.Error.Malformed(_) ->
+        Read.Rejected(Status.bad_request(), "malformed request")
+
+      Parser.Error.UnsupportedMethod(_) ->
+        Read.Rejected(Status.new(501), "unsupported method")
+    end
+  end
+
+  # Runs the handler for one request and tells `on_request`. Returns
+  # the response to send paired with whether the client wants the
+  # connection kept open. `on_request` gets the response as the
+  # handler built it. The response to a `HEAD` request goes out with
+  # no body.
+  priv fn respond(self, request: Request) -> (Response, Bool)
+    started = Instant.now()
+    handler = self.config.handler
+    response = handler(request)
+
+    observe = self.config.on_request
+    observe(request, response, started.elapsed())
+
+    if request.method == Method.Head
+      response = without_body(response)
+    end
+
+    (response, wants_keep_alive?(request))
+  end
+
+  # Writes the whole response. Each write has `write_timeout` to make
+  # progress. Returns false when a write failed or timed out, which
+  # means the client is gone or does not read.
+  priv fn send(self, response: Response) -> Bool
+    options = WriterOptions{timeout: Option.Some(self.config.write_timeout)}
+
+    match self.client.write_all(response.serialize(), options)
+      Result.Ok(_) -> true
+      Result.Err(_) -> false
+    end
+  end
+
+  # The answer for a request that took longer than `read_timeout`.
+  priv fn timed_out -> Read
+    Read.Rejected(Status.new(408), "request timed out")
+  end
+end
+
+# What one read of a request gave. `Closed` means the client closed
+# the connection or a read failed. `Rejected` carries the status and
+# the message of the answer for a request that the worker refuses.
+# `Request` carries a complete request with its body joined.
+priv enum Read
+  Closed
+  Rejected(Status, String)
+  Request(Request)
 end
 
 # HTTP/1.1 defaults to keep-alive and HTTP/1.0 to close, but an
 # explicit Connection header overrides either.
 priv fn wants_keep_alive?(req: Request) -> Bool
-  fallback = req.version == "HTTP/1.1"
+  fallback = req.version == Version.HTTP1_1
 
   match req.headers.get("Connection")
     Option.None ->
@@ -281,25 +325,17 @@ priv fn with_connection(response: Response, value: String) -> Response
   response
 end
 
-# Writes the whole response, looping on partial writes. One
-# `TCPSocket.write` call is a single write(2), which sends only part
-# of a large response once the socket buffer fills. Returns false
-# when the client is gone.
-priv fn write_all(client: TCPSocket, data: String) -> Bool
-  bytes = data.to_binary()
-  total = bytes.byte_size()
-  sent = 0
-
-  while sent < total
-    chunk = bytes.slice(Range{start: sent, stop: total - 1})
-    written = client.write(chunk) rescue _ -> -1
-
-    if written <= 0
-      return false
-    end
-
-    sent = sent + written
+# Returns the response to a `HEAD` request. It keeps the
+# `Content-Length` that the handler set, or gets the size of the body
+# when the handler set none, and it carries no body.
+priv fn without_body(response: Response) -> Response
+  if not response.headers.has?("Content-Length")
+    response.headers = response.headers.set(
+      "Content-Length",
+      "#{response.body.byte_size()}",
+    )
   end
 
-  true
+  response.body = <<>>
+  response
 end

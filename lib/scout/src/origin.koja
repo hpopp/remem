@@ -1,0 +1,51 @@
+@doc """
+The server that a request goes to, which is a scheme, a host, and a
+port. The client keeps one set of connections for each origin.
+"""
+struct Origin
+  host: String
+  port: Int
+  scheme: String
+
+  @doc """
+  Returns the origin of `uri`. Fails with `Error.InvalidUrl` when the
+  URI has no scheme or no host, or when the scheme is not `http` or
+  `https`. A URI with no port gets the default port of its scheme.
+  """
+  fn from_uri(uri: URI) -> Origin ! Error
+    scheme = try uri.scheme.or_err(
+      Error.InvalidUrl("URL must be absolute and use http or https: #{uri}"),
+    )
+
+    if scheme != "http" and scheme != "https"
+      fail Error.InvalidUrl("unsupported URL scheme '#{scheme}': #{uri}")
+    end
+
+    host =
+      match uri.host
+        Option.Some(name) when not name.empty?() -> name.downcase()
+        _ -> fail Error.InvalidUrl("missing host in URL: #{uri}")
+      end
+
+    Origin{
+      host: host,
+      port: uri.port.or(scheme == "https" ? 443 : 80),
+      scheme: scheme,
+    }
+  end
+
+  @doc """
+  Returns the origin as text, like `https://example.com:443`. Two
+  origins are the same when their keys are equal.
+  """
+  fn key(self) -> String
+    "#{self.scheme}://#{self.host}:#{self.port}"
+  end
+
+  @doc """
+  Returns `true` when a connection to the origin uses TLS.
+  """
+  fn secure?(self) -> Bool
+    self.scheme == "https"
+  end
+end

@@ -1,0 +1,7 @@
+version = 1
+
+[[package]]
+name = "pooler"
+requirement = "tag = v0.1.0"
+rev = "1a3d0ba5761e9f4eb164e2f9852f7004b3e42e53"
+source = "git+https://github.com/koja-lang/pooler"

@@ -18,13 +18,13 @@ test "two requests from two processes use one TLS connection"
   certificate = try test_certificate()
   server_config = TLSConfig.server(certificate, try test_key())
   script = [[answer("one"), answer("two")]]
-  (listener, server) = try start_tls_server(43320, script, server_config)
+  (listener, server) = try start_tls_server(23320, script, server_config)
   config = Config{tls: TLSConfig.client().with_ca(certificate)}
   client = try require(Client.start(config))
-  first = client.get("https://localhost:43320/a")
+  first = client.get("https://localhost:23320/a")
 
   other = Task.async(fn () -> Result<Response, Error>
-    client.post("https://localhost:43320/b", "", Headers.new())
+    client.post("https://localhost:23320/b", "", Headers.new())
   end)
 
   second = try require(Task.await(other))
@@ -41,13 +41,13 @@ test "stop closes an idle TLS connection"
   certificate = try test_certificate()
   server_config = TLSConfig.server(certificate, try test_key())
   (listener, server) = try start_tls_server(
-    43321,
+    23321,
     [[answer("one")]],
     server_config,
   )
   config = Config{tls: TLSConfig.client().with_ca(certificate)}
   client = try require(Client.start(config))
-  result = client.get("https://localhost:43321/")
+  result = client.get("https://localhost:23321/")
   _ = try finish_server(listener, server)
 
   # The pool process closes the session that the caller opened.
@@ -60,12 +60,12 @@ test "a certificate that the client does not trust fails with a TLSError"
   certificate = try test_certificate()
   server_config = TLSConfig.server(certificate, try test_key())
   (listener, server) = try start_tls_server(
-    43322,
+    23322,
     [[answer("one")]],
     server_config,
   )
   client = try require(Client.start())
-  result = client.get("https://localhost:43322/")
+  result = client.get("https://localhost:23322/")
 
   # The handshake fails on the server too, so its script does not
   # finish.

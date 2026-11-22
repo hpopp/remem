@@ -6,9 +6,9 @@ alias HTTP.Status
 alias Test.require
 
 test "get sends a request and reads the response"
-  (listener, server) = try start_server(43301, [[answer("hello")]])
+  (listener, server) = try start_server(23301, [[answer("hello")]])
   client = try require(Client.start())
-  result = client.get("http://127.0.0.1:43301/users/7?a=1")
+  result = client.get("http://127.0.0.1:23301/users/7?a=1")
   seen = try finish_server(listener, server)
   try require(client.stop())
   response = try require(result)
@@ -23,16 +23,16 @@ test "get sends a request and reads the response"
   assert request.uri.path == "/users/7"
   assert request.uri.query == Option.Some("a=1")
   assert request.uri.host == Option.Some("127.0.0.1")
-  assert request.uri.port == Option.Some(43301)
+  assert request.uri.port == Option.Some(23301)
   assert request.headers.get("Connection") == Option.None
 end
 
 test "post sends a binary body with its headers"
-  (listener, server) = try start_server(43302, [[answer("made")]])
+  (listener, server) = try start_server(23302, [[answer("made")]])
   client = try require(Client.start())
   sent = <<0, 255, 1, 2>>
   headers = Headers.new().set("X-Test", "yes")
-  result = client.post("http://127.0.0.1:43302/items", sent, headers)
+  result = client.post("http://127.0.0.1:23302/items", sent, headers)
   seen = try finish_server(listener, server)
   try require(client.stop())
   response = try require(result)
@@ -48,9 +48,9 @@ test "post sends a binary body with its headers"
 end
 
 test "send takes a request that the caller built"
-  (listener, server) = try start_server(43303, [[answer("sent")]])
+  (listener, server) = try start_server(23303, [[answer("sent")]])
   client = try require(Client.start())
-  uri = try require(URI.parse("http://127.0.0.1:43303/built"))
+  uri = try require(URI.parse("http://127.0.0.1:23303/built"))
   request = Request{
     body: "ping".to_binary(),
     headers: Headers.new(),
@@ -69,10 +69,10 @@ end
 
 test "two requests to one origin use one connection"
   script = [[answer("one"), answer("two")]]
-  (listener, server) = try start_server(43304, script)
+  (listener, server) = try start_server(23304, script)
   client = try require(Client.start())
-  first = client.get("http://127.0.0.1:43304/a")
-  second = client.post("http://127.0.0.1:43304/b", "", Headers.new())
+  first = client.get("http://127.0.0.1:23304/a")
+  second = client.post("http://127.0.0.1:23304/b", "", Headers.new())
   seen = try finish_server(listener, server)
   try require(client.stop())
 
@@ -83,12 +83,12 @@ end
 
 test "a request from another process uses the same connection"
   script = [[answer("one"), answer("two")]]
-  (listener, server) = try start_server(43305, script)
+  (listener, server) = try start_server(23305, script)
   client = try require(Client.start())
-  first = client.get("http://127.0.0.1:43305/a")
+  first = client.get("http://127.0.0.1:23305/a")
 
   other = Task.async(fn () -> Result<Response, Error>
-    client.get("http://127.0.0.1:43305/b")
+    client.get("http://127.0.0.1:23305/b")
   end)
 
   second = try require(Task.await(other))
@@ -105,10 +105,10 @@ end
 
 test "a response with Connection: close ends the connection"
   script = [[closing_answer("one")], [answer("two")]]
-  (listener, server) = try start_server(43306, script)
+  (listener, server) = try start_server(23306, script)
   client = try require(Client.start())
-  first = client.get("http://127.0.0.1:43306/")
-  second = client.post("http://127.0.0.1:43306/", "", Headers.new())
+  first = client.get("http://127.0.0.1:23306/")
+  second = client.post("http://127.0.0.1:23306/", "", Headers.new())
   _ = try finish_server(listener, server)
   try require(client.stop())
 
@@ -118,11 +118,11 @@ end
 
 test "a request with Connection: close ends the connection"
   script = [[answer("one")], [answer("two")]]
-  (listener, server) = try start_server(43307, script)
+  (listener, server) = try start_server(23307, script)
   client = try require(Client.start())
   headers = Headers.new().set("Connection", "close")
-  first = client.post("http://127.0.0.1:43307/", "", headers)
-  second = client.post("http://127.0.0.1:43307/", "", Headers.new())
+  first = client.post("http://127.0.0.1:23307/", "", headers)
+  second = client.post("http://127.0.0.1:23307/", "", Headers.new())
   _ = try finish_server(listener, server)
   try require(client.stop())
 
@@ -132,10 +132,10 @@ end
 
 test "a body with no length ends the connection"
   streamed = Answer{bytes: "HTTP/1.1 200 OK\r\n\r\none".to_binary()}
-  (listener, server) = try start_server(43308, [[streamed], [answer("two")]])
+  (listener, server) = try start_server(23308, [[streamed], [answer("two")]])
   client = try require(Client.start())
-  first = client.get("http://127.0.0.1:43308/")
-  second = client.post("http://127.0.0.1:43308/", "", Headers.new())
+  first = client.get("http://127.0.0.1:23308/")
+  second = client.post("http://127.0.0.1:23308/", "", Headers.new())
   _ = try finish_server(listener, server)
   try require(client.stop())
 
@@ -145,12 +145,12 @@ end
 
 test "a connection that stays idle past idle_timeout is not used again"
   script = [[answer("one")], [answer("two")]]
-  (listener, server) = try start_server(43309, script)
+  (listener, server) = try start_server(23309, script)
   config = Config{idle_timeout: Duration.new(50, Duration.Unit.Milliseconds)}
   client = try require(Client.start(config))
-  first = client.get("http://127.0.0.1:43309/")
+  first = client.get("http://127.0.0.1:23309/")
   pause(150)
-  second = client.post("http://127.0.0.1:43309/", "", Headers.new())
+  second = client.post("http://127.0.0.1:23309/", "", Headers.new())
   _ = try finish_server(listener, server)
   try require(client.stop())
 
@@ -160,12 +160,12 @@ end
 
 test "a GET on a connection that the server closed is sent again"
   script = [[answer("one")], [answer("two")]]
-  (listener, server) = try start_server(43310, script)
+  (listener, server) = try start_server(23310, script)
   client = try require(Client.start())
-  first = client.get("http://127.0.0.1:43310/")
+  first = client.get("http://127.0.0.1:23310/")
   # The server closes the connection after its answer.
   pause(100)
-  second = client.get("http://127.0.0.1:43310/")
+  second = client.get("http://127.0.0.1:23310/")
   seen = try finish_server(listener, server)
   try require(client.stop())
 
@@ -175,11 +175,11 @@ test "a GET on a connection that the server closed is sent again"
 end
 
 test "a POST on a connection that the server closed fails and is not sent again"
-  (listener, server) = try start_server(43311, [[answer("one")]])
+  (listener, server) = try start_server(23311, [[answer("one")]])
   client = try require(Client.start())
-  first = client.get("http://127.0.0.1:43311/")
+  first = client.get("http://127.0.0.1:23311/")
   seen = try finish_server(listener, server)
-  second = client.post("http://127.0.0.1:43311/", "data", Headers.new())
+  second = client.post("http://127.0.0.1:23311/", "data", Headers.new())
   try require(client.stop())
 
   assert (try require(first)).text() == Result.Ok("one")
@@ -196,7 +196,7 @@ end
 
 test "a request fails with PoolTimeout when every connection stays busy"
   slow = Answer{bytes: answer("slow").bytes, delay_ms: 400}
-  (listener, server) = try start_server(43312, [[slow]])
+  (listener, server) = try start_server(23312, [[slow]])
   config = Config{
     pool_size: 1,
     pool_timeout: Duration.new(100, Duration.Unit.Milliseconds),
@@ -204,12 +204,12 @@ test "a request fails with PoolTimeout when every connection stays busy"
   client = try require(Client.start(config))
 
   busy = Task.async(fn () -> Result<Response, Error>
-    client.get("http://127.0.0.1:43312/slow")
+    client.get("http://127.0.0.1:23312/slow")
   end)
 
   # Let the other process take the one connection.
   pause(100)
-  blocked = client.get("http://127.0.0.1:43312/blocked")
+  blocked = client.get("http://127.0.0.1:23312/blocked")
   first = try require(Task.await(busy))
   seen = try finish_server(listener, server)
   try require(client.stop())
@@ -221,11 +221,11 @@ end
 
 test "a request fails with Timeout, and the next request gets a new connection"
   slow = Answer{bytes: answer("slow").bytes, delay_ms: 400}
-  (listener, server) = try start_server(43313, [[slow], [answer("next")]])
+  (listener, server) = try start_server(23313, [[slow], [answer("next")]])
   client = try require(Client.start(Config{pool_size: 1}))
   limit = Option.Some(Duration.new(100, Duration.Unit.Milliseconds))
-  late = client.get("http://127.0.0.1:43313/", limit)
-  next = client.post("http://127.0.0.1:43313/", "", Headers.new())
+  late = client.get("http://127.0.0.1:23313/", limit)
+  next = client.post("http://127.0.0.1:23313/", "", Headers.new())
   _ = try finish_server(listener, server)
   try require(client.stop())
 
@@ -235,7 +235,7 @@ end
 
 test "a refused connect fails with the Socket.Error"
   client = try require(Client.start())
-  result = client.get("http://127.0.0.1:43314/")
+  result = client.get("http://127.0.0.1:23314/")
   try require(client.stop())
 
   # Which `Socket.Error` a refused connect gives is for the standard
@@ -273,9 +273,9 @@ test "a URL that cannot be requested fails before networking"
 end
 
 test "a declared body past max_body_bytes fails with BodyTooLarge"
-  (listener, server) = try start_server(43315, [[answer("hello")]])
+  (listener, server) = try start_server(23315, [[answer("hello")]])
   client = try require(Client.start(Config{max_body_bytes: 4}))
-  result = client.get("http://127.0.0.1:43315/")
+  result = client.get("http://127.0.0.1:23315/")
   _ = try finish_server(listener, server)
   try require(client.stop())
 
@@ -286,9 +286,9 @@ test "a chunked body past max_body_bytes fails with BodyTooLarge"
   chunked = Answer{
     bytes: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n".to_binary(),
   }
-  (listener, server) = try start_server(43316, [[chunked]])
+  (listener, server) = try start_server(23316, [[chunked]])
   client = try require(Client.start(Config{max_body_bytes: 4}))
-  result = client.get("http://127.0.0.1:43316/")
+  result = client.get("http://127.0.0.1:23316/")
   _ = try finish_server(listener, server)
   try require(client.stop())
 
@@ -297,14 +297,14 @@ end
 
 test "one client keeps connections to two origins"
   (left_listener, left) = try start_server(
-    43317,
+    23317,
     [[answer("left"), answer("left again")]],
   )
-  (right_listener, right) = try start_server(43318, [[answer("right")]])
+  (right_listener, right) = try start_server(23318, [[answer("right")]])
   client = try require(Client.start())
-  first = client.get("http://127.0.0.1:43317/")
-  second = client.get("http://127.0.0.1:43318/")
-  third = client.post("http://127.0.0.1:43317/", "", Headers.new())
+  first = client.get("http://127.0.0.1:23317/")
+  second = client.get("http://127.0.0.1:23318/")
+  third = client.post("http://127.0.0.1:23317/", "", Headers.new())
   _ = try finish_server(left_listener, left)
   _ = try finish_server(right_listener, right)
   try require(client.stop())
@@ -318,7 +318,7 @@ test "a request after stop fails with Stopped"
   client = try require(Client.start())
   try require(client.stop())
 
-  try expect_error(client.get("http://127.0.0.1:43319/"), Error.Stopped)
+  try expect_error(client.get("http://127.0.0.1:23319/"), Error.Stopped)
   # A second stop returns at once.
   try require(client.stop())
 end

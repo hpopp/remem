@@ -3,7 +3,7 @@ entry = "App"
 experimental = true
 koja = "0.21"
 name = "remem"
-version = "0.7.2"
+version = "0.8.0"
 
 [dependencies]
 open_telemetry = { path = "lib/open_telemetry" }
